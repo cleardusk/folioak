@@ -4,7 +4,7 @@
 
 ## 安装
 
-从私有仓库的 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases) 下载 `macos-arm64.dmg`，打开后将应用拖入 Applications。支持 Apple Silicon，最低 macOS 13；需要登录有仓库访问权限的 GitHub 账号。也可下载 ZIP 解压安装。当前未做 Apple 公证，首次打开可能需要在系统「隐私与安全性」中允许打开。
+从私有仓库的 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases) 下载 DMG 安装包，打开后将应用拖入 Applications。支持 Apple Silicon，最低 macOS 13；需要登录有仓库访问权限的 GitHub 账号。也可下载 ZIP 解压安装。当前未做 Apple 公证，首次打开可能需要在系统「隐私与安全性」中允许打开。
 
 ## 使用
 

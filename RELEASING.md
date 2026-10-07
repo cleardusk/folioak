@@ -4,7 +4,7 @@
 
 ## 在其他 Mac 使用
 
-登录 GitHub，打开 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases)，下载最新的 `macos-arm64.dmg`，打开后将应用拖入 Applications。也可下载 ZIP，解压后拖入 Applications。支持 Apple Silicon（M 系列芯片），最低 macOS 13；首次启动后选择当前电脑的保存目录。无需安装开发工具。
+登录 GitHub，打开 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases)，下载最新的 DMG 安装包，打开后将应用拖入 Applications。也可下载 ZIP，解压后拖入 Applications。支持 Apple Silicon（M 系列芯片），最低 macOS 13；首次启动后选择当前电脑的保存目录。无需安装开发工具。
 
 当前为 ad-hoc 签名，开启 Hardened Runtime，但没有 Apple Developer ID 或公证。macOS 首次打开可能拦截；确认来源后在「系统设置 → 隐私与安全性」允许打开。后续若需顺畅分发，应单独配置 Developer ID 与公证凭据；DMG 不替代签名、公证。
 

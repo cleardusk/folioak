@@ -19,7 +19,7 @@ if [[ -f Resources/AppIcon.icns ]]; then
 fi
 codesign --force --options runtime --timestamp=none --sign - "$staged_app"
 codesign --verify --deep --strict "$staged_app"
-xcrun lipo -verify_arch arm64 "$staged_app/Contents/MacOS/ArxivDownloader"
+xcrun lipo "$staged_app/Contents/MacOS/ArxivDownloader" -verify_arch arm64
 rm -rf "$app_dir"
 mv "$staged_app" "$app_dir"
 print "已构建：$app_dir"
