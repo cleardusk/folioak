@@ -137,7 +137,11 @@ struct PaperMetadata: Sendable {
         for character in [":", "/", "\\", "?", "*", "\"", "<", ">", "|"] {
             result = result.replacingOccurrences(of: character, with: "-")
         }
-        result = String(result.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined())
+        // Joiners are needed for compound emoji and some writing systems.
+        // Other control characters, including bidi overrides and NUL, are removed.
+        result = String(result.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) && $0.value != 0x200C && $0.value != 0x200D ? " " : String($0)
+        }.joined())
         result = result.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         result = result.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
         return result.isEmpty ? "Untitled" : result

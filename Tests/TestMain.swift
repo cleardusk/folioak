@@ -92,10 +92,12 @@ struct CoreTests {
             try metadataTests()
             try securityTests(root: root)
             try storageTests(root: root, pdf: pdf)
+            try filenameStorageTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)
             try await queueTests(root: root, pdf: pdf)
             try themeTests()
             try inputLayoutTests()
+            try windowChromeTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
             if CommandLine.arguments.contains("--stress") { try await resourceTests(root: root, pdf: pdf) }
             if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
@@ -244,6 +246,49 @@ struct CoreTests {
         try rejects({ _ = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: root.appendingPathComponent("missing")) }, "missing folder accepted")
         let files = try FileManager.default.contentsOfDirectory(atPath: output.path)
         try expect(files.count == 4 && !files.contains(where: { $0.hasSuffix(".partial") }), "staged file cleanup")
+    }
+
+    static func filenameStorageTests(root: URL, pdf: URL) throws {
+        let output = root.appendingPathComponent("filename-boundaries", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let ref = try ArxivReference.parse("2501.12345v2")
+        let titles = [
+            "../A/B:C\\D?E*F\"G<H>I|J", "\0\n\t\r", "...   ",
+            "  中文标题：保留标点与 α / β  ", "Cafe\u{301}", "Café",
+            "研究 👩‍💻 👨‍👩‍👧‍👦 🏳️‍🌈", "safe\u{202E}fdp\u{2066}name\u{2069}",
+            String(repeating: "中文é🙂", count: 300),
+            String(repeating: "e\u{301}", count: 500),
+            "a" + String(repeating: "\u{301}", count: 500),
+            String(repeating: "👨‍👩‍👧‍👦", count: 100),
+            "trailing...   ", "100% # & + [paper].pdf", "a\u{200C}b"
+        ]
+        try expect(PaperMetadata.cleanTitle("\0 . \n\t") == "Untitled", "empty sanitized title fallback")
+        try expect(PaperMetadata.cleanTitle("Cafe\u{301}") == "Café", "canonical Unicode normalization")
+        try expect(PaperMetadata.cleanTitle("研究 👩‍💻 👨‍👩‍👧‍👦 🏳️‍🌈") == "研究 👩‍💻 👨‍👩‍👧‍👦 🏳️‍🌈", "compound emoji preserved")
+        for title in titles {
+            let metadata = PaperMetadata(reference: ref, title: title, year: 2025, month: 1)
+            for style in NamingStyle.allCases {
+                for suffix in ["", "[2501.12345v2-999]"] {
+                    let filename = metadata.filename(style: style, suffix: suffix)
+                    try expect(filename.utf8.count <= 250 && filename.hasSuffix(".pdf"), "bounded filename keeps PDF extension")
+                    try expect(!filename.contains("/") && !filename.contains("\\") && !filename.contains("\0") && !filename.contains("\u{202E}"), "unsafe filename characters removed")
+                }
+                let saved = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: output, naming: style)
+                try expect(saved.url.deletingLastPathComponent().standardizedFileURL == output.standardizedFileURL, "filename cannot escape selected folder")
+                try expect(try PaperStorage.validatePDF(at: saved.url) == 1, "Unicode filename actually saves a readable PDF")
+            }
+        }
+        let denied = root.appendingPathComponent("read-only", isDirectory: true)
+        try FileManager.default.createDirectory(at: denied, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: denied.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: denied.path) }
+        if !FileManager.default.isWritableFile(atPath: denied.path) {
+            let metadata = PaperMetadata(reference: ref, title: "Denied", year: 2025, month: 1)
+            try rejects({ _ = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: denied) }, "read-only destination must fail safely")
+            try expect(try FileManager.default.contentsOfDirectory(atPath: denied.path).isEmpty, "failed save leaves no partial file")
+        }
+        try expect(try FileManager.default.contentsOfDirectory(atPath: output.path).allSatisfy { !$0.hasSuffix(".partial") }, "boundary saves leave no partial files")
+        print("PASS filename storage: actual saves in 3 naming styles, punctuation, controls, Unicode, compound emoji, length and permissions")
     }
 
     static func networkTests(root: URL, pdf: URL) async throws {
@@ -481,6 +526,54 @@ struct CoreTests {
         print("PASS native input: placeholder/typed baseline, document bounds, multiline binding, paste limit and busy state")
     }
 
+    @MainActor static func windowChromeTests() throws {
+        let suite = "arxiv-window-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        var chrome: WindowChrome? = WindowChrome(window: window, model: model, title: "arXiv 下载器", settingsAction: {})
+        weak var released: WindowChrome?
+        released = chrome
+        let content = NSHostingView(rootView: DownloaderView(model: model))
+        window.contentView = content
+        defer { window.orderOut(nil) }
+        for width in [584, 680] {
+            window.setContentSize(NSSize(width: width, height: 570))
+            window.contentView?.superview?.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            window.contentView?.superview?.layoutSubtreeIfNeeded()
+            guard let close = window.standardWindowButton(.closeButton),
+                  let title = window.toolbar?.items.compactMap(\.view).first(where: { $0 is NSTextField }),
+                  let settings = window.toolbar?.items.compactMap(\.view).first(where: { $0 is NSButton }) else {
+                throw TestFailure.failed("native window controls or toolbar content missing")
+            }
+            let closeRect = close.convert(close.bounds, to: nil)
+            let titleRect = title.convert(title.bounds, to: nil)
+            let settingsRect = settings.convert(settings.bounds, to: nil)
+            try expect(abs(closeRect.midY - titleRect.midY) <= 4 && abs(closeRect.midY - settingsRect.midY) <= 4, "window header controls aligned")
+            try expect(closeRect.maxX < titleRect.minX && titleRect.maxX < settingsRect.minX, "header items do not overlap at minimum width")
+            try expect(window.styleMask.contains(.titled) && window.styleMask.contains(.fullSizeContentView), "native window behavior retained")
+            try expect(window.titleVisibility == .hidden && window.titlebarAppearsTransparent, "system title and separate background removed")
+        }
+        for theme in AppTheme.allCases {
+            model.theme = theme
+            for dark in [false, true] {
+                let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
+                window.appearance = appearance
+                var components: [CGFloat] = []
+                appearance.performAsCurrentDrawingAppearance {
+                    if let color = window.backgroundColor.usingColorSpace(.sRGB) { components = [color.redComponent, color.greenComponent, color.blueComponent] }
+                }
+                let expected = ThemePalette.nativeColor(theme.palette(dark: dark).canvas)
+                try expect(components.count == 3 && abs(components[0] - expected.redComponent) < 0.001 && abs(components[1] - expected.greenComponent) < 0.001 && abs(components[2] - expected.blueComponent) < 0.001, "window background follows theme and appearance")
+            }
+        }
+        chrome = nil
+        try expect(released == nil, "theme observation must not retain window chrome")
+        print("PASS window chrome: minimum width, header alignment, 12 theme backgrounds and released observer")
+    }
+
     @MainActor static func renderSnapshots() throws {
         let suiteName = "arxiv-ui-test-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suiteName)!
@@ -489,20 +582,25 @@ struct CoreTests {
         app.setActivationPolicy(.prohibited)
         let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/qa")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        func capture<V: View>(_ content: V, width: Int, height: Int? = nil, name: String) throws {
+        func capture<V: View>(_ content: V, width: Int, height: Int? = nil, name: String, title: String = "arXiv 下载器") throws {
             let view = NSHostingView(rootView: content.environment(\.controlActiveState, .key))
             let size = NSSize(width: CGFloat(width), height: height.map { CGFloat($0) } ?? view.fittingSize.height)
-            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            let chrome = WindowChrome(window: window, model: model, title: title, settingsAction: title == "设置" ? nil : {})
+            let headerHeight = window.frame.height - window.contentLayoutRect.height
+            window.setContentSize(NSSize(width: size.width, height: size.height + (height == nil ? headerHeight : 0)))
             window.contentView = view
-            view.layoutSubtreeIfNeeded()
+            let rendered = view.superview ?? view
+            rendered.layoutSubtreeIfNeeded()
             RunLoop.current.run(until: Date().addingTimeInterval(0.08))
-            view.layoutSubtreeIfNeeded()
+            rendered.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("UI bitmap creation") }
-            view.cacheDisplay(in: view.bounds, to: bitmap)
+            guard let bitmap = rendered.bitmapImageRepForCachingDisplay(in: rendered.bounds) else { throw TestFailure.failed("UI bitmap creation") }
+            rendered.cacheDisplay(in: rendered.bounds, to: bitmap)
             guard let data = bitmap.representation(using: .png, properties: [:]) else { throw TestFailure.failed("UI PNG encoding") }
             try data.write(to: output.appendingPathComponent(name + ".png"))
             window.orderOut(nil)
+            withExtendedLifetime(chrome) {}
         }
         let model = DownloadModel(preferences: preferences)
         let input = "https://arxiv.org/abs/2609.22978\nhttps://arxiv.org/pdf/1706.03762v1"
@@ -516,7 +614,7 @@ struct CoreTests {
             for scheme in [ColorScheme.light, .dark] {
                 let suffix = "\(theme.rawValue)-\(scheme == .light ? "light" : "dark")"
                 app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
-                for width in [560, 680] {
+                for width in [584, 680] {
                     model.input = input
                     model.items = completedItems
                     try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "\(suffix)-\(width)")
@@ -533,7 +631,7 @@ struct CoreTests {
                             DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"), state: .queued)
                         ]
                         try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "busy-\(suffix)-\(width)")
-                        if theme == .midnight && scheme == .dark && width == 560 {
+                        if theme == .midnight && scheme == .dark && width == 584 {
                             model.cancelling = true
                             try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "cancelling-\(suffix)-\(width)")
                             model.cancelling = false
@@ -541,7 +639,7 @@ struct CoreTests {
                         model.busy = false
                     }
                 }
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)")
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)", title: "设置")
             }
         }
         model.theme = .midnight
@@ -551,10 +649,10 @@ struct CoreTests {
             app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
             for naming in NamingStyle.allCases {
                 model.naming = naming
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-long-\(naming.rawValue)-\(scheme == .light ? "light" : "dark")")
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-long-\(naming.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
             }
             model.busy = true
-            try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-busy-\(scheme == .light ? "light" : "dark")")
+            try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-busy-\(scheme == .light ? "light" : "dark")", title: "设置")
             model.busy = false
         }
         model.directory = directory

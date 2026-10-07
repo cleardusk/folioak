@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 // Use the property wrapper; the latest SDK also exports a State macro that the
 // standalone Command Line Tools compiler cannot load.
@@ -502,7 +503,6 @@ final class LinkScrollView: NSScrollView {
 
 struct DownloaderView: View {
     @ObservedObject var model: DownloadModel
-    var showSettings: () -> Void = {}
     @ViewState private var inputFocused = false
     @Environment(\.colorScheme) private var scheme
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
@@ -517,9 +517,6 @@ struct DownloaderView: View {
                         .buttonStyle(.borderless).controlSize(.small).disabled(model.busy)
                         .help("追加剪贴板中的链接；每行一个，也支持空格分隔")
                         .frame(height: 28)
-                    Button(action: showSettings) { Image(systemName: "gearshape").font(.system(size: 13)).frame(width: 28, height: 28) }
-                        .buttonStyle(.borderless).foregroundStyle(ThemePalette.color(palette.secondary))
-                        .help("设置（⌘,）").accessibilityLabel("设置")
                 }
                 LinkInput(model: model, focused: $inputFocused, palette: palette)
                 .frame(height: 104)
@@ -541,7 +538,8 @@ struct DownloaderView: View {
                     .help("\(model.directory.path)\n点击更改保存目录")
                     .accessibilityLabel("保存目录：\(model.directory.path)，点击更改")
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button(action: model.openDirectory) { Image(systemName: "folder").font(.system(size: 13)).frame(width: 28, height: 28) }
+                    Button("打开", action: model.openDirectory)
+                        .font(.system(size: 12)).frame(width: 40, height: 28)
                         .buttonStyle(.borderless).foregroundStyle(ThemePalette.color(palette.secondary))
                         .help("在 Finder 中打开保存目录").accessibilityLabel("打开保存目录")
                     if model.busy {
@@ -592,7 +590,7 @@ struct DownloaderView: View {
         .padding(22).frame(minWidth: 560, minHeight: 450)
         .foregroundStyle(ThemePalette.color(palette.text))
         .tint(ThemePalette.color(palette.accent))
-        .background(ThemePalette.color(palette.canvas))
+        .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
         .onAppear { inputFocused = true }
         .onReceive(model.$editRequest.dropFirst()) { _ in inputFocused = true }
     }
@@ -720,7 +718,7 @@ struct SettingsView: View {
         .padding(24).frame(width: 470)
         .foregroundStyle(ThemePalette.color(palette.text))
         .tint(ThemePalette.color(palette.accent))
-        .background(ThemePalette.color(palette.canvas))
+        .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
     }
 
     private func settingLabel(_ text: String) -> some View {
@@ -728,10 +726,100 @@ struct SettingsView: View {
     }
 }
 
+// A decorative toolbar label lets mouse events reach the native title bar.
+final class WindowTitleField: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+// AppKit owns window controls, dragging and full-screen layout. Only the
+// toolbar's content and colors are customized, using public macOS 13 APIs.
+@MainActor
+final class WindowChrome: NSObject, NSToolbarDelegate {
+    private static let titleID = NSToolbarItem.Identifier("window-title")
+    private static let settingsID = NSToolbarItem.Identifier("window-settings")
+    private weak var window: NSWindow?
+    private let titleField: NSTextField
+    private let settingsAction: (() -> Void)?
+    private var settingsButton: NSButton?
+    private var themeObservation: AnyCancellable?
+
+    init(window: NSWindow, model: DownloadModel, title: String, settingsAction: (() -> Void)? = nil) {
+        self.window = window
+        self.titleField = WindowTitleField(labelWithString: title)
+        self.settingsAction = settingsAction
+        super.init()
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.toolbarStyle = .unifiedCompact
+        titleField.font = .systemFont(ofSize: 13, weight: .medium)
+        titleField.alignment = .center
+        titleField.setAccessibilityLabel(title)
+        let toolbar = NSToolbar(identifier: "\(title)-toolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        toolbar.centeredItemIdentifiers = [Self.titleID]
+        window.toolbar = toolbar
+        themeObservation = model.$theme.sink { [weak self] theme in self?.applyTheme(theme) }
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.titleID, Self.settingsID]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        var items: [NSToolbarItem.Identifier] = [.flexibleSpace, Self.titleID, .flexibleSpace]
+        if settingsAction != nil { items.append(Self.settingsID) }
+        return items
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        if identifier == Self.titleID {
+            item.label = titleField.stringValue
+            titleField.frame.size = NSSize(width: 140, height: 18)
+            item.view = titleField
+            return item
+        }
+        if identifier == Self.settingsID, settingsAction != nil {
+            let button = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")!, target: self, action: #selector(openSettings))
+            button.isBordered = false
+            button.imageScaling = .scaleNone
+            button.frame.size = NSSize(width: 28, height: 28)
+            button.toolTip = "设置（⌘,）"
+            button.setAccessibilityLabel("设置")
+            settingsButton = button
+            item.label = "设置"
+            item.toolTip = "设置（⌘,）"
+            item.view = button
+            return item
+        }
+        return nil
+    }
+
+    @objc private func openSettings() { settingsAction?() }
+
+    private func applyTheme(_ theme: AppTheme) {
+        func color(_ keyPath: KeyPath<ThemePalette, UInt32>) -> NSColor {
+            NSColor(name: nil) { appearance in
+                let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                return ThemePalette.nativeColor(theme.palette(dark: dark)[keyPath: keyPath])
+            }
+        }
+        window?.backgroundColor = color(\.canvas)
+        titleField.textColor = color(\.text)
+        settingsButton?.contentTintColor = color(\.secondary)
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private var settingsWindow: NSWindow?
+    private var windowChrome: WindowChrome?
+    private var settingsChrome: WindowChrome?
     private let model = DownloadModel()
     private var terminationPending = false
 
@@ -742,8 +830,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "arXiv 下载器"
         window.setFrameAutosaveName("ArxivDownloaderCompactWindow")
-        window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }))
-        window.minSize = NSSize(width: 584, height: 490)
+        windowChrome = WindowChrome(window: window, model: model, title: "arXiv 下载器", settingsAction: { [weak self] in self?.showSettings() })
+        window.contentView = NSHostingView(rootView: DownloaderView(model: model))
+        window.minSize = NSSize(width: 584, height: 512)
         window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -779,10 +868,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func showSettings() {
         if settingsWindow == nil {
             let view = NSHostingView(rootView: SettingsView(model: model))
+            let contentSize = view.fittingSize
             let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             panel.title = "arXiv 下载器设置"
+            settingsChrome = WindowChrome(window: panel, model: model, title: "设置")
             panel.contentView = view
-            panel.setContentSize(view.fittingSize)
+            panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
             panel.isReleasedWhenClosed = false
             panel.center()
             settingsWindow = panel
