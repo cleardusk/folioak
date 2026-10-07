@@ -1,0 +1,608 @@
+import Foundation
+import PDFKit
+import CoreGraphics
+import SwiftUI
+import AppKit
+
+enum TestFailure: Error { case failed(String) }
+func expect(_ condition: Bool, _ message: String) throws {
+    if !condition { throw TestFailure.failed(message) }
+}
+func rejects(_ action: () throws -> Void, _ message: String) throws {
+    do { try action() } catch { return }
+    throw TestFailure.failed(message)
+}
+
+func atom(id: String = "2501.12345v2", title: String = "Test &amp; Example: A Paper", published: String = "2025-01-03T12:00:00Z") -> Data {
+    Data("""
+    <?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom"><title>Query title, not paper title</title><entry>
+    <id>http://arxiv.org/abs/\(id)</id><title>\(title)</title>
+    <published>\(published)</published><updated>2026-02-01T12:00:00Z</updated>
+    </entry></feed>
+    """.utf8)
+}
+
+func createPDF(at url: URL, shade: CGFloat = 0.5) throws {
+    var box = CGRect(x: 0, y: 0, width: 300, height: 400)
+    guard let context = CGContext(url as CFURL, mediaBox: &box, nil) else { throw TestFailure.failed("PDF context creation") }
+    context.beginPDFPage(nil)
+    context.setFillColor(gray: shade, alpha: 1)
+    context.fill(CGRect(x: 30, y: 30, width: 100, height: 100))
+    context.endPDFPage()
+    context.closePDF()
+}
+
+enum MockReply {
+    case status(Int, String? = nil), network(URLError.Code), corrupt, failure(DownloadError)
+}
+
+actor MockTransport: HTTPTransport {
+    private var metadataReplies: [MockReply]
+    private var pdfReplies: [MockReply]
+    private let sourcePDF: URL
+    private let delay: UInt64
+    private(set) var metadataCalls = 0
+    private(set) var pdfCalls = 0
+    private(set) var times: [Date] = []
+    private(set) var pdfURLs: [URL] = []
+    private(set) var tempFiles: [URL] = []
+
+    init(sourcePDF: URL, metadata: [MockReply] = [.status(200)], pdf: [MockReply] = [.status(200)], delay: UInt64 = 0) {
+        self.sourcePDF = sourcePDF; metadataReplies = metadata; pdfReplies = pdf; self.delay = delay
+    }
+    private func response(_ reply: MockReply, url: URL) throws -> HTTPURLResponse {
+        switch reply {
+        case .failure(let error): throw error
+        case .network(let code): throw URLError(code)
+        case .status(let code, let after):
+            return HTTPURLResponse(url: url, statusCode: code, httpVersion: "HTTP/1.1", headerFields: after.map { ["Retry-After": $0] })!
+        case .corrupt: return HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+        }
+    }
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        times.append(Date()); metadataCalls += 1
+        if delay > 0 { try await Task.sleep(nanoseconds: delay) }
+        let reply = metadataReplies.count > 1 ? metadataReplies.removeFirst() : metadataReplies[0]
+        return (atom(), try response(reply, url: request.url!))
+    }
+    func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
+        times.append(Date()); pdfCalls += 1; pdfURLs.append(request.url!)
+        let reply = pdfReplies.count > 1 ? pdfReplies.removeFirst() : pdfReplies[0]
+        let response = try response(reply, url: request.url!)
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("arxiv-test-\(UUID().uuidString).pdf")
+        if case .corrupt = reply { try Data("<html>Not a PDF</html>".utf8).write(to: temp) }
+        else { try FileManager.default.copyItem(at: sourcePDF, to: temp) }
+        tempFiles.append(temp)
+        progress(DownloadProgress(received: 512, total: 1024))
+        return (temp, response)
+    }
+}
+
+@main
+struct CoreTests {
+    static func main() async {
+        do {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("arxiv-tests-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let pdf = root.appendingPathComponent("sample.pdf")
+            try createPDF(at: pdf)
+            try parseTests()
+            try metadataTests()
+            try securityTests(root: root)
+            try storageTests(root: root, pdf: pdf)
+            try await networkTests(root: root, pdf: pdf)
+            try await queueTests(root: root, pdf: pdf)
+            try themeTests()
+            try inputLayoutTests()
+            print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
+            if CommandLine.arguments.contains("--stress") { try await resourceTests(root: root, pdf: pdf) }
+            if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
+            if CommandLine.arguments.contains("--live") { try await liveTests() }
+        } catch {
+            fputs("FAIL: \(error)\n", stderr)
+            exit(1)
+        }
+    }
+
+    static func parseTests() throws {
+        let examples: [(String, String)] = [
+            ("https://arxiv.org/abs/2501.12345", "2501.12345"),
+            ("https://arxiv.org/pdf/2501.12345v2.pdf?download=1#page=2", "2501.12345v2"),
+            ("https://arxiv.org/html/2501.12345v2", "2501.12345v2"),
+            ("arXiv:2501.12345v2", "2501.12345v2"),
+            ("arxiv.org/abs/2501.12345", "2501.12345"),
+            ("http://export.arxiv.org/abs/hep-th/9901001v1", "hep-th/9901001v1"),
+            ("https://arxiv.org/pdf/math.GT/0301001.pdf", "math.GT/0301001"),
+            ("<https://arxiv.org/abs/2501.12345>", "2501.12345")
+        ]
+        for (input, id) in examples { try expect(try ArxivReference.parse(input).identifier == id, "parse \(input)") }
+        for bad in ["https://arxiv.org.evil/abs/2501.12345", "file:///etc/passwd", "https://user@arxiv.org/abs/2501.12345", "https://arxiv.org:9000/abs/2501.12345", "2513.12345", "2500.12345", "2501.12345v0", "2501.12345/../../file", "https://example.com/pdf/2501.12345", "random"] {
+            try rejects({ _ = try ArxivReference.parse(bad) }, "accepted invalid link \(bad)")
+        }
+        let tokens = ArxivReference.tokens(in: "2501.12345\n2501.12345v2；2501.12345, 2501.12345")
+        try expect(tokens.count == 4, "batch splitting")
+        try expect(Set(try tokens.map(ArxivReference.parse)).count == 2, "input duplicate normalization")
+        let editText = "prefix-bad-link\nhttps://example.com/bad-link；bad-link"
+        let range = DownloaderView.inputRange(of: "bad-link", in: editText)
+        try expect(range?.location == (editText as NSString).length - 8, "edit selects whole input token")
+        try expect(DownloaderView.inputRange(of: "missing", in: editText) == nil, "stale edit target not selected")
+    }
+
+    static func metadataTests() throws {
+        let ref = try ArxivReference.parse("2501.12345")
+        let paper = try AtomParser.metadata(atom(), requested: ref)
+        try expect(paper.title == "Test & Example: A Paper", "XML entity decoding")
+        try expect(paper.reference.identifier == "2501.12345v2", "latest version pinned")
+        try expect(paper.filename == "[arXiv2025.1][Test & Example- A Paper].pdf", "first submission date and naming")
+        try expect(paper.filename(style: .identifierTitle) == "[2501.12345v2][Test & Example- A Paper].pdf", "identifier naming includes exact version")
+        try expect(paper.filename(style: .titleOnly) == "Test & Example- A Paper.pdf", "title-only naming")
+        try rejects({ _ = try AtomParser.metadata(atom(), requested: ArxivReference.parse("2501.12345v1")) }, "wrong version accepted")
+        try rejects({ _ = try AtomParser.metadata(atom(id: "2501.99999v2"), requested: ref) }, "wrong paper accepted")
+        try rejects({ _ = try AtomParser.metadata(atom(published: "bad"), requested: ref) }, "bad date accepted")
+        try rejects({ _ = try AtomParser.metadata(Data("<feed>".utf8), requested: ref) }, "malformed XML accepted")
+        let long = PaperMetadata(reference: paper.reference, title: String(repeating: "论文🙂", count: 200), year: 2025, month: 1)
+        try expect(long.filename.utf8.count <= 250 && long.filename.hasSuffix("].pdf"), "UTF-8 filename bound")
+        try expect(long.filename(suffix: "[2501.12345v2-12]").utf8.count <= 250, "suffix filename bound")
+        for style in NamingStyle.allCases {
+            try expect(long.filename(style: style, suffix: "[2501.12345v2-12]").utf8.count <= 250, "all styles bound long UTF-8 names")
+        }
+        try expect(!PaperMetadata.cleanTitle("../A/B:C\\D\nE").contains("/"), "path characters")
+        try expect(DownloadEngine.retryAfter("3") == 3, "Retry-After seconds")
+        try expect(DownloadEngine.retryAfter("Thu, 01 Jan 1970 00:00:00 GMT") == 0, "Retry-After HTTP date")
+        try expect(DownloadEngine.retryAfter("NaN") == nil, "nonfinite Retry-After")
+    }
+
+    static func securityTests(root: URL) throws {
+        for value in ["1e100", "NaN", "Inf", "-1", "1.5", String(repeating: "9", count: 200), "31536001"] {
+            try expect(DownloadEngine.retryAfter(value) == nil, "unsafe Retry-After rejected: \(value.prefix(20))")
+        }
+        try expect(DownloadError.cooldown(1e100).localizedDescription.contains("暂停"), "cooldown description cannot overflow")
+        let ref = try ArxivReference.parse("2501.12345")
+        let dtd = Data("<!DOCTYPE feed [<!ENTITY x 'expanded'>]><feed/>".utf8)
+        try rejects({ _ = try AtomParser.metadata(dtd, requested: ref) }, "DOCTYPE accepted")
+        try rejects({ _ = try AtomParser.metadata("<!DOCTYPE feed><feed/>".data(using: .utf16)!, requested: ref) }, "UTF16 XML accepted")
+        let nonUTF8 = "<!DOCTYPE feed>" + String(data: atom(), encoding: .utf8)!.replacingOccurrences(of: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>", with: "")
+        for encoding in [String.Encoding.utf16LittleEndian, .utf16BigEndian] {
+            try rejects({ _ = try AtomParser.metadata(nonUTF8.data(using: encoding)!, requested: ref) }, "UTF16 without BOM accepted")
+        }
+        let shiftedBody = "<!DOCTYPE feed [<!ENTITY x 'expanded'>]><feed xmlns='http://www.w3.org/2005/Atom'><entry><id>http://arxiv.org/abs/2501.12345v1</id><title>Literal &x;</title><published>2025-01-01T00:00:00Z</published></entry></feed>"
+        let shifted = "+" + shiftedBody.data(using: .utf16BigEndian)!.base64EncodedString().replacingOccurrences(of: "=", with: "") + "-"
+        let utf7 = "<?xml version='1.0' encoding='UTF-7'?>" + shifted
+        try rejects({ _ = try AtomParser.metadata(Data(utf7.utf8), requested: ref) }, "UTF7 declared XML accepted")
+        let latin = String(data: atom(), encoding: .utf8)!.replacingOccurrences(of: "UTF-8", with: "ISO-8859-1")
+        try rejects({ _ = try AtomParser.metadata(Data(latin.utf8), requested: ref) }, "non UTF8 declaration accepted")
+        try rejects({ _ = try AtomParser.metadata(Data(repeating: 32, count: ResourceLimits.metadataBytes + 1), requested: ref) }, "oversized metadata accepted")
+        try rejects({ _ = try AtomParser.metadata(atom(title: String(repeating: "A", count: ResourceLimits.titleCharacters + 1)), requested: ref) }, "oversized title accepted")
+        try rejects({ _ = try ArxivReference.parse(String(repeating: "a", count: 150) + "/9901001") }, "unbounded identifier accepted")
+        for url in ["http://arxiv.org/pdf/2501.12345", "https://evil.arxiv.org/pdf/a", "https://arxiv.org.evil/pdf/a", "https://127.0.0.1/a", "file:///tmp/a", "https://user@arxiv.org/a", "https://arxiv.org:444/a"] {
+            try expect(!NetworkPolicy.allows(URL(string: url)), "unsafe download destination accepted")
+        }
+        try expect(NetworkPolicy.allows(URL(string: "https://export.arxiv.org/api/query")), "official HTTPS destination rejected")
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.downloadTask(with: URL(string: "https://arxiv.org/pdf/2501.12345")!)
+        let observer = ProgressObserver(limit: 1024)
+        observer.urlSession(session, downloadTask: task, didWriteData: 1025, totalBytesWritten: 1025, totalBytesExpectedToWrite: -1)
+        if case .limit? = observer.failure { } else { throw TestFailure.failed("streaming limit did not report clear error") }
+        let redirect = ProgressObserver()
+        let response = HTTPURLResponse(url: task.originalRequest!.url!, statusCode: 302, httpVersion: nil, headerFields: nil)!
+        var allowed = true
+        redirect.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: URLRequest(url: URL(string: "https://example.com/")!)) { allowed = $0 != nil }
+        try expect(!allowed, "cross-domain redirect followed")
+        if case .unsafeResponse? = redirect.failure { } else { throw TestFailure.failed("redirect rejection lost") }
+        let sparse = root.appendingPathComponent("oversized.pdf")
+        _ = FileManager.default.createFile(atPath: sparse.path, contents: Data("%PDF-".utf8))
+        let handle = try FileHandle(forWritingTo: sparse)
+        try handle.truncate(atOffset: UInt64(ResourceLimits.pdfBytes + 1))
+        try handle.close()
+        do { _ = try PaperStorage.validatePDF(at: sparse); throw TestFailure.failed("oversized PDF accepted") }
+        catch DownloadError.limit { }
+        try rejects({ _ = try PaperStorage.hash(at: sparse) }, "oversized existing file hashed")
+        let fifo = root.appendingPathComponent("blocked.pdf")
+        try expect(mkfifo(fifo.path, 0o600) == 0, "FIFO fixture creation")
+        try rejects({ _ = try PaperStorage.hash(at: fifo) }, "FIFO blocked file comparison")
+        try rejects({ _ = try PaperStorage.validatePDF(at: fifo) }, "FIFO accepted as PDF")
+        let link = root.appendingPathComponent("linked.pdf")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: sparse)
+        try rejects({ _ = try PaperStorage.hash(at: link) }, "symlink followed for comparison")
+    }
+
+    static func storageTests(root: URL, pdf: URL) throws {
+        let output = root.appendingPathComponent("storage", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let metadata = try AtomParser.metadata(atom(), requested: ArxivReference.parse("2501.12345"))
+        try expect(try PaperStorage.validatePDF(at: pdf) == 1, "PDFKit page validation")
+        let first = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: output)
+        try expect(!first.alreadyExisted, "first save")
+        let second = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: output)
+        try expect(second.alreadyExisted && second.url == first.url, "same content not duplicated")
+        let caseFolder = root.appendingPathComponent("case-reuse", isDirectory: true)
+        try FileManager.default.createDirectory(at: caseFolder, withIntermediateDirectories: true)
+        let originalCase = caseFolder.appendingPathComponent(metadata.filename.replacingOccurrences(of: "arXiv", with: "ArXiv"))
+        try FileManager.default.copyItem(at: pdf, to: originalCase)
+        if FileManager.default.fileExists(atPath: caseFolder.appendingPathComponent(metadata.filename).path) {
+            let caseReuse = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: caseFolder)
+            try expect(caseReuse.alreadyExisted && caseReuse.url.lastPathComponent == originalCase.lastPathComponent, "existing filename keeps actual letter case")
+        }
+        let other = root.appendingPathComponent("other.pdf")
+        try createPDF(at: other, shade: 0.1)
+        let originalHash = try PaperStorage.hash(at: first.url)
+        let collision = try PaperStorage.save(downloaded: other, metadata: metadata, directory: output)
+        try expect(collision.url != first.url && collision.url.lastPathComponent.contains("2501.12345v2"), "different content preserved separately")
+        try expect(try PaperStorage.hash(at: first.url) == originalHash, "original file not overwritten")
+        let titleOnly = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: output, naming: .titleOnly)
+        let titleCollision = try PaperStorage.save(downloaded: other, metadata: metadata, directory: output, naming: .titleOnly)
+        try expect(titleOnly.url.lastPathComponent == "Test & Example- A Paper.pdf" && titleCollision.url.lastPathComponent.contains("2501.12345v2"), "title-only collisions retain both files")
+        let html = root.appendingPathComponent("error.pdf")
+        try Data("<html>Error page</html>".utf8).write(to: html)
+        try rejects({ _ = try PaperStorage.save(downloaded: html, metadata: metadata, directory: output) }, "HTML file saved")
+        let truncated = root.appendingPathComponent("truncated.pdf")
+        try Data(contentsOf: pdf).prefix(100).write(to: truncated)
+        try rejects({ _ = try PaperStorage.validatePDF(at: truncated) }, "truncated PDF accepted")
+        try rejects({ _ = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: root.appendingPathComponent("missing")) }, "missing folder accepted")
+        let files = try FileManager.default.contentsOfDirectory(atPath: output.path)
+        try expect(files.count == 4 && !files.contains(where: { $0.hasSuffix(".partial") }), "staged file cleanup")
+    }
+
+    static func networkTests(root: URL, pdf: URL) async throws {
+        let output = root.appendingPathComponent("network", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let ref = try ArxivReference.parse("2501.12345")
+        let transient = MockTransport(sourcePDF: pdf, metadata: [.status(503), .status(200)], pdf: [.corrupt, .status(200)])
+        let engine = DownloadEngine(transport: transient, requestInterval: 0.03, retryDelay: 0)
+        _ = try await engine.download(ref, to: output)
+        let counts = await (transient.metadataCalls, transient.pdfCalls)
+        try expect(counts.0 == 2 && counts.1 == 2, "metadata and corrupt PDF retries")
+        let urls = await transient.pdfURLs
+        try expect(urls.allSatisfy { $0.absoluteString == "https://arxiv.org/pdf/2501.12345v2" }, "version-specific PDF requests")
+        let times = await transient.times
+        try expect(zip(times, times.dropFirst()).allSatisfy { $1.timeIntervalSince($0) >= 0.025 }, "request pacing")
+        let temporary = await transient.tempFiles
+        try expect(temporary.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }, "temporary downloads cleaned")
+
+        let permanent = MockTransport(sourcePDF: pdf, metadata: [.status(404)])
+        do { _ = try await DownloadEngine(transport: permanent, requestInterval: 0, retryDelay: 0).download(ref, to: output); throw TestFailure.failed("404 succeeded") }
+        catch is DownloadError { }
+        try expect(await permanent.metadataCalls == 1, "permanent error retried")
+        try expect(await permanent.pdfCalls == 0, "404 downloaded PDF")
+
+        let limited = MockTransport(sourcePDF: pdf, metadata: [.status(429, "0"), .status(200)])
+        _ = try await DownloadEngine(transport: limited, requestInterval: 0, retryDelay: 0).download(ref, to: output)
+        try expect(await limited.metadataCalls == 2, "429 retry")
+
+        let longPause = MockTransport(sourcePDF: pdf, metadata: [.status(429, "600")])
+        let longPauseEngine = DownloadEngine(transport: longPause, requestInterval: 0, retryDelay: 0)
+        for _ in 0..<3 {
+            do { _ = try await longPauseEngine.download(ref, to: output); throw TestFailure.failed("long pause ignored") }
+            catch DownloadError.cooldown(let remaining) { try expect(remaining > 590, "cooldown lost") }
+        }
+        try expect(await longPause.metadataCalls == 1, "long Retry-After must not be shortened")
+        let shortPause = MockTransport(sourcePDF: pdf, metadata: [.status(429, "1"), .status(200)])
+        _ = try await DownloadEngine(transport: shortPause, requestInterval: 0, retryDelay: 0).download(ref, to: output)
+        let shortTimes = await shortPause.times
+        try expect(shortTimes[1].timeIntervalSince(shortTimes[0]) >= 0.95, "short Retry-After observed")
+
+        let exhausted = MockTransport(sourcePDF: pdf, metadata: [.network(.timedOut)])
+        do { _ = try await DownloadEngine(transport: exhausted, requestInterval: 0, retryDelay: 0).download(ref, to: output); throw TestFailure.failed("network failure succeeded") }
+        catch is URLError { }
+        try expect(await exhausted.metadataCalls == 3, "bounded retries")
+        let rejected = MockTransport(sourcePDF: pdf, metadata: [.failure(.limit("limit")), .status(200)])
+        let rejectedEngine = DownloadEngine(transport: rejected, requestInterval: 0, retryDelay: 0)
+        do { _ = try await rejectedEngine.download(ref, to: output); throw TestFailure.failed("limit accepted") }
+        catch DownloadError.limit { }
+        _ = try await rejectedEngine.download(ref, to: output)
+        try expect(await rejected.metadataCalls == 2, "limit does not retry or cancel later jobs")
+
+        let cancelled = MockTransport(sourcePDF: pdf, delay: 5_000_000_000)
+        let job = Task { try await DownloadEngine(transport: cancelled, requestInterval: 0, retryDelay: 0).download(ref, to: output) }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        job.cancel()
+        do { _ = try await job.value; throw TestFailure.failed("cancel succeeded") }
+        catch is CancellationError { }
+        try expect(await cancelled.pdfCalls == 0, "cancelled job downloaded PDF")
+    }
+
+    @MainActor static func queueTests(root: URL, pdf: URL) async throws {
+        let suiteName = "arxiv-test-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suiteName)!
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let output = root.appendingPathComponent("queue", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let transport = MockTransport(sourcePDF: pdf, metadata: [.status(404), .status(200)])
+        let model = DownloadModel(engine: DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        model.directory = output
+        model.input = "kept"
+        model.input = String(repeating: "x", count: ResourceLimits.inputBytes + 1)
+        try expect(model.input == "kept" && model.notice != nil, "oversized input rejected")
+        model.input = Array(repeating: "bad", count: ResourceLimits.batchCount + 1).joined(separator: "\n")
+        model.start()
+        try expect(model.items.isEmpty && !model.busy && model.notice != nil, "oversized batch rejected without rows")
+        model.input = "2501.12345\nhttps://arxiv.org/pdf/2501.12345\nbad-link\n2501.12345v2"
+        model.start()
+        try expect(model.items.count == 3 && model.duplicateCount == 1, "queue duplicate normalization")
+        try expect(model.busy, "queue running")
+        model.start()
+        try expect(model.items.count == 3, "double start changed active queue")
+        try await waitForQueue(model)
+        try expect(model.successes == 1 && model.failures == 2 && model.canRetry, "permanent failure prevented later success")
+        model.retry()
+        try await waitForQueue(model)
+        try expect(model.successes == 2 && model.failures == 1, "retry did not preserve successful or invalid items")
+        try expect(model.items[0].savedURL == model.items[2].savedURL, "queue duplicate file reused")
+        try expect(preferences.string(forKey: "saveDirectory") == output.path, "directory preference")
+        model.naming = .identifierTitle
+        model.appearance = .dark
+        model.theme = .iris
+        let restored = DownloadModel(preferences: preferences)
+        try expect(restored.directory == output && restored.naming == .identifierTitle && restored.appearance == .dark && restored.theme == .iris, "settings restored")
+        try expect(restored.namingExample.contains("1706.03762v1"), "live naming example")
+        model.appearance = .system
+        let opening = DownloadModel(preferences: preferences, opener: { _ in false })
+        opening.items = [model.items[0]]
+        opening.openFile(opening.items[0])
+        try expect(opening.notice != nil && opening.items[0].state == model.items[0].state, "opener failure feedback preserves file")
+        opening.items[0].savedURL = root.appendingPathComponent("deleted.pdf")
+        opening.openFile(opening.items[0])
+        try expect(opening.items[0].state == .missing && opening.items[0].savedURL == nil && opening.items[0].canRetry, "deleted file feedback and retry")
+        opening.directory = root.appendingPathComponent("deleted-directory")
+        opening.openDirectory()
+        try expect(opening.directoryNotice != nil, "deleted directory feedback")
+        let successfulOpen = DownloadModel(preferences: preferences, opener: { _ in true })
+        successfulOpen.directory = output
+        successfulOpen.directoryNotice = "old folder error"
+        successfulOpen.openDirectory()
+        successfulOpen.notice = "old source error"
+        successfulOpen.openSource(model.items[0])
+        try expect(successfulOpen.directoryNotice == nil && successfulOpen.notice == nil, "successful opens clear obsolete errors")
+
+        let slow = MockTransport(sourcePDF: pdf, delay: 5_000_000_000)
+        let cancellation = DownloadModel(engine: DownloadEngine(transport: slow, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        cancellation.directory = output
+        cancellation.input = "2501.12345\n2501.12345v2"
+        cancellation.start()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        cancellation.cancel()
+        try expect(cancellation.cancelling, "immediate cancellation feedback")
+        await cancellation.cancelAndWait()
+        try expect(!cancellation.busy && !cancellation.cancelling, "cleanup awaited before exit")
+        try expect(cancellation.items.allSatisfy { $0.state == .cancelled } && cancellation.canRetry, "queued cancellation states")
+
+        let frozenTransport = MockTransport(sourcePDF: pdf, delay: 50_000_000)
+        let frozen = DownloadModel(engine: DownloadEngine(transport: frozenTransport, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        frozen.directory = output
+        frozen.naming = .identifierTitle
+        frozen.input = "2501.12345v2"
+        frozen.start()
+        let runningItem = frozen.items[0].id
+        frozen.theme = .midnight
+        try expect(frozen.busy && frozen.items[0].id == runningItem && frozen.theme == .midnight, "changing theme preserves running queue")
+        frozen.naming = .titleOnly
+        frozen.directory = root.appendingPathComponent("another-folder")
+        try await waitForQueue(frozen)
+        try expect(frozen.items[0].savedURL?.deletingLastPathComponent() == output && frozen.items[0].savedURL?.lastPathComponent.hasPrefix("[2501.12345v2]") == true, "active batch freezes directory and naming")
+
+        model.directory = root.appendingPathComponent("missing-folder", isDirectory: true)
+        model.input = "2501.12345"
+        model.start()
+        try expect(!model.busy && model.directoryNotice != nil && model.items.first?.state == .failed && model.items.first?.error == nil, "missing directory feedback appears once")
+    }
+
+    @MainActor static func waitForQueue(_ model: DownloadModel) async throws {
+        let deadline = ContinuousClock().now.advanced(by: .seconds(3))
+        while model.busy {
+            if ContinuousClock().now > deadline { throw TestFailure.failed("queue test timed out") }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
+    @MainActor static func resourceTests(root: URL, pdf: URL) async throws {
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        let suiteName = "arxiv-stress-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suiteName)!
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let folder = root.appendingPathComponent("stress", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let transport = MockTransport(sourcePDF: pdf)
+        let engine = DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0)
+        for round in 0..<200 {
+            var model: DownloadModel? = DownloadModel(engine: engine, preferences: preferences)
+            weak var released: DownloadModel?
+            released = model
+            model!.directory = folder
+            model!.input = "2501.12345v2"
+            model!.start()
+            try await waitForQueue(model!)
+            try expect(model!.successes == 1, "stress download failed")
+            model = nil
+            await Task.yield()
+            try expect(released == nil, "completed model retained")
+            if (round + 1) % 50 == 0 {
+                var usage = rusage()
+                getrusage(RUSAGE_SELF, &usage)
+                print("STRESS \(round + 1)/200: peak RSS \(usage.ru_maxrss / 1024 / 1024) MiB, models released")
+            }
+        }
+        let partials = try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasSuffix(".partial") }
+        try expect(partials.isEmpty, "stress left partial files")
+        print("PASS stress: 200 completed queues; no retained models or partial files")
+    }
+
+    @MainActor static func inputLayoutTests() throws {
+        let suiteName = "arxiv-input-layout-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suiteName)!
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        let model = DownloadModel(preferences: preferences)
+        let view = NSHostingView(rootView: DownloaderView(model: model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        func settle() {
+            view.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            view.layoutSubtreeIfNeeded()
+        }
+        func findEditor(_ root: NSView) -> LinkTextView? {
+            if let editor = root as? LinkTextView { return editor }
+            return root.subviews.lazy.compactMap { findEditor($0) }.first
+        }
+        settle()
+        guard let editor = findEditor(view), let layout = editor.layoutManager, let container = editor.textContainer else { throw TestFailure.failed("native input text layout missing") }
+        try expect(editor.frame.width > 500 && editor.frame.height >= 104, "input document must fill scroll area")
+        let placeholder = editor.placeholderFirstGlyphOrigin
+        model.input = LinkTextView.example
+        settle()
+        try expect(editor.string == model.input, "model-to-editor input sync")
+        layout.ensureLayout(for: container)
+        let typed = layout.location(forGlyphAt: 0)
+        try expect(abs(placeholder.x - typed.x) < 0.1 && abs(placeholder.y - typed.y) < 0.1, "placeholder and typed text must share first glyph baseline and leading inset")
+        try expect(editor.textContainerOrigin == NSPoint(x: 7, y: 7), "input content inset")
+        guard let delegate = editor.delegate as? LinkInput.Coordinator else { throw TestFailure.failed("input delegate") }
+        let accepted = delegate.textView(editor, shouldChangeTextIn: NSRange(location: 0, length: (editor.string as NSString).length), replacementString: String(repeating: "文", count: 30_000))
+        try expect(!accepted && model.input == LinkTextView.example && model.notice != nil, "oversized native paste rejected before editing")
+        editor.string = "2609.22978\ninvalid-token"
+        delegate.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        try expect(model.input == editor.string, "editor-to-model multiline sync")
+        model.input = String(repeating: "https://arxiv.org/abs/2609.22978\n", count: 100)
+        settle()
+        try expect(editor.frame.height > 104 && editor.enclosingScrollView?.contentSize.height == 104, "long input scrolls within the fixed input box")
+        model.input = ""
+        settle()
+        try expect(editor.frame.height == 104, "clearing input restores document height")
+        model.busy = true
+        settle()
+        try expect(!editor.isEditable, "busy input is read-only")
+        model.busy = false
+        settle()
+        try expect(editor.isEditable && editor.allowsUndo && !editor.isAutomaticDashSubstitutionEnabled, "input restores editing and preserves URL punctuation")
+        window.orderOut(nil)
+        print("PASS native input: placeholder/typed baseline, document bounds, multiline binding, paste limit and busy state")
+    }
+
+    @MainActor static func renderSnapshots() throws {
+        let suiteName = "arxiv-ui-test-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suiteName)!
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/qa")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        func capture<V: View>(_ content: V, width: Int, height: Int? = nil, name: String) throws {
+            let view = NSHostingView(rootView: content.environment(\.controlActiveState, .key))
+            let size = NSSize(width: CGFloat(width), height: height.map { CGFloat($0) } ?? view.fittingSize.height)
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = view
+            view.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+            view.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("UI bitmap creation") }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            guard let data = bitmap.representation(using: .png, properties: [:]) else { throw TestFailure.failed("UI PNG encoding") }
+            try data.write(to: output.appendingPathComponent(name + ".png"))
+            window.orderOut(nil)
+        }
+        let model = DownloadModel(preferences: preferences)
+        let input = "https://arxiv.org/abs/2609.22978\nhttps://arxiv.org/pdf/1706.03762v1"
+        let paper = PaperMetadata(reference: try ArxivReference.parse("2609.22978v1"), title: "DeepSeek Elastic Compute (DSec): A Sandbox Infrastructure for Effective Agentic Training at Scale", year: 2026, month: 9)
+        let completedItems = [
+            DownloadItem(original: "2609.22978", reference: paper.reference, metadata: paper, state: .saved, savedURL: model.directory.appendingPathComponent(paper.filename), pages: 31),
+            DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"), state: .failed, error: "连接超时，自动重试后仍未成功。请检查网络后重试。")
+        ]
+        for theme in AppTheme.allCases {
+            model.theme = theme
+            for scheme in [ColorScheme.light, .dark] {
+                let suffix = "\(theme.rawValue)-\(scheme == .light ? "light" : "dark")"
+                app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+                for width in [560, 680] {
+                    model.input = input
+                    model.items = completedItems
+                    try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "\(suffix)-\(width)")
+                    if width == 680 || theme == .native || theme == .midnight {
+                        model.input = ""
+                        model.items = []
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "empty-\(suffix)-\(width)")
+                    }
+                    if theme == .native || theme == .midnight {
+                        model.input = input
+                        model.busy = true
+                        model.items = [
+                            DownloadItem(original: "2609.22978", reference: paper.reference, metadata: paper, state: .downloading, progress: DownloadProgress(received: 4_500_000, total: 10_000_000)),
+                            DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"), state: .queued)
+                        ]
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "busy-\(suffix)-\(width)")
+                        if theme == .midnight && scheme == .dark && width == 560 {
+                            model.cancelling = true
+                            try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "cancelling-\(suffix)-\(width)")
+                            model.cancelling = false
+                        }
+                        model.busy = false
+                    }
+                }
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)")
+            }
+        }
+        model.theme = .midnight
+        let directory = model.directory
+        model.directory = URL(fileURLWithPath: "/Users/Example/Documents/Research/" + String(repeating: "Long directory ", count: 12) + "/Papers")
+        for scheme in [ColorScheme.light, .dark] {
+            app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+            for naming in NamingStyle.allCases {
+                model.naming = naming
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-long-\(naming.rawValue)-\(scheme == .light ? "light" : "dark")")
+            }
+            model.busy = true
+            try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-busy-\(scheme == .light ? "light" : "dark")")
+            model.busy = false
+        }
+        model.directory = directory
+        print("UI snapshots: \(output.path)")
+    }
+
+    @MainActor static func themeTests() throws {
+        func luminance(_ hex: UInt32) -> Double {
+            let channels = [Double((hex >> 16) & 255), Double((hex >> 8) & 255), Double(hex & 255)].map { component -> Double in
+                let value = component / 255
+                return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+        }
+        func contrast(_ foreground: UInt32, _ background: UInt32) -> Double {
+            let a = luminance(foreground), b = luminance(background)
+            return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+        }
+        for theme in AppTheme.allCases {
+            for dark in [false, true] {
+                let palette = theme.palette(dark: dark)
+                for surface in [palette.canvas, palette.surface] {
+                    for text in [palette.text, palette.secondary, palette.accent, dark ? 0xFF6B6B : 0xB21F17, dark ? 0x4CD96E : 0x146E38] {
+                        try expect(contrast(text, surface) >= 4.5, "\(theme.rawValue) text contrast in \(dark ? "dark" : "light")")
+                    }
+                }
+                try expect(contrast(palette.onAction, palette.action) >= 4.5, "\(theme.rawValue) action contrast")
+            }
+        }
+        let suite = "arxiv-theme-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        try expect(DownloadModel(preferences: preferences).theme == .native, "theme migration default")
+        preferences.set("unknown-future-theme", forKey: "theme")
+        try expect(DownloadModel(preferences: preferences).theme == .native, "invalid theme fallback")
+        print("PASS themes: 12 palettes contrast, migration and persistent selection")
+    }
+
+    static func liveTests() async throws {
+        let folder = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let engine = DownloadEngine()
+        let paper = try await engine.download(ArxivReference.parse("2609.22978"), to: folder)
+        try expect(paper.metadata.title.hasPrefix("DeepSeek Elastic Compute"), "live title")
+        try expect(paper.pages == 31, "live page count")
+        let duplicate = try await engine.download(ArxivReference.parse("https://arxiv.org/pdf/2609.22978v1.pdf"), to: folder)
+        try expect(duplicate.alreadyExisted && duplicate.url == paper.url, "live duplicate handling")
+        print("PASS live: \(paper.metadata.reference.identifier), \(paper.pages) pages, duplicate reused")
+        print("Verified file: \(paper.url.path)")
+    }
+}
