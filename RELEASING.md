@@ -19,6 +19,12 @@
 
 `package.command` 构建 arm64 `.app`，验证签名与 ZIP 解压后的架构，再生成 DMG、ZIP 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
 
+`test.command` 还支持 `--stress`（200 次模拟下载及释放检查）、`--live`（真实下载至 `build/live-UUID/`）和 `--snapshots`（界面预览输出至 `build/qa/`）。真实下载测试不写入 PapersRepo。
+
+## 提交规范
+
+采用 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)：`type(scope): description`，scope 可省略。功能用 `feat`，修复用 `fix`，文档用 `docs`，构建脚本用 `build`，工作流用 `ci`；例如 `fix(download): handle expired links` 或 `docs: simplify README`。破坏性变更使用 `!` 或 `BREAKING CHANGE:` 标注。
+
 ## 发布新版本
 
 1. 修改 `Resources/Info.plist` 中的 `CFBundleShortVersionString`（如 `1.1.4`），同时递增 `CFBundleVersion`。
