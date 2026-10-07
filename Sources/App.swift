@@ -29,7 +29,7 @@ enum AppAppearance: String, CaseIterable {
 }
 
 enum ItemState: Equatable {
-    case queued, metadata, downloading, validating, retrying(Int), saved, existing, failed, cancelled, missing
+    case queued, metadata, checkingLocal, downloading, validating, retrying(Int), saved, existing, failed, cancelled, missing
     var terminal: Bool {
         switch self { case .saved, .existing, .failed, .cancelled, .missing: return true; default: return false }
     }
@@ -37,6 +37,7 @@ enum ItemState: Equatable {
         switch self {
         case .queued: return "等待下载"
         case .metadata: return "获取论文信息"
+        case .checkingLocal: return "检查本地文件"
         case .downloading: return "下载中"
         case .validating: return "校验并保存"
         case .retrying(let attempt): return "自动重试 \(attempt)/3"
@@ -51,7 +52,7 @@ enum ItemState: Equatable {
         switch self {
         case .saved, .existing: return UIColors.success
         case .failed, .missing: return UIColors.error
-        case .metadata, .downloading, .validating, .retrying: return ThemePalette.color(palette.accent)
+        case .metadata, .checkingLocal, .downloading, .validating, .retrying: return ThemePalette.color(palette.accent)
         default: return ThemePalette.color(palette.secondary)
         }
     }
@@ -181,6 +182,7 @@ final class DownloadModel: ObservableObject {
     func start() {
         guard !busy else { return }
         let tokens = ArxivReference.tokens(in: input)
+        guard !tokens.isEmpty else { notice = "请先粘贴至少一个 arXiv 链接。"; return }
         guard tokens.count <= ResourceLimits.batchCount else { notice = "每批最多 200 条输入，请分批下载。"; return }
         var seen = Set<ArxivReference>()
         duplicateCount = 0
@@ -269,6 +271,7 @@ final class DownloadModel: ObservableObject {
             switch event {
             case .metadata: item.state = .metadata
             case .resolved(let metadata): item.metadata = metadata; item.state = .downloading
+            case .checkingLocal: item.state = .checkingLocal
             case .progress(let progress): item.progress = progress; item.state = .downloading
             case .retry(let attempt): item.state = .retrying(attempt); item.progress = nil
             case .validating: item.state = .validating
@@ -309,6 +312,9 @@ final class DownloadModel: ObservableObject {
                         $0.state = saved.alreadyExisted ? .existing : .saved
                         $0.progress = nil
                     }
+                    input = ArxivReference.tokens(in: input)
+                        .filter { (try? ArxivReference.parse($0)) != reference }
+                        .joined(separator: "\n")
                 } catch is CancellationError {
                     update(id) { $0.state = .cancelled; $0.progress = nil }
                     break
@@ -317,7 +323,11 @@ final class DownloadModel: ObservableObject {
                         $0.state = .failed
                         $0.progress = nil
                         if let network = error as? URLError {
-                            $0.error = network.code == .timedOut ? "连接超时，自动重试后仍未成功。请检查网络后重试。" : "网络连接失败：\(network.localizedDescription)"
+                            if [.cannotCreateFile, .cannotOpenFile, .cannotWriteToFile].contains(network.code) {
+                                $0.error = "临时文件无法写入，请检查磁盘空间和权限。"
+                            } else {
+                                $0.error = network.code == .timedOut ? "连接超时，自动重试后仍未成功。请检查网络后重试。" : "网络连接失败：\(network.localizedDescription)"
+                            }
                         } else { $0.error = error.localizedDescription }
                     }
                 }
@@ -336,8 +346,13 @@ final class DownloadModel: ObservableObject {
 // SwiftUI Text over TextEditor has a different first-line baseline on macOS.
 final class LinkTextView: NSTextView {
     static let example = "https://arxiv.org/abs/2609.22978"
+    private static let tokens = try! NSRegularExpression(pattern: #"[^\s,;，；]+"#)
     var placeholderColor = NSColor.secondaryLabelColor { didSet { if placeholderColor != oldValue { needsDisplay = true } } }
     var focusChanged: ((Bool) -> Void)?
+    private var styledInput: String?
+    private var styledTextColor: NSColor?
+    private var styledAccentColor: NSColor?
+    private var styledUnderline = false
     private let placeholderStorage = NSTextStorage()
     private let placeholderLayout = NSLayoutManager()
     private let placeholderContainer = NSTextContainer()
@@ -348,6 +363,37 @@ final class LinkTextView: NSTextView {
         placeholderLayout.addTextContainer(placeholderContainer)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+    func styleReferences(textColor: NSColor, accentColor: NSColor, underlineRecognized: Bool) {
+        guard styledInput != string || styledTextColor != textColor || styledAccentColor != accentColor || styledUnderline != underlineRecognized,
+              let storage = textStorage else { return }
+        styledInput = string
+        styledTextColor = textColor
+        styledAccentColor = accentColor
+        styledUnderline = underlineRecognized
+        let text = string as NSString
+        let fullRange = NSRange(location: 0, length: text.length)
+        storage.beginEditing()
+        storage.addAttribute(.foregroundColor, value: textColor, range: fullRange)
+        storage.removeAttribute(.underlineStyle, range: fullRange)
+        var count = 0
+        Self.tokens.enumerateMatches(in: string, range: fullRange) { match, _, stop in
+            guard let match else { return }
+            count += 1
+            if (try? ArxivReference.parse(text.substring(with: match.range))) != nil {
+                storage.addAttribute(.foregroundColor, value: accentColor, range: match.range)
+                if underlineRecognized {
+                    storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: match.range)
+                }
+            }
+            if count >= ResourceLimits.batchCount { stop.pointee = true }
+        }
+        storage.endEditing()
+        var attributes = typingAttributes
+        attributes[.foregroundColor] = textColor
+        attributes[.underlineStyle] = nil
+        typingAttributes = attributes
+    }
 
     func layoutPlaceholder() {
         guard let font, let textContainer else { return }
@@ -440,14 +486,15 @@ struct LinkInput: NSViewRepresentable {
         editor.isEditable = !model.busy
         let textColor = ThemePalette.nativeColor(palette.text)
         let accentColor = ThemePalette.nativeColor(palette.accent)
-        if editor.textColor != textColor { editor.textColor = textColor }
         if editor.insertionPointColor != accentColor { editor.insertionPointColor = accentColor }
         editor.placeholderColor = ThemePalette.nativeColor(palette.secondary)
         if editor.string != model.input {
             editor.string = model.input
+            editor.undoManager?.removeAllActions()
             editor.sizeToFit()
             editor.needsDisplay = true
         }
+        editor.styleReferences(textColor: textColor, accentColor: accentColor, underlineRecognized: model.theme == .graphite)
         let selectToken = context.coordinator.selectionRequest != model.editRequest
         context.coordinator.selectionRequest = model.editRequest
         if !model.busy && (selectToken || (focused && editor.window?.firstResponder !== editor)) {
@@ -615,7 +662,7 @@ struct DownloadRow: View {
                 .foregroundStyle(item.state.color(palette)).frame(width: 19)
                 .accessibilityLabel(item.state.label)
             VStack(alignment: .leading, spacing: 5) {
-                Text(item.title).font(.system(size: 13, weight: .medium))
+                Text(item.title).font(.system(size: 12, weight: .medium))
                     .lineLimit(3).textSelection(.enabled).help(item.title)
                 HStack(spacing: 8) {
                     if let metadata = item.metadata {
@@ -623,6 +670,11 @@ struct DownloadRow: View {
                     }
                     Text(item.state.label).foregroundStyle(item.state.color(palette))
                 }.font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+                if let url = item.savedURL {
+                    Text(url.lastPathComponent).font(.system(size: 10))
+                        .foregroundStyle(ThemePalette.color(palette.secondary))
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(url.path)
+                }
                 if let progress = item.progress, item.state == .downloading {
                     HStack(spacing: 8) {
                         if let fraction = progress.fraction { ProgressView(value: fraction).tint(ThemePalette.color(palette.accent)) }
@@ -674,14 +726,15 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            HStack(alignment: .firstTextBaseline, spacing: 16) {
+            HStack(spacing: 16) {
                 settingLabel("保存目录")
-                VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
                     Text(model.directoryLabel).font(.system(size: 12)).lineLimit(1)
                         .truncationMode(.middle).help(model.directory.path).textSelection(.enabled)
-                    Button("选择…", action: model.chooseDirectory).disabled(model.busy)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("更改…", action: model.chooseDirectory).controlSize(.small).disabled(model.busy)
                 }.frame(maxWidth: .infinity, alignment: .leading)
-            }
+            }.frame(height: 28)
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 16) {

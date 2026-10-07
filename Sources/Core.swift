@@ -9,6 +9,7 @@ enum ResourceLimits {
     static let metadataBytes = 1024 * 1024
     static let pdfBytes: Int64 = 256 * 1024 * 1024
     static let titleCharacters = 4096
+    static let localScanEntries = 10_000
     static let retryAfterSeconds: Double = 365 * 24 * 60 * 60
 }
 
@@ -217,6 +218,7 @@ struct DownloadProgress: Sendable {
 enum DownloadEvent: Sendable {
     case metadata
     case resolved(PaperMetadata)
+    case checkingLocal
     case progress(DownloadProgress)
     case retry(Int)
     case validating
@@ -321,6 +323,70 @@ struct SavedPaper: Sendable {
 }
 
 enum PaperStorage {
+    private static let sourceAttribute = "local.paperrepo.arxiv-downloader.source"
+    private struct SourceRecord: Codable {
+        let schema: Int
+        let identifier: String
+        let sha256: String
+    }
+
+    private static func sourceRecord(from handle: FileHandle) -> SourceRecord? {
+        let size = fgetxattr(handle.fileDescriptor, sourceAttribute, nil, 0, 0, 0)
+        guard size > 0, size <= 1024 else { return nil }
+        var data = Data(count: size)
+        let read = data.withUnsafeMutableBytes { fgetxattr(handle.fileDescriptor, sourceAttribute, $0.baseAddress, size, 0, 0) }
+        guard read == size else { return nil }
+        return try? JSONDecoder().decode(SourceRecord.self, from: data)
+    }
+
+    private static func recordSource(at url: URL, metadata: PaperMetadata, hash: SHA256.Digest) {
+        guard metadata.reference.version != nil else { return }
+        guard let handle = try? boundedRegularFile(at: url) else { return }
+        defer { try? handle.close() }
+        let record = SourceRecord(schema: 1, identifier: metadata.reference.identifier, sha256: hash.map { String(format: "%02x", $0) }.joined())
+        guard let data = try? JSONEncoder().encode(record) else { return }
+        // Unsupported or read-only extended attributes only disable the fast path.
+        _ = data.withUnsafeBytes { fsetxattr(handle.fileDescriptor, sourceAttribute, $0.baseAddress, data.count, 0, 0) }
+    }
+
+    static func existing(metadata: PaperMetadata, directory: URL, naming: NamingStyle) throws -> SavedPaper? {
+        guard metadata.reference.version != nil else { return nil }
+        let primary = directory.appendingPathComponent(metadata.filename(style: naming))
+        if let saved = try trustedExisting(at: primary, metadata: metadata) { return saved }
+        let tag = metadata.reference.identifier.replacingOccurrences(of: "/", with: "-")
+        guard let entries = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [], options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants], errorHandler: { _, _ in false }) else { return nil }
+        var visited = 0
+        for case let url as URL in entries {
+            try Task.checkCancellation()
+            visited += 1
+            guard visited <= ResourceLimits.localScanEntries else { return nil }
+            let name = url.lastPathComponent
+            guard name.hasSuffix(".pdf"), let start = name.lastIndex(of: "[") else { continue }
+            let suffix = String(name[start...])
+            let numberedPrefix = "[\(tag)-"
+            let collision = suffix.hasPrefix(numberedPrefix) && suffix.hasSuffix("].pdf")
+                && Int(suffix.dropFirst(numberedPrefix.count).dropLast(5)).map { (2..<1000).contains($0) } == true
+            guard suffix == "[\(tag)].pdf" || collision else { continue }
+            if let saved = try trustedExisting(at: url, metadata: metadata) { return saved }
+        }
+        return nil
+    }
+
+    private static func trustedExisting(at url: URL, metadata: PaperMetadata) throws -> SavedPaper? {
+        try Task.checkCancellation()
+        guard let handle = try? boundedRegularFile(at: url) else { return nil }
+        let record = sourceRecord(from: handle)
+        try? handle.close()
+        guard record?.schema == 1, record?.identifier == metadata.reference.identifier else { return nil }
+        do {
+            let digest = try hash(at: url).map { String(format: "%02x", $0) }.joined()
+            guard record?.sha256 == digest else { return nil }
+            let pages = try validatePDF(at: url)
+            return SavedPaper(metadata: metadata, url: url.resolvingSymlinksInPath(), alreadyExisted: true, pages: pages)
+        } catch is CancellationError { throw CancellationError() }
+        catch { return nil }
+    }
+
     private static func boundedRegularFile(at url: URL) throws -> FileHandle {
         let descriptor = url.path.withCString { Darwin.open($0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) }
         guard descriptor >= 0 else { throw DownloadError.storage(String(cString: strerror(errno))) }
@@ -384,7 +450,11 @@ enum PaperStorage {
         }
         let staged = directory.appendingPathComponent(".arxiv-\(UUID().uuidString).partial")
         defer { try? manager.removeItem(at: staged) }
-        try manager.copyItem(at: downloaded, to: staged)
+        do { try manager.copyItem(at: downloaded, to: staged) }
+        catch let error as CocoaError where error.code == .fileWriteOutOfSpace {
+            throw DownloadError.storage("磁盘空间不足，请释放空间或选择其他目录。")
+        }
+        recordSource(at: staged, metadata: metadata, hash: hash)
         let tag = metadata.reference.identifier.replacingOccurrences(of: "/", with: "-")
         for index in 0..<1000 {
             try Task.checkCancellation()
@@ -400,6 +470,7 @@ enum PaperStorage {
             guard failure == EEXIST else { throw DownloadError.storage(String(cString: strerror(failure))) }
             // Equal SHA-256 content has already passed validation at downloaded.
             if let oldHash = try? self.hash(at: target), oldHash == hash {
+                recordSource(at: target, metadata: metadata, hash: hash)
                 return SavedPaper(metadata: metadata, url: target.resolvingSymlinksInPath(), alreadyExisted: true, pages: pages)
             }
         }
@@ -472,7 +543,9 @@ actor DownloadEngine {
                 return try await operation()
             } catch {
                 if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
-                var retry = error is URLError
+                var retry = (error as? URLError).map {
+                    [.timedOut, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable].contains($0.code)
+                } ?? false
                 var delay = retryDelay * Double(attempt)
                 if case DownloadError.http(let code, let after) = error {
                     retry = code == 408 || code == 429 || (500...599).contains(code)
@@ -502,6 +575,9 @@ actor DownloadEngine {
             try self.check(response)
             return try AtomParser.metadata(data, requested: reference)
         }
+        event(.resolved(metadata))
+        event(.checkingLocal)
+        if let existing = try PaperStorage.existing(metadata: metadata, directory: directory, naming: naming) { return existing }
         event(.resolved(metadata))
         let local: URL = try await retried(event: event) {
             let request = URLRequest(url: metadata.reference.pdfURL)

@@ -38,7 +38,7 @@ git push origin v1.1.5
 
 Actions 会再次执行离线／资源测试，构建安装包，核验包的 SHA-256 后创建 Release，附上 DMG、ZIP、校验文件。任一检查失败都不会发布；tag 与应用版本不一致会失败。已发布的版本不会自动覆盖，修正内容应发布新版本。
 
-普通 `main` 推送和 PR 只测试、构建；在 Actions 页面手动运行也可获取保留 7 天的安装包 artifact，手动运行不创建 Release。自动测试不访问 arXiv，以免真实服务故障影响发布。
+普通 `main` 推送会测试、构建并保留安装包 artifact 7 天；PR 只测试、构建。在 Actions 页面手动运行也可获取安装包，手动运行不创建 Release。自动测试不访问 arXiv，以免真实服务故障影响发布。
 
 工作流只使用固定提交版本的 GitHub 官方 actions。测试、构建任务只有只读仓库权限；仅通过全部检查的 tag 发布任务获得写入 Release 的权限，无需额外上传个人 GitHub token。Apple 签名凭据未配置。
 

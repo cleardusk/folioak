@@ -94,7 +94,9 @@ struct CoreTests {
             try storageTests(root: root, pdf: pdf)
             try filenameStorageTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)
+            try await existingFileTests(root: root, pdf: pdf)
             try await queueTests(root: root, pdf: pdf)
+            try await completedInputTests(root: root, pdf: pdf)
             try themeTests()
             try inputLayoutTests()
             try windowChromeTests()
@@ -372,9 +374,11 @@ struct CoreTests {
         try expect(model.items.count == 3, "double start changed active queue")
         try await waitForQueue(model)
         try expect(model.successes == 1 && model.failures == 2 && model.canRetry, "permanent failure prevented later success")
+        try expect(ArxivReference.tokens(in: model.input) == ["2501.12345", "https://arxiv.org/pdf/2501.12345", "bad-link"], "failed and invalid inputs retained; only saved version removed")
         model.retry()
         try await waitForQueue(model)
         try expect(model.successes == 2 && model.failures == 1, "retry did not preserve successful or invalid items")
+        try expect(model.input == "bad-link", "successful retry clears all equivalent input links")
         try expect(model.items[0].savedURL == model.items[2].savedURL, "queue duplicate file reused")
         try expect(preferences.string(forKey: "saveDirectory") == output.path, "directory preference")
         model.naming = .identifierTitle
@@ -413,6 +417,7 @@ struct CoreTests {
         await cancellation.cancelAndWait()
         try expect(!cancellation.busy && !cancellation.cancelling, "cleanup awaited before exit")
         try expect(cancellation.items.allSatisfy { $0.state == .cancelled } && cancellation.canRetry, "queued cancellation states")
+        try expect(cancellation.input == "2501.12345\n2501.12345v2", "cancelled and queued inputs retained")
 
         let frozenTransport = MockTransport(sourcePDF: pdf, delay: 50_000_000)
         let frozen = DownloadModel(engine: DownloadEngine(transport: frozenTransport, requestInterval: 0, retryDelay: 0), preferences: preferences)
@@ -427,11 +432,103 @@ struct CoreTests {
         frozen.directory = root.appendingPathComponent("another-folder")
         try await waitForQueue(frozen)
         try expect(frozen.items[0].savedURL?.deletingLastPathComponent() == output && frozen.items[0].savedURL?.lastPathComponent.hasPrefix("[2501.12345v2]") == true, "active batch freezes directory and naming")
+        try expect(frozen.input.isEmpty, "all successful inputs cleared")
+        let completedItem = frozen.items[0].id
+        frozen.start()
+        try expect(frozen.items.count == 1 && frozen.items[0].id == completedItem && frozen.successes == 1, "empty start preserves completed results")
 
         model.directory = root.appendingPathComponent("missing-folder", isDirectory: true)
         model.input = "2501.12345"
         model.start()
         try expect(!model.busy && model.directoryNotice != nil && model.items.first?.state == .failed && model.items.first?.error == nil, "missing directory feedback appears once")
+        try expect(model.input == "2501.12345", "unwritable destination preserves input")
+    }
+
+    static func existingFileTests(root: URL, pdf: URL) async throws {
+        let output = root.appendingPathComponent("existing-fast-path", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let ref = try ArxivReference.parse("2501.12345")
+        let metadata = try AtomParser.metadata(atom(), requested: ref)
+        let transport = MockTransport(sourcePDF: pdf)
+        let engine = DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0)
+        let first = try await engine.download(ref, to: output)
+        let second = try await engine.download(ref, to: output)
+        try expect(!first.alreadyExisted && second.alreadyExisted && first.url == second.url, "trusted local PDF reused")
+        let calls = await (transport.metadataCalls, transport.pdfCalls)
+        try expect(calls.0 == 2 && calls.1 == 1, "reuse resolves current metadata without downloading PDF again")
+        let older = PaperMetadata(reference: try ArxivReference.parse("2501.12345v1"), title: metadata.title, year: metadata.year, month: metadata.month)
+        try expect(try PaperStorage.existing(metadata: older, directory: output, naming: .dateTitle) == nil, "different source version is not reused")
+
+        let attribute = "local.paperrepo.arxiv-downloader.source"
+        _ = removexattr(first.url.path, attribute, 0)
+        try expect(try PaperStorage.existing(metadata: metadata, directory: output, naming: .dateTitle) == nil, "untracked local file not trusted by filename")
+        _ = try await engine.download(ref, to: output)
+        _ = try await engine.download(ref, to: output)
+        try expect(await transport.pdfCalls == 2, "legacy file verified once then reused")
+
+        for data in [Data("not-json".utf8), Data(repeating: 65, count: 2048), try JSONSerialization.data(withJSONObject: ["schema": 999, "identifier": metadata.reference.identifier, "sha256": "bad"])] {
+            let result = data.withUnsafeBytes { setxattr(first.url.path, attribute, $0.baseAddress, data.count, 0, 0) }
+            try expect(result == 0, "source attribute fixture written")
+            try expect(try PaperStorage.existing(metadata: metadata, directory: output, naming: .dateTitle) == nil, "malformed or unsupported source record falls back")
+        }
+        _ = try await engine.download(ref, to: output)
+        try createPDF(at: first.url, shade: 0.2)
+        try expect(try PaperStorage.existing(metadata: metadata, directory: output, naming: .dateTitle) == nil, "modified PDF invalidates content fingerprint")
+        let restored = try await engine.download(ref, to: output)
+        try expect(restored.url != first.url && !restored.alreadyExisted, "modified original preserved beside new verified file")
+        _ = try await engine.download(ref, to: output)
+        try expect(await transport.pdfCalls == 4, "collision suffix PDF reused without another download")
+        let gap = root.appendingPathComponent("existing-collision-gap", isDirectory: true)
+        try FileManager.default.createDirectory(at: gap, withIntermediateDirectories: true)
+        for suffix in ["", "[2501.12345v2]"] {
+            try Data("unrelated original".utf8).write(to: gap.appendingPathComponent(metadata.filename(suffix: suffix)))
+        }
+        let afterCollision = try PaperStorage.save(downloaded: pdf, metadata: metadata, directory: gap)
+        try FileManager.default.removeItem(at: gap.appendingPathComponent(metadata.filename(suffix: "[2501.12345v2]")))
+        try expect(try PaperStorage.existing(metadata: metadata, directory: gap, naming: .dateTitle)?.url == afterCollision.url, "deleted earlier collision does not hide a later trusted PDF")
+
+        let linked = root.appendingPathComponent("existing-symlink", isDirectory: true)
+        try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: linked.appendingPathComponent(metadata.filename), withDestinationURL: restored.url)
+        try expect(try PaperStorage.existing(metadata: metadata, directory: linked, naming: .dateTitle) == nil, "source lookup rejects symbolic links")
+        let disk = MockTransport(sourcePDF: pdf, pdf: [.network(.cannotWriteToFile)])
+        do { _ = try await DownloadEngine(transport: disk, requestInterval: 0, retryDelay: 0).download(ref, to: linked); throw TestFailure.failed("disk failure succeeded") }
+        catch let error as URLError { try expect(error.code == .cannotWriteToFile, "disk write failure retained") }
+        try expect(await disk.pdfCalls == 1, "disk write failure does not trigger repeated downloads")
+        print("PASS existing files: no PDF re-download, exact version, legacy verification, malformed records, modified files, collision suffixes, symlinks and disk errors")
+    }
+
+    @MainActor static func completedInputTests(root: URL, pdf: URL) async throws {
+        let suiteName = "arxiv-completed-input-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suiteName)!
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let output = root.appendingPathComponent("completed-input", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let transport = MockTransport(sourcePDF: pdf, delay: 150_000_000)
+        let model = DownloadModel(engine: DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        model.directory = output
+        model.input = "https://arxiv.org/abs/2501.12345; https://arxiv.org/html/2501.12345\n2501.12345v2，bad-link"
+        model.start()
+        let deadline = ContinuousClock().now.advanced(by: .seconds(3))
+        while model.successes == 0 {
+            if ContinuousClock().now > deadline { throw TestFailure.failed("first completed input timed out") }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(model.busy && ArxivReference.tokens(in: model.input) == ["2501.12345v2", "bad-link"], "clear per paper while running; preserve distinct requested versions")
+        try await waitForQueue(model)
+        try expect(model.input == "bad-link" && model.successes == 2 && model.failures == 1, "retain result rows and invalid input")
+        try expect(model.items[1].state == .existing, "validated existing file also clears input")
+
+        let corruptFolder = root.appendingPathComponent("completed-input-corrupt", isDirectory: true)
+        try FileManager.default.createDirectory(at: corruptFolder, withIntermediateDirectories: true)
+        let corrupt = MockTransport(sourcePDF: pdf, pdf: [.corrupt])
+        let rejected = DownloadModel(engine: DownloadEngine(transport: corrupt, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        rejected.directory = corruptFolder
+        rejected.input = "https://arxiv.org/html/2501.12345v2"
+        rejected.start()
+        try await waitForQueue(rejected)
+        try expect(rejected.failures == 1 && rejected.input == "https://arxiv.org/html/2501.12345v2", "PDF validation failure must not clear input")
+        print("PASS completed input: incremental clearing, duplicate links, requested versions, existing files, retries, failure and cancellation")
     }
 
     @MainActor static func waitForQueue(_ model: DownloadModel) async throws {
@@ -522,6 +619,35 @@ struct CoreTests {
         model.busy = false
         settle()
         try expect(editor.isEditable && editor.allowsUndo && !editor.isAutomaticDashSubstitutionEnabled, "input restores editing and preserves URL punctuation")
+        window.makeFirstResponder(editor)
+        editor.insertText("2501.12345v2", replacementRange: NSRange(location: 0, length: 0))
+        settle()
+        try expect(model.input == "2501.12345v2" && editor.undoManager?.canUndo == true, "user edits have native undo")
+        model.busy = true
+        model.input = ""
+        settle()
+        try expect(editor.string.isEmpty && editor.undoManager?.canUndo == false, "automatic input cleanup discards undo actions for old text")
+        model.busy = false
+        settle()
+        model.input = "https://arxiv.org/html/2501.12345v2\n2501.12345\nhttps://example.com/paper\nbad-link"
+        settle()
+        for theme in AppTheme.allCases {
+            model.theme = theme
+            for dark in [false, true] {
+                let palette = theme.palette(dark: dark)
+                editor.styleReferences(textColor: ThemePalette.nativeColor(palette.text), accentColor: ThemePalette.nativeColor(palette.accent), underlineRecognized: theme == .graphite)
+                let storage = editor.textStorage!
+                for (token, valid) in [("https://arxiv.org/html/2501.12345v2", true), ("2501.12345", true), ("https://example.com/paper", false), ("bad-link", false)] {
+                    let range = DownloaderView.inputRange(of: token, in: editor.string)!
+                    let attributes = storage.attributes(at: range.location, effectiveRange: nil)
+                    try expect((attributes[.foregroundColor] as? NSColor) == ThemePalette.nativeColor(valid ? palette.accent : palette.text), "recognized input uses semantic theme color")
+                    try expect((attributes[.underlineStyle] as? Int) == (valid && theme == .graphite ? NSUnderlineStyle.single.rawValue : nil), "graphite recognition consistent in light and dark")
+                    try expect(attributes[.link] == nil, "recognized input stays editable text instead of a clickable rich-text link")
+                }
+            }
+        }
+        model.input = ""
+        settle()
         window.orderOut(nil)
         print("PASS native input: placeholder/typed baseline, document bounds, multiline binding, paste limit and busy state")
     }
@@ -656,6 +782,15 @@ struct CoreTests {
             model.busy = false
         }
         model.directory = directory
+        model.input = "https://arxiv.org/html/2609.22978\n1706.03762v1\nhttps://example.com/paper\ninvalid-link"
+        model.items = completedItems
+        for theme in [AppTheme.graphite, .lagoon] {
+            model.theme = theme
+            for scheme in [ColorScheme.light, .dark] {
+                app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+                try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 584, height: 570, name: "recognized-\(theme.rawValue)-\(scheme == .light ? "light" : "dark")", title: "arXiv下载器")
+            }
+        }
         print("UI snapshots: \(output.path)")
     }
 
