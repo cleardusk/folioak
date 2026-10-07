@@ -40,6 +40,8 @@ Actions 会再次执行离线／资源测试，构建安装包，核验包的 SH
 
 普通 `main` 推送会测试、构建并保留安装包 artifact 7 天；PR 只测试、构建。在 Actions 页面手动运行也可获取安装包，手动运行不创建 Release。自动测试不访问 arXiv，以免真实服务故障影响发布。
 
+云端固定使用 Xcode 26.3 / macOS SDK 26.2，避免默认旧 SDK 改变新系统上的原生控件外观；最低系统版本仍为 macOS 13。该工具链来自 [GitHub 官方 macOS runner 镜像](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)，缺失或版本不符时构建直接失败。
+
 工作流只使用固定提交版本的 GitHub 官方 actions。测试、构建任务只有只读仓库权限；仅通过全部检查的 tag 发布任务获得写入 Release 的权限，无需额外上传个人 GitHub token。Apple 签名凭据未配置。
 
 私有仓库的 macOS Actions 消耗账号的构建额度，超出免费额度后的运行受账号计费设置约束；本工作流构建设置 15 分钟超时，同分支的新提交取消旧运行，tag 发布保留独立运行。
