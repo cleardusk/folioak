@@ -93,6 +93,6 @@ jobs:
             exit 1
           fi
           gh release create "$RELEASE_TAG" "$asset_name.zip" "$asset_name.dmg" SHA256SUMS.txt \
-            --draft --verify-tag --target "$RELEASE_COMMIT" --title "arXiv 下载器 $RELEASE_TAG" \
+            --draft --verify-tag --target "$RELEASE_COMMIT" --title "arXiv下载器 $RELEASE_TAG" \
             --notes-file ../.github/release-notes.md
           gh release edit "$RELEASE_TAG" --draft=false

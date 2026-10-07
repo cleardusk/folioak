@@ -1,4 +1,4 @@
-# arXiv 下载器
+# arXiv下载器
 
 原生 macOS 论文下载工具：粘贴 arXiv 链接或编号，自动命名并保存 PDF。
 

@@ -828,9 +828,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.applyAppearance()
         makeMenu()
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "arXiv 下载器"
+        window.title = "arXiv下载器"
         window.setFrameAutosaveName("ArxivDownloaderCompactWindow")
-        windowChrome = WindowChrome(window: window, model: model, title: "arXiv 下载器", settingsAction: { [weak self] in self?.showSettings() })
+        windowChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", settingsAction: { [weak self] in self?.showSettings() })
         window.contentView = NSHostingView(rootView: DownloaderView(model: model))
         window.minSize = NSSize(width: 584, height: 512)
         window.delegate = self
@@ -870,7 +870,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let view = NSHostingView(rootView: SettingsView(model: model))
             let contentSize = view.fittingSize
             let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            panel.title = "arXiv 下载器设置"
+            panel.title = "arXiv下载器设置"
             settingsChrome = WindowChrome(window: panel, model: model, title: "设置")
             panel.contentView = view
             panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
@@ -886,14 +886,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appItem = NSMenuItem()
         menu.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "关于 arXiv 下载器", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "关于 arXiv下载器", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         let settingsItem = appMenu.addItem(withTitle: "设置…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "隐藏 arXiv 下载器", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "隐藏 arXiv下载器", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "退出 arXiv 下载器", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "退出 arXiv下载器", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
         menu.addItem(editItem)

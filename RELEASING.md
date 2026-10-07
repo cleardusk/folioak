@@ -27,13 +27,13 @@
 
 ## 发布新版本
 
-1. 修改 `Resources/Info.plist` 中的 `CFBundleShortVersionString`（如 `1.1.4`），同时递增 `CFBundleVersion`。
+1. 修改 `Resources/Info.plist` 中的 `CFBundleShortVersionString`（如 `1.1.5`），同时递增 `CFBundleVersion`。
 2. 更新 `.github/release-notes.md`，提交并推送 `main`，等待 Actions 回归与构建全部通过。
 3. 创建与应用版本一致的 tag 并推送：
 
 ```sh
-git tag -a v1.1.4 -m 'arXiv 下载器 1.1.4'
-git push origin v1.1.4
+git tag -a v1.1.5 -m 'arXiv下载器 1.1.5'
+git push origin v1.1.5
 ```
 
 Actions 会再次执行离线／资源测试，构建安装包，核验包的 SHA-256 后创建 Release，附上 DMG、ZIP、校验文件。任一检查失败都不会发布；tag 与应用版本不一致会失败。已发布的版本不会自动覆盖，修正内容应发布新版本。

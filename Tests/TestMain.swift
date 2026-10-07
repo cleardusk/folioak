@@ -532,7 +532,7 @@ struct CoreTests {
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        var chrome: WindowChrome? = WindowChrome(window: window, model: model, title: "arXiv 下载器", settingsAction: {})
+        var chrome: WindowChrome? = WindowChrome(window: window, model: model, title: "arXiv下载器", settingsAction: {})
         weak var released: WindowChrome?
         released = chrome
         let content = NSHostingView(rootView: DownloaderView(model: model))
@@ -582,7 +582,7 @@ struct CoreTests {
         app.setActivationPolicy(.prohibited)
         let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/qa")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        func capture<V: View>(_ content: V, width: Int, height: Int? = nil, name: String, title: String = "arXiv 下载器") throws {
+        func capture<V: View>(_ content: V, width: Int, height: Int? = nil, name: String, title: String = "arXiv下载器") throws {
             let view = NSHostingView(rootView: content.environment(\.controlActiveState, .key))
             let size = NSSize(width: CGFloat(width), height: height.map { CGFloat($0) } ?? view.fittingSize.height)
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)

@@ -2,11 +2,11 @@
 set -euo pipefail
 project_dir="${0:A:h}"
 cd "$project_dir"
-app_dir="$project_dir/dist/arXiv 下载器.app"
+app_dir="$project_dir/dist/arXiv下载器.app"
 mkdir -p "$project_dir/dist" "$project_dir/build"
 staging_dir=$(mktemp -d "$project_dir/build/app.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT
-staged_app="$staging_dir/arXiv 下载器.app"
+staged_app="$staging_dir/arXiv下载器.app"
 mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 \
