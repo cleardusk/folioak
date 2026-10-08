@@ -73,6 +73,7 @@ struct DownloadItem: Identifiable {
     let id = UUID()
     let original: String
     let reference: ArxivReference?
+    var restoreReference: ArxivReference?
     var metadata: PaperMetadata?
     var state: ItemState
     var progress: DownloadProgress?
@@ -241,7 +242,11 @@ final class DownloadModel: ObservableObject {
     func openFile(_ item: DownloadItem, reveal: Bool = false) {
         guard let url = item.savedURL else { return }
         guard FileManager.default.fileExists(atPath: url.path) else {
-            update(item.id) { $0.state = .missing; $0.savedURL = nil; $0.error = "原位置的 PDF 不存在，可重新下载。" }
+            update(item.id) {
+                $0.state = .missing; $0.savedURL = nil
+                $0.restoreReference = $0.metadata?.reference
+                $0.error = "原位置的 PDF 不存在，可重新下载。"
+            }
             return
         }
         if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -306,7 +311,8 @@ final class DownloadModel: ObservableObject {
             var pausedByRateLimit = false
             for id in ids {
                 if Task.isCancelled { break }
-                guard let reference = items.first(where: { $0.id == id })?.reference else { continue }
+                guard let item = items.first(where: { $0.id == id }),
+                      let reference = item.restoreReference ?? item.reference else { continue }
                 update(id) { $0.state = .metadata }
                 do {
                     let saved = try await engine.download(reference, to: target, naming: namingStyle) { [weak self] event in
@@ -326,10 +332,16 @@ final class DownloadModel: ObservableObject {
                     update(id) { $0.state = .cancelled; $0.progress = nil }
                     break
                 } catch {
+                    let cooldown: Date?
+                    if case DownloadError.cooldown(let seconds) = error {
+                        cooldown = Date().addingTimeInterval(seconds)
+                    } else { cooldown = nil }
                     update(id) {
-                        $0.state = .failed
+                        $0.state = cooldown == nil ? .failed : .paused
                         $0.progress = nil
-                        if let network = error as? URLError {
+                        if let cooldown {
+                            $0.error = "arXiv 要求暂停请求，可在 \(cooldown.formatted(date: .abbreviated, time: .standard)) 后重试。"
+                        } else if let network = error as? URLError {
                             if [.cannotCreateFile, .cannotOpenFile, .cannotWriteToFile].contains(network.code) {
                                 $0.error = "临时文件无法写入，请检查磁盘空间和权限。"
                             } else {
@@ -691,7 +703,9 @@ struct DownloadRow: View {
                     }.frame(maxWidth: 340)
                 }
                 if let error = item.error {
-                    Text(error).font(.system(size: 11)).foregroundStyle(UIColors.error).textSelection(.enabled)
+                    Text(error).font(.system(size: 11))
+                        .foregroundStyle(item.state == .paused ? ThemePalette.color(palette.secondary) : UIColors.error)
+                        .textSelection(.enabled)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
             HStack(alignment: .firstTextBaseline, spacing: 8) {

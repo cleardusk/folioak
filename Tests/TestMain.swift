@@ -42,14 +42,15 @@ actor MockTransport: HTTPTransport {
     private var pdfReplies: [MockReply]
     private let sourcePDF: URL
     private let delay: UInt64
+    private let latestVersion: Int?
     private(set) var metadataCalls = 0
     private(set) var pdfCalls = 0
     private(set) var times: [Date] = []
     private(set) var pdfURLs: [URL] = []
     private(set) var tempFiles: [URL] = []
 
-    init(sourcePDF: URL, metadata: [MockReply] = [.status(200)], pdf: [MockReply] = [.status(200)], delay: UInt64 = 0) {
-        self.sourcePDF = sourcePDF; metadataReplies = metadata; pdfReplies = pdf; self.delay = delay
+    init(sourcePDF: URL, metadata: [MockReply] = [.status(200)], pdf: [MockReply] = [.status(200)], delay: UInt64 = 0, latestVersion: Int? = nil) {
+        self.sourcePDF = sourcePDF; metadataReplies = metadata; pdfReplies = pdf; self.delay = delay; self.latestVersion = latestVersion
     }
     private func response(_ reply: MockReply, url: URL) throws -> HTTPURLResponse {
         switch reply {
@@ -64,7 +65,10 @@ actor MockTransport: HTTPTransport {
         times.append(Date()); metadataCalls += 1
         if delay > 0 { try await Task.sleep(nanoseconds: delay) }
         let reply = metadataReplies.count > 1 ? metadataReplies.removeFirst() : metadataReplies[0]
-        return (atom(), try response(reply, url: request.url!))
+        let id = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "id_list" }?.value
+        let requested = id.flatMap { try? ArxivReference.parse($0) }
+        let data = latestVersion.map { latest in atom(id: "\(requested?.baseID ?? "2501.12345")v\(requested?.version ?? latest)") } ?? atom()
+        return (data, try response(reply, url: request.url!))
     }
     func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
         times.append(Date()); pdfCalls += 1; pdfURLs.append(request.url!)
@@ -94,9 +98,11 @@ struct CoreTests {
             try storageTests(root: root, pdf: pdf)
             try filenameStorageTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)
+            try await transportTests(root: root, pdf: pdf)
             try await existingFileTests(root: root, pdf: pdf)
             try await queueTests(root: root, pdf: pdf)
             try await completedInputTests(root: root, pdf: pdf)
+            try await restoreVersionTests(root: root, pdf: pdf)
             try themeTests()
             try inputLayoutTests()
             try windowChromeTests()
@@ -486,12 +492,13 @@ struct CoreTests {
         paused.input = "2501.12345\n2501.12345v2"
         paused.start()
         try await waitForQueue(paused)
-        try expect(paused.items.map(\.state) == [.failed, .paused] && paused.retryCount == 2, "rate-limit exhaustion pauses remaining queue")
-        try expect(paused.input == "2501.12345\n2501.12345v2" && paused.summary.contains("1 篇待重试"), "paused queue preserves inputs and explains pending rows")
+        try expect(paused.items.map(\.state) == [.paused, .paused] && paused.retryCount == 2, "rate-limit exhaustion pauses the entire queue")
+        try expect(paused.input == "2501.12345\n2501.12345v2" && paused.summary.contains("2 篇待重试") && paused.items[0].error?.contains("后重试") == true, "paused queue preserves inputs and gives a resume time")
         paused.retry()
         try await waitForQueue(paused)
         let pausedCalls = await (throttled.metadataCalls, throttled.pdfCalls)
         try expect(pausedCalls.0 == 1 && pausedCalls.1 == 0, "batch retry cannot bypass cooldown")
+        try expect(paused.items.allSatisfy { $0.state == .paused } && paused.failures == 0, "retry during cooldown does not turn paused items into failures")
 
         let waitTransport = MockTransport(sourcePDF: pdf, metadata: [.status(429, "0")])
         let waiting = DownloadModel(engine: DownloadEngine(transport: waitTransport, requestInterval: 0, retryDelay: 0), preferences: preferences)
@@ -593,6 +600,39 @@ struct CoreTests {
         try await waitForQueue(rejected)
         try expect(rejected.failures == 1 && rejected.input == "https://arxiv.org/html/2501.12345v2", "PDF validation failure must not clear input")
         print("PASS completed input: incremental clearing, duplicate links, requested versions, existing files, retries, failure and cancellation")
+    }
+
+    @MainActor static func restoreVersionTests(root: URL, pdf: URL) async throws {
+        let suite = "arxiv-restore-test-\(UUID().uuidString)"
+        let prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        let transport = MockTransport(sourcePDF: pdf, latestVersion: 3)
+        let model = DownloadModel(engine: DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0), preferences: prefs)
+        let folder = root.appendingPathComponent("restore-version", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        model.directory = folder
+        let original = try ArxivReference.parse("2501.12345")
+        let metadata = try AtomParser.metadata(atom(), requested: original)
+        model.items = [DownloadItem(original: original.identifier, reference: original, metadata: metadata, state: .saved, savedURL: folder.appendingPathComponent("moved.pdf"))]
+        model.openFile(model.items[0])
+        model.input = "2501.12345\n2502.00001"
+        model.retry(model.items[0].id)
+        try await waitForQueue(model)
+        try expect(model.items[0].state == .saved && model.items[0].metadata?.reference.identifier == "2501.12345v2", "missing-file restore pins saved v2 even when latest is v3")
+        try expect(await transport.pdfURLs.first?.lastPathComponent == "2501.12345v2", "restore requests exact PDF version")
+        try expect(model.input == "2501.12345\n2502.00001", "restoring an old version preserves new pending latest-version inputs")
+
+        let retryTransport = MockTransport(sourcePDF: pdf, metadata: [.status(404), .status(200)])
+        let retryModel = DownloadModel(engine: DownloadEngine(transport: retryTransport, requestInterval: 0, retryDelay: 0), preferences: prefs)
+        retryModel.directory = folder
+        retryModel.input = "2501.12345"
+        retryModel.start()
+        try await waitForQueue(retryModel)
+        retryModel.input = "2502.00001"
+        retryModel.retry()
+        try await waitForQueue(retryModel)
+        try expect(retryModel.successes == 1 && retryModel.input == "2502.00001", "retrying an old failure preserves edited pending inputs")
+        print("PASS restore: exact version after missing file, edited input preserved during old-item retry")
     }
 
     @MainActor static func waitForQueue(_ model: DownloadModel) async throws {
@@ -832,8 +872,8 @@ struct CoreTests {
                         model.busy = true
                         try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "rate-wait-\(suffix)-\(width)")
                         model.busy = false
-                        model.items[0].state = .failed
-                        model.items[0].error = DownloadError.cooldown(120).localizedDescription
+                        model.items[0].state = .paused
+                        model.items[0].error = "arXiv 要求暂停请求，可在 \(Date().addingTimeInterval(120).formatted(date: .abbreviated, time: .standard)) 后重试。"
                         model.items[1].state = .paused
                         try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "rate-paused-\(suffix)-\(width)")
                     }
@@ -903,12 +943,16 @@ struct CoreTests {
         let folder = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/live-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let engine = DownloadEngine()
-        let paper = try await engine.download(ArxivReference.parse("2609.22978"), to: folder)
-        try expect(paper.metadata.title.hasPrefix("DeepSeek Elastic Compute"), "live title")
-        try expect(paper.pages == 31, "live page count")
-        let duplicate = try await engine.download(ArxivReference.parse("https://arxiv.org/pdf/2609.22978v1.pdf"), to: folder)
-        try expect(duplicate.alreadyExisted && duplicate.url == paper.url, "live duplicate handling")
-        print("PASS live: \(paper.metadata.reference.identifier), \(paper.pages) pages, duplicate reused")
-        print("Verified file: \(paper.url.path)")
+        for id in ["2609.22978v1", "2605.18678"] {
+            fputs("Live network: \(id)\n", stderr)
+            let paper = try await engine.download(ArxivReference.parse(id), to: folder)
+            if id == "2609.22978v1" {
+                try expect(paper.metadata.title.hasPrefix("DeepSeek Elastic Compute") && paper.pages == 31, "fixed-version live DSec fixture")
+            } else { try expect(paper.metadata.title.hasPrefix("Lance:") && paper.pages > 0, "live Lance metadata and PDF") }
+            let duplicate = try await engine.download(ArxivReference.parse(paper.metadata.reference.pdfURL.absoluteString + ".pdf"), to: folder)
+            try expect(duplicate.alreadyExisted && duplicate.url == paper.url, "live exact-version duplicate handling")
+            print("PASS live: \(paper.metadata.reference.identifier), \(paper.pages) pages, duplicate reused")
+            print("Verified file: \(paper.url.path)")
+        }
     }
 }

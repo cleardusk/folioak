@@ -230,6 +230,10 @@ protocol HTTPTransport {
     func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse)
 }
 
+struct HTTPResponseFailure: Error {
+    let response: HTTPURLResponse
+}
+
 enum NetworkPolicy {
     static func allows(_ url: URL?) -> Bool {
         guard let url, let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
@@ -243,12 +247,14 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
     let progress: @Sendable (DownloadProgress) -> Void
     private let lock = NSLock()
     private var error: DownloadError?
+    private var rejectedResponse: HTTPURLResponse?
     private var lastProgress: ContinuousClock.Instant?
     private let limit: Int64
     init(limit: Int64 = ResourceLimits.pdfBytes, _ progress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }) {
         self.limit = limit; self.progress = progress
     }
     var failure: DownloadError? { lock.lock(); defer { lock.unlock() }; return error }
+    var httpFailure: HTTPURLResponse? { lock.lock(); defer { lock.unlock() }; return rejectedResponse }
     private func reject(_ failure: DownloadError) { lock.lock(); defer { lock.unlock() }; if error == nil { error = failure } }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         if NetworkPolicy.allows(request.url) { completionHandler(request) }
@@ -256,6 +262,10 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
     }
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if let response = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
+            lock.lock(); rejectedResponse = response; lock.unlock()
+            downloadTask.cancel(); return
+        }
         if totalBytesWritten > limit || totalBytesExpectedToWrite > limit {
             reject(.limit("PDF 超过 256 MB，已停止下载。")); downloadTask.cancel(); return
         }
@@ -271,6 +281,11 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
 
 final class URLSessionTransport: HTTPTransport {
     private let session: URLSession
+    #if TESTING
+    init(testConfiguration: URLSessionConfiguration) {
+        session = URLSession(configuration: testConfiguration)
+    }
+    #endif
     init() {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
@@ -289,6 +304,9 @@ final class URLSessionTransport: HTTPTransport {
             defer { bytes.task.cancel() }
             if let failure = observer.failure { throw failure }
             guard let http = response as? HTTPURLResponse, NetworkPolicy.allows(response.url) else { throw DownloadError.unsafeResponse }
+            // HTTP status and Retry-After matter before the size or contents of
+            // an error page; do not wait for its body to finish streaming.
+            guard (200..<300).contains(http.statusCode) else { return (Data(), http) }
             guard response.expectedContentLength <= ResourceLimits.metadataBytes else { throw DownloadError.limit("论文元数据超过 1 MB，已停止下载。") }
             var body = Data()
             for try await byte in bytes {
@@ -298,7 +316,11 @@ final class URLSessionTransport: HTTPTransport {
             }
             try Task.checkCancellation()
             return (body, http)
-        } catch { throw observer.failure ?? error }
+        } catch {
+            if let failure = observer.failure { throw failure }
+            if let response = observer.httpFailure { throw HTTPResponseFailure(response: response) }
+            throw error
+        }
     }
     func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
         guard NetworkPolicy.allows(request.url) else { throw DownloadError.unsafeResponse }
@@ -307,11 +329,14 @@ final class URLSessionTransport: HTTPTransport {
             let (url, response) = try await session.download(for: request, delegate: observer)
             do {
                 if let failure = observer.failure { throw failure }
+                if let response = observer.httpFailure { throw HTTPResponseFailure(response: response) }
                 guard let http = response as? HTTPURLResponse, NetworkPolicy.allows(response.url) else { throw DownloadError.unsafeResponse }
                 return (url, http)
             } catch { try? FileManager.default.removeItem(at: url); throw error }
         } catch {
-            throw observer.failure ?? error
+            if let failure = observer.failure { throw failure }
+            if let response = observer.httpFailure { throw HTTPResponseFailure(response: response) }
+            throw error
         }
     }
 }
@@ -571,6 +596,11 @@ actor DownloadEngine {
                 return try await operation()
             } catch {
                 if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+                var error = error
+                if let failure = error as? HTTPResponseFailure {
+                    do { try check(failure.response) }
+                    catch let checked { error = checked }
+                }
                 var retry = (error as? URLError).map {
                     [.timedOut, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable].contains($0.code)
                 } ?? false
