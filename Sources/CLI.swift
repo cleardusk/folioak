@@ -297,8 +297,8 @@ private final class TerminalOutput: @unchecked Sendable {
                 exit(output.failure ? 1 : 0)
             }
             let cancellation = SignalCancellation()
-            // The same domain applies inside the app bundle and standalone.
-            let preferences = UserDefaults(suiteName: DownloadPreferences.domain)!
+            // macOS rejects adding the current application domain as a suite.
+            let preferences = DownloadPreferences.shared
             #if CLI_TESTING
             let coordinator = ProcessInfo.processInfo.environment["ARXIV_TEST_COORDINATION"].map { RequestCoordinator(directory: URL(fileURLWithPath: $0)) } ?? RequestCoordinator()
             #else

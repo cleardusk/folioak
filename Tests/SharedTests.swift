@@ -216,15 +216,22 @@ extension CoreTests {
         try expect(prefsText == root.appendingPathComponent("preferences-folder").path + "\nidentifierTitle\n", "shared preferences can be read by another process")
 
         let cli = executable.deletingLastPathComponent().appendingPathComponent("arxiv-download-test")
-        for arguments in [["--help"], ["--version"], ["--unknown"], ["not-an-arxiv-link", "--json"]] {
+        let embedded = root.appendingPathComponent("arXiv下载器.app/Contents/MacOS/arxiv-download")
+        try FileManager.default.createDirectory(at: embedded.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: cli, to: embedded)
+        let info = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources/Info.plist")
+        try FileManager.default.copyItem(at: info, to: embedded.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Info.plist"))
+        for location in [cli, embedded] {
+          for arguments in [["--help"], ["--version"], ["--unknown"], ["not-an-arxiv-link", "--json"]] {
             let child = Process(); let out = Pipe(); let error = Pipe()
-            child.executableURL = cli; child.arguments = arguments; child.standardOutput = out; child.standardError = error
+            child.executableURL = location; child.arguments = arguments; child.standardOutput = out; child.standardError = error
             try child.run(); child.waitUntilExit()
             let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             let status: Int32 = arguments == ["--unknown"] ? 2 : arguments[0] == "not-an-arxiv-link" ? 1 : 0
-            try expect(child.terminationStatus == status, "CLI executable exit status")
+            try expect(child.terminationReason == .exit && child.terminationStatus == status, "standalone/bundled CLI executable exit status")
             if arguments.last == "--json" { _ = try JSONSerialization.jsonObject(with: Data(text.utf8)) }
             else if status == 0 { try expect(!text.isEmpty, "CLI executable help/version output") }
+          }
         }
         for signal in [SIGINT, SIGTERM] {
             let coordinator = RequestCoordinator(directory: root.appendingPathComponent("cli-signal-\(signal)"))
@@ -247,6 +254,6 @@ extension CoreTests {
             try expect(!FileManager.default.fileExists(atPath: coordinator.directory.appendingPathComponent("request-state.json").path), "cancelled CLI never made a request")
             withExtendedLifetime(held) { }
         }
-        print("PASS IPC: two processes serialized, request spacing, waiting cancellation, SIGKILL lock release, shared preferences/cooldown and CLI SIGINT/SIGTERM")
+        print("PASS IPC: two processes serialized, request spacing, waiting cancellation, SIGKILL lock release, shared preferences/cooldown, standalone/bundled CLI and SIGINT/SIGTERM")
     }
 }
