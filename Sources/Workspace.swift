@@ -112,11 +112,18 @@ enum WorkspaceStore {
         let encoder = JSONEncoder()
         var retained = snapshot
         // Avoid first materializing a huge JSON blob for known-oversized states.
-        let textBytes = snapshot.input.utf8.count + (snapshot.items + snapshot.history).reduce(0) { sum, item in
-            sum + item.original.utf8.count + (item.metadata?.title.utf8.count ?? 0)
-                + (item.documentTitle?.utf8.count ?? 0) + (item.error?.utf8.count ?? 0)
-        } + snapshot.logs.reduce(0) { $0 + $1.message.utf8.count + ($1.subject?.utf8.count ?? 0) }
-        var data = textBytes <= byteLimit ? try encoder.encode(retained) : nil
+        var textBytes = snapshot.input.utf8.count
+        for item in snapshot.items + snapshot.history {
+            textBytes += item.original.utf8.count
+            textBytes += item.metadata?.title.utf8.count ?? 0
+            textBytes += item.documentTitle?.utf8.count ?? 0
+            textBytes += item.error?.utf8.count ?? 0
+        }
+        for entry in snapshot.logs {
+            textBytes += entry.message.utf8.count
+            textBytes += entry.subject?.utf8.count ?? 0
+        }
+        var data: Data? = textBytes <= byteLimit ? try encoder.encode(retained) : nil
         if data.map({ $0.count > byteLimit }) ?? true {
             let base = WorkspaceSnapshot(input: snapshot.input, items: snapshot.items, history: [], logs: [])
             let baseBytes = try encoder.encode(base).count
