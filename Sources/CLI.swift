@@ -96,7 +96,10 @@ struct CLIReport: Encodable {
 
 enum CLIRunner {
     static func terminalText(_ text: String) -> String {
-        String(text.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined())
+        // Retain filename joiners so displayed Unicode paths stay copyable.
+        String(text.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) && $0.value != 0x200C && $0.value != 0x200D ? " " : String($0)
+        }.joined())
     }
     static func run(_ options: CLIOptions, version: String, engine: DownloadEngine, preferences: UserDefaults,
                     stdout: @escaping @Sendable (String) -> Void, stderr: @escaping @Sendable (String) -> Void,

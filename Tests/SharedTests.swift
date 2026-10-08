@@ -21,7 +21,7 @@ extension CoreTests {
         prefs.set(NamingStyle.titleOnly.rawValue, forKey: "namingStyle")
         prefs.set("iris", forKey: "theme")
         let before = prefs.dictionaryRepresentation()
-        let override = root.appendingPathComponent("cli-override")
+        let override = root.appendingPathComponent("cli-override 👩‍💻")
         let options = try CLIOptions.parse(["2501.12345v2", "https://arxiv.org/html/2501.12345v2", "--output=\(override.path)", "--naming", "id-title", "--json"])
         let transport = MockTransport(sourcePDF: pdf)
         let engine = DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0)
@@ -31,6 +31,10 @@ extension CoreTests {
         let rows = report["results"] as! [[String: Any]]
         try expect(result == 0 && rows.count == 1 && report["deduplicated"] as? Int == 1, "CLI JSON and equivalent-link deduplication")
         try expect((rows[0]["path"] as? String)?.contains("[2501.12345v2]") == true && rows[0]["status"] as? String == "saved", "CLI naming and directory override")
+        let human = CapturedConsole()
+        let humanOptions = try CLIOptions.parse(["2501.12345v2", "-o", override.path, "--naming", "id-title"])
+        let humanCode = await CLIRunner.run(humanOptions, version: "test", engine: engine, preferences: prefs, stdout: { human.stdout($0) }, stderr: { human.stderr($0) })
+        try expect(humanCode == 0 && human.output == (rows[0]["path"] as! String) + "\n", "ordinary CLI output preserves actual Unicode file path")
         try expect(NSDictionary(dictionary: before).isEqual(to: prefs.dictionaryRepresentation()), "CLI overrides do not write shared/UI preferences")
         try expect(!FileManager.default.fileExists(atPath: original.path), "CLI override does not create the shared default directory")
         for args in [[], ["--unknown"], ["-o"], ["--naming", "bad"], ["-o", "--json"], ["2501.12345", "--output="], ["2501.12345", "-o", "a", "-o", "b"]] {
@@ -40,6 +44,8 @@ extension CoreTests {
         try rejects({ _ = try CLIOptions.parse(Array(repeating: "2501.12345", count: 201)) }, "CLI batch limit before deduplication")
         try expect(try CLIOptions.parse(["--help"]).action == .help, "CLI help")
         try expect(CLIRunner.terminalText("a\u{1b}[31m\n\u{202E}b") == "a [31m  b", "CLI terminal control sequences removed")
+        let unicodePath = "/tmp/研究 👩‍💻 👨‍👩‍👧‍👦.pdf"
+        try expect(CLIRunner.terminalText(unicodePath) == unicodePath, "CLI preserves Unicode filename joiners")
 
         let failed = CapturedConsole()
         let broken = DownloadEngine(transport: MockTransport(sourcePDF: pdf, pdf: [.corrupt]), requestInterval: 0, retryDelay: 0)
