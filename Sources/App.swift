@@ -29,13 +29,14 @@ enum AppAppearance: String, CaseIterable {
 }
 
 enum ItemState: Equatable {
-    case queued, metadata, checkingLocal, downloading, validating, retrying(Int), waiting(Date), paused, saved, existing, failed, cancelled, missing
+    case queued, coordinating, metadata, checkingLocal, downloading, validating, retrying(Int), waiting(Date), paused, saved, existing, failed, cancelled, missing
     var terminal: Bool {
         switch self { case .saved, .existing, .failed, .cancelled, .missing, .paused: return true; default: return false }
     }
     var label: String {
         switch self {
         case .queued: return "等待下载"
+        case .coordinating: return "等待其他下载任务"
         case .metadata: return "获取论文信息"
         case .checkingLocal: return "检查本地文件"
         case .downloading: return "下载中"
@@ -63,7 +64,7 @@ enum ItemState: Equatable {
         case .saved, .existing: return "checkmark.circle.fill"
         case .failed, .missing: return "exclamationmark.circle.fill"
         case .cancelled: return "minus.circle"
-        case .waiting, .paused: return "clock"
+        case .waiting, .paused, .coordinating: return "clock"
         default: return "circle.dotted"
         }
     }
@@ -121,18 +122,15 @@ final class DownloadModel: ObservableObject {
     private var worker: Task<Void, Never>?
     private var runID = UUID()
 
-    init(engine: DownloadEngine? = nil, preferences: UserDefaults = .standard, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
-        self.engine = engine ?? DownloadEngine(cooldownPreferences: preferences)
+    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
+        self.engine = engine ?? DownloadEngine(cooldownPreferences: preferences, coordinator: RequestCoordinator())
         self.preferences = preferences
         self.opener = opener
-        naming = NamingStyle(rawValue: preferences.string(forKey: "namingStyle") ?? "") ?? .dateTitle
+        let downloadPreferences = DownloadPreferences(preferences)
+        naming = downloadPreferences.naming
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "") ?? .native
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let preferred = home.appendingPathComponent("Desktop/PhD/PapersRepo", isDirectory: true)
-        let stored = preferences.string(forKey: "saveDirectory")
-        directory = stored.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? (FileManager.default.fileExists(atPath: preferred.path) ? preferred : home.appendingPathComponent("Downloads", isDirectory: true))
+        directory = downloadPreferences.directory
     }
 
     func applyAppearance() { NSApplication.shared.appearance = appearance.native }
@@ -187,20 +185,13 @@ final class DownloadModel: ObservableObject {
 
     func start() {
         guard !busy else { return }
-        let tokens = ArxivReference.tokens(in: input)
-        guard !tokens.isEmpty else { notice = "请先粘贴至少一个 arXiv 链接。"; return }
-        guard tokens.count <= ResourceLimits.batchCount else { notice = "每批最多 200 条输入，请分批下载。"; return }
-        var seen = Set<ArxivReference>()
-        duplicateCount = 0
+        let batch: BatchInput
+        do { batch = try BatchInput(input) }
+        catch { notice = error.localizedDescription; return }
+        duplicateCount = batch.duplicates
         batchID = UUID()
-        items = tokens.compactMap { token in
-            do {
-                let reference = try ArxivReference.parse(token)
-                if !seen.insert(reference).inserted { duplicateCount += 1; return nil }
-                return DownloadItem(original: token, reference: reference, state: .queued)
-            } catch {
-                return DownloadItem(original: token, reference: nil, state: .failed, error: error.localizedDescription)
-            }
+        items = batch.entries.map { entry in
+            DownloadItem(original: entry.original, reference: entry.reference, state: entry.reference == nil ? .failed : .queued, error: entry.error)
         }
         guard !items.isEmpty else { notice = "请先粘贴至少一个 arXiv 链接。"; return }
         execute(items.filter { $0.reference != nil }.map(\.id))
@@ -279,6 +270,7 @@ final class DownloadModel: ObservableObject {
         update(id) { item in
             guard !item.state.terminal else { return }
             switch event {
+            case .coordinating: item.state = .coordinating
             case .metadata: item.state = .metadata
             case .resolved(let metadata): item.metadata = metadata; item.state = .downloading
             case .checkingLocal: item.state = .checkingLocal

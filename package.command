@@ -20,6 +20,15 @@ staging_dir=$(mktemp -d "$project_dir/build/package.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT
 app_dir="$project_dir/dist/arXiv下载器.app"
 asset_name="arxiv-downloader-v$version-macos-arm64"
+cli_asset="arxiv-download-cli-v$version-macos-arm64"
+mkdir -p "$staging_dir/cli/arxiv-download"
+cp "$project_dir/dist/arxiv-download" "$staging_dir/cli/arxiv-download/arxiv-download"
+cp CLI-README.md "$staging_dir/cli/arxiv-download/README.md"
+ditto -c -k --norsrc --noextattr --keepParent "$staging_dir/cli/arxiv-download" "$staging_dir/$cli_asset.zip"
+ditto -x -k "$staging_dir/$cli_asset.zip" "$staging_dir/cli-unpacked"
+codesign --verify --strict "$staging_dir/cli-unpacked/arxiv-download/arxiv-download"
+xcrun lipo "$staging_dir/cli-unpacked/arxiv-download/arxiv-download" -verify_arch arm64
+test "$("$staging_dir/cli-unpacked/arxiv-download/arxiv-download" --version)" = "$version"
 ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$staging_dir/$asset_name.zip"
 ditto -x -k "$staging_dir/$asset_name.zip" "$staging_dir/unpacked"
 codesign --verify --deep --strict "$staging_dir/unpacked/arXiv下载器.app"
@@ -31,8 +40,10 @@ hdiutil create -volname 'arXiv下载器' -srcfolder "$staging_dir/dmg" -format U
 hdiutil verify "$staging_dir/$asset_name.dmg"
 mv -f "$staging_dir/$asset_name.zip" "$project_dir/dist/$asset_name.zip"
 mv -f "$staging_dir/$asset_name.dmg" "$project_dir/dist/$asset_name.dmg"
+mv -f "$staging_dir/$cli_asset.zip" "$project_dir/dist/$cli_asset.zip"
 cd "$project_dir/dist"
-shasum -a 256 "$asset_name.zip" "$asset_name.dmg" > "$staging_dir/SHA256SUMS.txt"
+shasum -a 256 "$asset_name.zip" "$asset_name.dmg" "$cli_asset.zip" > "$staging_dir/SHA256SUMS.txt"
 mv -f "$staging_dir/SHA256SUMS.txt" SHA256SUMS.txt
 print "已打包：$project_dir/dist/$asset_name.zip"
 print "已打包：$project_dir/dist/$asset_name.dmg"
+print "已打包：$project_dir/dist/$cli_asset.zip"

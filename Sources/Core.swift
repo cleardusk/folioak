@@ -22,6 +22,7 @@ enum DownloadError: LocalizedError {
     case storage(String)
     case limit(String)
     case unsafeResponse
+    case coordination(String)
 
     var errorDescription: String? {
         switch self {
@@ -38,6 +39,7 @@ enum DownloadError: LocalizedError {
         case .storage(let message): return "保存失败：\(message)"
         case .limit(let message): return message
         case .unsafeResponse: return "连接或重定向超出允许的 arXiv HTTPS 地址，已停止请求。"
+        case .coordination(let message): return message
         }
     }
 }
@@ -216,6 +218,7 @@ struct DownloadProgress: Sendable {
 }
 
 enum DownloadEvent: Sendable {
+    case coordinating
     case metadata
     case resolved(PaperMetadata)
     case checkingLocal
@@ -510,17 +513,20 @@ actor DownloadEngine {
     private let retryDelay: Double
     private let rateLimitDelay: Double
     private let cooldownPreferences: UserDefaults?
+    private let coordinator: RequestCoordinator?
+    private var lease: RequestLease?
     private var lastRequest: ContinuousClock.Instant?
     private var cooldownUntil: ContinuousClock.Instant?
     private var rateLimitStrikes = 0
     private static let cooldownKey = "requestCooldownUntil"
 
-    init(transport: HTTPTransport = URLSessionTransport(), requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil) {
+    init(transport: HTTPTransport = URLSessionTransport(), requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil) {
         self.transport = transport
         self.requestInterval = requestInterval
         self.retryDelay = retryDelay
         self.rateLimitDelay = rateLimitDelay
         self.cooldownPreferences = cooldownPreferences
+        self.coordinator = coordinator
         if let date = cooldownPreferences?.object(forKey: Self.cooldownKey) as? Date {
             let remaining = date.timeIntervalSinceNow
             if remaining.isFinite, remaining > 0, remaining <= ResourceLimits.retryAfterSeconds {
@@ -549,9 +555,21 @@ actor DownloadEngine {
         }
         try Task.checkCancellation()
         lastRequest = ContinuousClock().now
+        try persistRequestState()
+    }
+
+    private func persistRequestState() throws {
+        guard let lease else { return }
+        let now = ContinuousClock().now
+        let previous = lastRequest.map { Date().addingTimeInterval(Self.seconds(now.duration(to: $0))) }
+        let deadline = cooldownUntil.map { Date().addingTimeInterval(Self.seconds(now.duration(to: $0))) }
+        try lease.store(RequestState(lastRequest: previous, cooldown: deadline, strikes: rateLimitStrikes))
     }
 
     private func check(_ response: HTTPURLResponse) throws {
+        // Coordinated requests wait from the completed response. A slow state
+        // flush or network transfer must not shorten the next process's gap.
+        if lease != nil { lastRequest = ContinuousClock().now }
         guard (200..<300).contains(response.statusCode) else {
             var after = Self.retryAfter(response.value(forHTTPHeaderField: "Retry-After"))
             if response.statusCode == 429 {
@@ -565,9 +583,11 @@ actor DownloadEngine {
                 let remaining = Self.seconds(ContinuousClock().now.duration(to: cooldownUntil!))
                 cooldownPreferences?.set(Date().addingTimeInterval(remaining), forKey: Self.cooldownKey)
             }
+            try persistRequestState()
             throw DownloadError.http(response.statusCode, retryAfter: after)
         }
         rateLimitStrikes = 0
+        try persistRequestState()
     }
 
     private static func seconds(_ duration: Duration) -> Double {
@@ -591,11 +611,18 @@ actor DownloadEngine {
 
     private func retried<T>(event: @escaping @Sendable (DownloadEvent) -> Void, operation: () async throws -> T) async throws -> T {
         for attempt in 1...3 {
+            var started = false
             do {
                 try await pace(event: event)
+                started = true
                 return try await operation()
             } catch {
-                if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+                if started, lease != nil { lastRequest = ContinuousClock().now }
+                if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    if started { try? persistRequestState() }
+                    throw CancellationError()
+                }
+                if started { try persistRequestState() }
                 var error = error
                 if let failure = error as? HTTPResponseFailure {
                     do { try check(failure.response) }
@@ -630,6 +657,26 @@ actor DownloadEngine {
     }
 
     func download(_ reference: ArxivReference, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedPaper {
+        defer { lease = nil }
+        if let coordinator {
+            let acquired = try await coordinator.acquire { event(.coordinating) }
+            let state = try acquired.load()
+            let now = ContinuousClock().now
+            if let previous = state.lastRequest {
+                let age = max(0, min(requestInterval, -previous.timeIntervalSinceNow))
+                let instant = now.advanced(by: .seconds(-age))
+                lastRequest = max(lastRequest ?? instant, instant)
+            }
+            if let deadline = state.cooldown, deadline.timeIntervalSinceNow > 0 {
+                let instant = now.advanced(by: .seconds(deadline.timeIntervalSinceNow))
+                cooldownUntil = max(cooldownUntil ?? instant, instant)
+            }
+            rateLimitStrikes = state.strikes
+            lease = acquired
+            // Migrate any longer cooldown left by an older UI before pace can
+            // report a paused batch without making a request.
+            if cooldownUntil != nil { try persistRequestState() }
+        }
         event(.metadata)
         var components = URLComponents(string: "https://export.arxiv.org/api/query")!
         components.queryItems = [URLQueryItem(name: "id_list", value: reference.identifier), URLQueryItem(name: "max_results", value: "1")]

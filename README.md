@@ -25,14 +25,24 @@
 
 设置可调整目录、文件命名、深浅外观及六套主题。`⌘ Return` 开始下载，`⌘ ,` 打开设置。
 
+## 命令行
+
+同版本 Release 提供独立 CLI ZIP，无需启动 UI。解压后运行：
+
+```sh
+./arxiv-download https://arxiv.org/html/2605.18678 -o ~/Downloads/Papers
+```
+
+UI 与 CLI 共用默认目录、命名及限流；命令参数只影响本次执行。[CLI 用法](CLI-README.md)。
+
 ## 开发
 
 需要 Apple Command Line Tools 或 Xcode，应用运行无需额外依赖。
 
 ```sh
-./build.command     # 构建应用
+./build.command     # 构建 UI 与 CLI
 ./test.command      # 离线回归
-./package.command   # 生成 DMG、ZIP 和校验文件
+./package.command   # 生成 UI / CLI 安装包和校验文件
 ```
 
 [构建与发布](RELEASING.md) · [架构与界面](DESIGN.md) · [安全与实测](SECURITY-AUDIT.md)

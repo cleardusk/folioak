@@ -97,6 +97,9 @@ struct CoreTests {
             try securityTests(root: root)
             try storageTests(root: root, pdf: pdf)
             try filenameStorageTests(root: root, pdf: pdf)
+            try await cliTests(root: root, pdf: pdf)
+            try await coordinatorTests(root: root, pdf: pdf)
+            try await processTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)
             try await transportTests(root: root, pdf: pdf)
             try await existingFileTests(root: root, pdf: pdf)
@@ -871,6 +874,8 @@ struct CoreTests {
                         model.items[0].progress = nil
                         model.busy = true
                         try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "rate-wait-\(suffix)-\(width)")
+                        model.items[0].state = .coordinating
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "shared-wait-\(suffix)-\(width)")
                         model.busy = false
                         model.items[0].state = .paused
                         model.items[0].error = "arXiv 要求暂停请求，可在 \(Date().addingTimeInterval(120).formatted(date: .abbreviated, time: .standard)) 后重试。"

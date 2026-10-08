@@ -17,9 +17,9 @@
 ./package.command
 ```
 
-`package.command` 构建 arm64 `.app`，验证签名与 ZIP 解压后的架构，再生成 DMG、ZIP 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
+`package.command` 构建 arm64 `.app` 与独立 CLI，验证签名、版本及解压后的架构，再生成 UI DMG / ZIP、CLI ZIP 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
 
-`test.command` 还支持 `--stress`（200 次模拟下载及释放检查）、`--live`（真实下载至 `build/live-UUID/`）和 `--snapshots`（界面预览输出至 `build/qa/`）。真实下载测试不写入 PapersRepo。
+`test.command` 还支持 `--stress`（200 次模拟下载及释放检查）、`--live`（真实下载至 `build/live-UUID/`）和 `--snapshots`（界面预览输出至 `build/qa/`）。离线检查包含 CLI 退出码、信号取消和独立进程协调；真实下载测试不写入 PapersRepo。
 
 ## 提交规范
 
@@ -27,16 +27,16 @@
 
 ## 发布新版本
 
-1. 修改 `Resources/Info.plist` 中的 `CFBundleShortVersionString`（如 `1.1.5`），同时递增 `CFBundleVersion`。
+1. 修改 `Resources/Info.plist` 中的 `CFBundleShortVersionString`（如 `1.2.0`），同时递增 `CFBundleVersion`。
 2. 更新 `.github/release-notes.md`，提交并推送 `main`，等待 Actions 回归与构建全部通过。
 3. 创建与应用版本一致的 tag 并推送：
 
 ```sh
-git tag -a v1.1.5 -m 'arXiv下载器 1.1.5'
-git push origin v1.1.5
+git tag -a v1.2.0 -m 'arXiv下载器 1.2.0'
+git push origin v1.2.0
 ```
 
-Actions 会再次执行离线／资源测试，构建安装包，核验包的 SHA-256 后创建 Release，附上 DMG、ZIP、校验文件。任一检查失败都不会发布；tag 与应用版本不一致会失败。已发布的版本不会自动覆盖，修正内容应发布新版本。
+Actions 会再次执行离线／资源测试，构建安装包，核验包的 SHA-256 后创建 Release，附上 UI DMG / ZIP、CLI ZIP、校验文件。任一检查失败都不会发布；tag 与应用版本不一致会失败。已发布的版本不会自动覆盖，修正内容应发布新版本。
 
 普通 `main` 推送会测试、构建并保留安装包 artifact 7 天；PR 只测试、构建。在 Actions 页面手动运行也可获取安装包，手动运行不创建 Release。自动测试不访问 arXiv，以免真实服务故障影响发布。
 
