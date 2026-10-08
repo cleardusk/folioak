@@ -187,20 +187,14 @@ final class CLIConsole: @unchecked Sendable {
         let line = "\(compact)  \(status)"
         guard line != lastLine else { return }
         lastLine = line
-        if interactive {
-            if cursor && width >= 24 {
-                write("\r\u{1b}[2K" + styled("↓", 36) + " " + styled(compact, 2) + "  " + styled(status, 36))
-                activeLine = true
-            } else {
-                if activeLine { write("\r\u{1b}[2K"); activeLine = false }
-                switch event {
-                case .coordinating, .waiting, .retry: write(Self.clipped(message, columns: width) + "\n")
-                default: break
-                }
-            }
+        if interactive && cursor && width >= 24 {
+            write("\r\u{1b}[2K" + styled("↓", 36) + " " + styled(compact, 2) + "  " + styled(status, 36))
+            activeLine = true
         } else {
+            if activeLine { write("\r\u{1b}[2K"); activeLine = false }
             switch event {
-            case .coordinating, .waiting, .retry: write(label + "  " + message + "\n")
+            case .coordinating, .waiting, .retry:
+                write((interactive ? Self.clipped(message, columns: width) : label + "  " + message) + "\n")
             default: break
             }
         }

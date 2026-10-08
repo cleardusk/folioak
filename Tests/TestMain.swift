@@ -781,7 +781,7 @@ struct CoreTests {
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        var chrome: WindowChrome? = WindowChrome(window: window, model: model, title: "arXiv下载器", settingsAction: {})
+        var chrome: WindowChrome? = WindowChrome(window: window, model: model, title: "arXiv下载器")
         weak var released: WindowChrome?
         released = chrome
         let content = NSHostingView(rootView: DownloaderView(model: model))
@@ -793,15 +793,14 @@ struct CoreTests {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
             window.contentView?.superview?.layoutSubtreeIfNeeded()
             guard let close = window.standardWindowButton(.closeButton),
-                  let title = window.toolbar?.items.compactMap(\.view).first(where: { $0 is NSTextField }),
-                  let settings = window.toolbar?.items.compactMap(\.view).first(where: { $0 is NSButton }) else {
+                  let title = window.toolbar?.items.compactMap(\.view).first(where: { $0 is NSTextField }) else {
                 throw TestFailure.failed("native window controls or toolbar content missing")
             }
             let closeRect = close.convert(close.bounds, to: nil)
             let titleRect = title.convert(title.bounds, to: nil)
-            let settingsRect = settings.convert(settings.bounds, to: nil)
-            try expect(abs(closeRect.midY - titleRect.midY) <= 4 && abs(closeRect.midY - settingsRect.midY) <= 4, "window header controls aligned")
-            try expect(closeRect.maxX < titleRect.minX && titleRect.maxX < settingsRect.minX, "header items do not overlap at minimum width")
+            try expect(abs(closeRect.midY - titleRect.midY) <= 4, "window header controls aligned")
+            try expect(closeRect.maxX < titleRect.minX, "header items do not overlap at minimum width")
+            try expect(window.toolbar?.items.compactMap(\.view).contains(where: { $0 is NSButton }) == false, "toolbar has no redundant settings button")
             try expect(window.styleMask.contains(.titled) && window.styleMask.contains(.fullSizeContentView), "native window behavior retained")
             try expect(window.titleVisibility == .hidden && window.titlebarAppearsTransparent, "system title and separate background removed")
         }
@@ -845,7 +844,7 @@ struct CoreTests {
             let size = NSSize(width: CGFloat(width), height: height.map { CGFloat($0) } ?? view.fittingSize.height)
             let style: NSWindow.StyleMask = title == "设置" ? [.titled, .closable] : [.titled, .closable, .miniaturizable, .resizable]
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: style, backing: .buffered, defer: false)
-            let chrome = WindowChrome(window: window, model: model, title: title, settingsAction: title == "设置" ? nil : {}, workspace: title != "设置")
+            let chrome = WindowChrome(window: window, model: model, title: title, workspace: title != "设置")
             let headerHeight = window.frame.height - window.contentLayoutRect.height
             window.setContentSize(NSSize(width: size.width, height: size.height + (height == nil ? headerHeight : 0)))
             window.contentView = view

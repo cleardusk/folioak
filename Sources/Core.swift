@@ -27,7 +27,7 @@ enum DownloadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidLink: return "无法识别：请输入 arXiv 链接／编号，或 HTTPS PDF 直链。"
-        case .metadata(let message): return message
+        case .metadata(let message), .limit(let message), .coordination(let message): return message
         case .http(let code, _):
             if code == 404 { return "下载站点未找到文件或指定版本（404）。" }
             if code == 429 { return "下载站点暂时限流（429），请稍后重试。" }
@@ -37,9 +37,7 @@ enum DownloadError: LocalizedError {
             return "arXiv 要求暂停请求，请约 \(String(format: "%.0f", max(1, ceil(seconds / 60)))) 分钟后重试。"
         case .invalidPDF: return "收到的文件不是完整、可读的 PDF，未保存。"
         case .storage(let message): return "保存失败：\(message)"
-        case .limit(let message): return message
         case .unsafeResponse: return "连接或重定向不符合安全 HTTPS 要求，已停止请求。"
-        case .coordination(let message): return message
         }
     }
 }

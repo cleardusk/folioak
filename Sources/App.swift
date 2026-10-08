@@ -167,7 +167,7 @@ final class DownloadModel: ObservableObject {
         guard !busy else { return }
         let panel = NSOpenPanel()
         panel.title = "导入链接"; panel.allowedContentTypes = [.plainText]; panel.allowsMultipleSelection = false
-        let load: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+        present(panel) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
             do {
                 let handle = try PaperStorage.boundedRegularFile(at: url)
@@ -178,13 +178,6 @@ final class DownloadModel: ObservableObject {
                 self.appendInput(text.replacingOccurrences(of: "\u{FEFF}", with: ""))
             } catch { self.notice = error.localizedDescription }
         }
-        activePanel = panel
-        if let window = NSApp.keyWindow {
-            panel.beginSheetModal(for: window) { [self] response in
-                load(response)
-                activePanel = nil
-            }
-        } else { load(panel.runModal()); activePanel = nil }
     }
 
     func copyUnfinished() {
@@ -212,7 +205,7 @@ final class DownloadModel: ObservableObject {
         panel.canChooseFiles = false; panel.canChooseDirectories = true
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
         panel.directoryURL = directory
-        let save: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+        present(panel) { [weak self] response in
             guard response == .OK, let folder = panel.url else { return }
             do {
                 let url = try WorkspaceStore.export(data, named: name, to: folder)
@@ -220,13 +213,16 @@ final class DownloadModel: ObservableObject {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             } catch { self?.notice = "导出失败：\(error.localizedDescription)" }
         }
+    }
+
+    private func present(_ panel: NSOpenPanel, completion: @escaping (NSApplication.ModalResponse) -> Void) {
         activePanel = panel
-        if let window = NSApp.keyWindow {
-            panel.beginSheetModal(for: window) { [self] response in
-                save(response)
-                activePanel = nil
-            }
-        } else { save(panel.runModal()); activePanel = nil }
+        let finish: (NSApplication.ModalResponse) -> Void = { [self] response in
+            completion(response)
+            activePanel = nil
+        }
+        if let window = NSApp.keyWindow { panel.beginSheetModal(for: window, completionHandler: finish) }
+        else { finish(panel.runModal()) }
     }
 
     func retryFromLibrary(_ item: DownloadItem) {
@@ -346,11 +342,9 @@ final class DownloadModel: ObservableObject {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = directory
-        if let window = NSApp.keyWindow {
-            panel.beginSheetModal(for: window) { response in
-                if response == .OK, !self.busy, let url = panel.url { self.directory = url }
-            }
-        } else if panel.runModal() == .OK, !busy, let url = panel.url { directory = url }
+        present(panel) { [self] response in
+            if response == .OK, !busy, let url = panel.url { directory = url }
+        }
     }
 
     func start() {
@@ -859,17 +853,13 @@ final class WindowTitleField: NSTextField {
 @MainActor
 final class WindowChrome: NSObject, NSToolbarDelegate {
     private static let titleID = NSToolbarItem.Identifier("window-title")
-    private static let settingsID = NSToolbarItem.Identifier("window-settings")
     private weak var window: NSWindow?
     private let titleField: NSTextField
-    private let settingsAction: (() -> Void)?
-    private var settingsButton: NSButton?
     private var themeObservation: AnyCancellable?
 
-    init(window: NSWindow, model: DownloadModel, title: String, settingsAction: (() -> Void)? = nil, workspace: Bool = false) {
+    init(window: NSWindow, model: DownloadModel, title: String, workspace: Bool = false) {
         self.window = window
         self.titleField = WindowTitleField(labelWithString: title)
-        self.settingsAction = settingsAction
         super.init()
         window.styleMask.insert(.fullSizeContentView)
         window.titleVisibility = .hidden
@@ -892,40 +882,21 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.titleID, Self.settingsID]
+        [.flexibleSpace, Self.titleID]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        var items: [NSToolbarItem.Identifier] = [.flexibleSpace, Self.titleID, .flexibleSpace]
-        if settingsAction != nil { items.append(Self.settingsID) }
-        return items
+        [.flexibleSpace, Self.titleID, .flexibleSpace]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard identifier == Self.titleID else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
-        if identifier == Self.titleID {
-            item.label = titleField.stringValue
-            titleField.frame.size = NSSize(width: 140, height: 18)
-            item.view = titleField
-            return item
-        }
-        if identifier == Self.settingsID, settingsAction != nil {
-            let button = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")!, target: self, action: #selector(openSettings))
-            button.isBordered = false
-            button.imageScaling = .scaleNone
-            button.frame.size = NSSize(width: 28, height: 28)
-            button.toolTip = "设置（⌘,）"
-            button.setAccessibilityLabel("设置")
-            settingsButton = button
-            item.label = "设置"
-            item.toolTip = "设置（⌘,）"
-            item.view = button
-            return item
-        }
-        return nil
+        item.label = titleField.stringValue
+        titleField.frame.size = NSSize(width: 140, height: 18)
+        item.view = titleField
+        return item
     }
-
-    @objc private func openSettings() { settingsAction?() }
 
     private func applyTheme(_ theme: AppTheme) {
         func color(_ keyPath: KeyPath<ThemePalette, UInt32>) -> NSColor {
@@ -936,7 +907,6 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
         }
         window?.backgroundColor = color(\.canvas)
         titleField.textColor = color(\.text)
-        settingsButton?.contentTintColor = color(\.secondary)
     }
 }
 
@@ -956,7 +926,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "arXiv下载器"
         window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow")
-        windowChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", settingsAction: { [weak self] in self?.showSettings() }, workspace: true)
+        windowChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", workspace: true)
         window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }))
         window.minSize = NSSize(width: 820, height: 600)
         if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
