@@ -59,24 +59,22 @@ struct CLIOptions {
         return options
     }
 
-    static func help(version: String) -> String {
-        """
-        arxiv-download \(version)
-        用法：arxiv-download LINK_OR_ID... [选项]
+    static func help(version: String, color: Bool = false) -> String {
+        func accent(_ value: String) -> String { color ? "\u{1b}[36m\(value)\u{1b}[0m" : value }
+        return """
+        \(accent("arxiv-download")) \(version)
+        用法  arxiv-download LINK_OR_ID... [选项]
+        示例  arxiv-download 1706.03762 -o ~/Downloads/Papers
 
-          -o, --output DIR        保存目录；不存在时创建
-          --naming STYLE          date-title / id-title / title
-          --json                  将批次结果作为 JSON 输出
-          -h, --help              显示用法
-          --version               显示版本
+          \(accent("-o, --output DIR"))     保存目录，不存在时创建
+          \(accent("--naming STYLE"))       date-title / id-title / title
+          \(accent("--json"))               输出 JSON
+          \(accent("-h, --help"))           显示帮助
+          \(accent("--version"))            显示版本
 
-        默认读取 UI 的保存目录和命名方式；命令参数仅影响本次执行。
-        支持 arXiv 摘要/PDF/HTML 链接、编号及通用 HTTPS PDF 直链。
-        通用 PDF 使用文档标题或原文件名；--naming 仅影响 arXiv。
-        每批最多 200 条，自动去重。
-        终端显示简短彩色结果；NO_COLOR=1 关闭颜色。
-        重定向 stdout 时仅输出文件路径；--json 始终为无颜色 JSON。
-        退出码：0 成功；1 有失败或暂停；2 参数/目录错误；130 SIGINT；143 SIGTERM。
+        支持 arXiv 编号／链接和 HTTPS PDF，最多 200 条，自动去重。
+        默认沿用 UI 的目录与命名；选项仅影响本次运行。
+        重定向输出文件路径；NO_COLOR=1 关闭颜色。
         """ + "\n"
     }
 }
@@ -103,6 +101,7 @@ final class CLIConsole: @unchecked Sendable {
     private let interactive: Bool
     private let color: Bool
     private let cursor: Bool
+    private let columns: @Sendable () -> Int
     private var identifier: String
     private var lastLine = ""
     private var lastProgress = 0.0
@@ -110,12 +109,48 @@ final class CLIConsole: @unchecked Sendable {
     private var activeLine = false
     private var finished = false
 
-    init(identifier: String, interactive: Bool, color: Bool, cursor: Bool, write: @escaping @Sendable (String) -> Void) {
+    init(identifier: String, interactive: Bool, color: Bool, cursor: Bool,
+         columns: @escaping @Sendable () -> Int = { CLIConsole.terminalColumns() }, write: @escaping @Sendable (String) -> Void) {
         self.identifier = identifier; self.interactive = interactive
-        self.color = color && interactive; self.cursor = cursor && interactive; self.write = write
+        self.color = color && interactive; self.cursor = cursor && interactive; self.columns = columns; self.write = write
     }
     static func allowsColor(_ environment: [String: String]) -> Bool {
         environment["NO_COLOR"] == nil && environment["TERM"] != "dumb"
+    }
+    static func terminalColumns() -> Int {
+        var size = winsize()
+        return ioctl(STDERR_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0 ? Int(size.ws_col) : 80
+    }
+    static func displayWidth(_ text: String) -> Int {
+        text.reduce(0) { $0 + cellWidth($1) }
+    }
+    private static func cellWidth(_ character: Character) -> Int {
+        // Measure grapheme clusters so combining marks and joined emoji stay
+        // intact. Wide ranges also work under the C locale used by Swift CLIs.
+        if character.unicodeScalars.contains(where: { $0.properties.isEmojiPresentation || $0.value == 0xFE0F || $0.value == 0x20E3 }) { return 2 }
+        return character.unicodeScalars.map { scalar in
+            let value = scalar.value
+            switch value {
+            case 0x1100...0x115F, 0x2329...0x232A, 0x2E80...0xA4CF, 0xAC00...0xD7A3,
+                 0xF900...0xFAFF, 0xFE10...0xFE19, 0xFE30...0xFE6F, 0xFF01...0xFF60,
+                 0xFFE0...0xFFE6, 0x1B000...0x1B2FF, 0x20000...0x3FFFD: return 2
+            default:
+                if scalar.properties.generalCategory == .nonspacingMark || scalar.properties.generalCategory == .format { return 0 }
+                let measured = Int(wcwidth(Int32(value)))
+                return measured >= 0 ? measured : 1
+            }
+        }.max() ?? 0
+    }
+    static func clipped(_ text: String, columns: Int) -> String {
+        guard columns > 0 else { return "" }
+        guard displayWidth(text) > columns else { return text }
+        var result = "", used = 0
+        for character in text {
+            let width = cellWidth(character)
+            guard used + width <= columns - 1 else { break }
+            result.append(character); used += width
+        }
+        return result + "…"
     }
     private func styled(_ text: String, _ code: Int) -> String {
         color ? "\u{1b}[\(code)m\(text)\u{1b}[0m" : text
@@ -146,15 +181,26 @@ final class CLIConsole: @unchecked Sendable {
             else { message = String(format: "下载 %.1f MB", Double(progress.received) / 1_048_576) }
         }
         let label = CLIRunner.terminalText(identifier)
-        let compact = label.count > 48 ? String(label.prefix(48)) + "…" : label
-        let line = "\(compact)  \(message)"
+        let width = max(1, columns() - 1)
+        let status = Self.clipped(message, columns: max(1, width - 7))
+        let compact = Self.clipped(label, columns: max(1, width - Self.displayWidth(status) - 4))
+        let line = "\(compact)  \(status)"
         guard line != lastLine else { return }
         lastLine = line
         if interactive {
-            if cursor { write("\r\u{1b}[2K" + styled("…", 36) + " " + line); activeLine = true }
+            if cursor && width >= 24 {
+                write("\r\u{1b}[2K" + styled("↓", 36) + " " + styled(compact, 2) + "  " + styled(status, 36))
+                activeLine = true
+            } else {
+                if activeLine { write("\r\u{1b}[2K"); activeLine = false }
+                switch event {
+                case .coordinating, .waiting, .retry: write(Self.clipped(message, columns: width) + "\n")
+                default: break
+                }
+            }
         } else {
             switch event {
-            case .coordinating, .waiting, .retry: write(line + "\n")
+            case .coordinating, .waiting, .retry: write(label + "  " + message + "\n")
             default: break
             }
         }
@@ -163,17 +209,21 @@ final class CLIConsole: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         finished = true
         guard interactive else { return }
-        let symbol: String; let status: String; let tint: Int
+        let symbol: String; let status: String; let tint: Int; var detail: String?
         switch result.status {
         case "saved": symbol = "✓"; status = "已保存"; tint = 32
         case "existing": symbol = "✓"; status = "已存在"; tint = 32
         case "cancelled": symbol = "–"; status = "已取消"; tint = 90
-        case "paused": symbol = "◷"; status = "等待重试" + (result.retryAfter.map { " · \(Self.time($0)) 后" } ?? ""); tint = 33
-        default: symbol = "✕"; status = "失败" + (result.error.map { " · \(CLIRunner.terminalText($0))" } ?? ""); tint = 31
+        case "paused": symbol = "◷"; status = "等待重试"; tint = 33; detail = result.retryAfter.map { "\(Self.time($0)) 后可重试" }
+        default: symbol = "✕"; status = "失败"; tint = 31; detail = result.error.map(CLIRunner.terminalText)
         }
         let reference = CLIRunner.terminalText(result.identifier ?? (identifier.isEmpty ? result.input : identifier))
-        let compact = reference.count > 48 ? String(reference.prefix(48)) + "…" : reference
-        write((activeLine ? "\r\u{1b}[2K" : "") + styled(symbol, tint) + " " + compact + "  " + styled(status, tint) + "\n")
+        let width = max(1, columns() - 1)
+        let compact = Self.clipped(reference, columns: max(1, width - Self.displayWidth(status) - 4))
+        let line = width >= 24 ? styled(symbol, tint) + " " + compact + "  " + styled(status, tint) : styled(symbol, tint) + " " + status
+        write((activeLine ? "\r\u{1b}[2K" : "") + line + "\n")
+        if width < 24 { write(reference + "\n") }
+        if let detail, !detail.isEmpty { write("  " + detail + "\n") }
         activeLine = false
     }
 }
@@ -189,7 +239,7 @@ enum CLIRunner {
                     stdout: @escaping @Sendable (String) -> Void, stderr: @escaping @Sendable (String) -> Void,
                     interactive: Bool = false, color: Bool = false, cursor: Bool = true) async -> Int32 {
         do {
-            if options.action == .help { stdout(CLIOptions.help(version: version)); return 0 }
+            if options.action == .help { stdout(CLIOptions.help(version: version, color: interactive && color && !options.json)); return 0 }
             if options.action == .version { stdout(version + "\n"); return 0 }
             let defaults = DownloadPreferences(preferences)
             let directory = options.output.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL } ?? defaults.directory
@@ -298,8 +348,9 @@ private final class TerminalOutput: @unchecked Sendable {
         do {
             let options = try CLIOptions.parse(Array(CommandLine.arguments.dropFirst()))
             let output = TerminalOutput()
+            let environment = ProcessInfo.processInfo.environment
             if options.action == .help || options.action == .version {
-                output.write(options.action == .help ? CLIOptions.help(version: BuildVersion.current) : BuildVersion.current + "\n", to: .standardOutput)
+                output.write(options.action == .help ? CLIOptions.help(version: BuildVersion.current, color: isatty(STDOUT_FILENO) != 0 && CLIConsole.allowsColor(environment) && !options.json) : BuildVersion.current + "\n", to: .standardOutput)
                 exit(output.failure ? 1 : 0)
             }
             let cancellation = SignalCancellation()
@@ -311,7 +362,6 @@ private final class TerminalOutput: @unchecked Sendable {
             let coordinator = RequestCoordinator()
             #endif
             let engine = DownloadEngine(cooldownPreferences: preferences, coordinator: coordinator)
-            let environment = ProcessInfo.processInfo.environment
             let interactive = isatty(STDOUT_FILENO) != 0 && isatty(STDERR_FILENO) != 0 && !options.json
             let task = Task {
                 await CLIRunner.run(options, version: BuildVersion.current, engine: engine, preferences: preferences,
@@ -323,7 +373,9 @@ private final class TerminalOutput: @unchecked Sendable {
             let code = cancellation.signal.map { 128 + $0 } ?? (output.failure ? 1 : result)
             withExtendedLifetime(cancellation) { exit(code) }
         } catch {
-            fputs(CLIRunner.terminalText(error.localizedDescription) + "\n使用 --help 查看用法。\n", stderr)
+            let message = CLIRunner.terminalText(error.localizedDescription)
+            let color = isatty(STDERR_FILENO) != 0 && CLIConsole.allowsColor(ProcessInfo.processInfo.environment)
+            fputs((color ? "\u{1b}[31m✕\u{1b}[0m " : "") + message + "\n" + (message.contains("--help") ? "" : "使用 --help 查看用法。\n"), stderr)
             exit(2)
         }
     }

@@ -1,0 +1,152 @@
+import Foundation
+
+struct TransferSample: Codable {
+    let date: Date
+    let bytes: Int64
+}
+
+enum ActivityLevel: String, Codable, CaseIterable {
+    case info, success, warning, error
+    var label: String {
+        switch self { case .info: return "信息"; case .success: return "成功"; case .warning: return "注意"; case .error: return "错误" }
+    }
+    var symbol: String {
+        switch self { case .info: return "circle"; case .success: return "checkmark.circle"; case .warning: return "clock"; case .error: return "exclamationmark.circle" }
+    }
+}
+
+struct ActivityEntry: Identifiable, Codable {
+    var id = UUID()
+    var date = Date()
+    let level: ActivityLevel
+    let message: String
+    let subject: String?
+    let itemID: UUID?
+
+    private static let urlExpression = try! NSRegularExpression(pattern: #"https?://[^\s<>\"]+"#, options: .caseInsensitive)
+
+    // Signed PDF query strings must not leak into exported diagnostic logs.
+    static func redacted(_ value: String) -> String {
+        let text = value as NSString
+        var result = value
+        for match in urlExpression.matches(in: value, range: NSRange(location: 0, length: text.length)).reversed() {
+            let raw = text.substring(with: match.range)
+            guard let range = Range(match.range, in: result) else { continue }
+            guard var components = URLComponents(string: raw) else {
+                result.replaceSubrange(range, with: "[链接]")
+                continue
+            }
+            components.query = nil; components.fragment = nil; components.user = nil; components.password = nil
+            result.replaceSubrange(range, with: components.string ?? "[链接]")
+        }
+        return String(result.prefix(2048))
+    }
+
+    var line: String {
+        "\(date.formatted(date: .numeric, time: .standard)) [\(level.label)] \(subject.map { "\($0) · " } ?? "")\(message)"
+    }
+}
+
+struct WorkspaceSnapshot: Codable {
+    var schema = 1
+    let input: String
+    let items: [DownloadItem]
+    let history: [DownloadItem]
+    let logs: [ActivityEntry]
+}
+
+enum WorkspaceStore {
+    static let byteLimit = 8 * 1024 * 1024
+    static let historyLimit = 500
+    static let logLimit = 1500
+    static var defaultURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(DownloadPreferences.domain, isDirectory: true).appendingPathComponent("workspace.json")
+    }
+    static func read(_ url: URL) throws -> WorkspaceSnapshot? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let file = try PaperStorage.boundedRegularFile(at: url)
+        defer { try? file.close() }
+        let data = try file.read(upToCount: byteLimit + 1) ?? Data()
+        guard data.count <= byteLimit else { throw DownloadError.limit("历史记录过大") }
+        let snapshot = try JSONDecoder().decode(WorkspaceSnapshot.self, from: data)
+        guard snapshot.schema == 1, snapshot.input.utf8.count <= ResourceLimits.inputBytes,
+              snapshot.items.count <= ResourceLimits.batchCount, snapshot.history.count <= historyLimit,
+              snapshot.logs.count <= logLimit,
+              Set(snapshot.items.map(\.id)).count == snapshot.items.count,
+              Set(snapshot.history.map(\.id)).count == snapshot.history.count,
+              Set(snapshot.logs.map(\.id)).count == snapshot.logs.count,
+              (snapshot.items + snapshot.history).allSatisfy(validItem) else { throw DownloadError.storage("历史记录格式无效") }
+        return snapshot
+    }
+    private static func validItem(_ item: DownloadItem) -> Bool {
+        let references = [item.reference, item.restoreReference, item.metadata?.reference].compactMap { $0 }
+        guard references.allSatisfy({ (try? ArxivReference.parse($0.identifier)) == $0 }),
+              item.original.utf8.count <= ResourceLimits.inputBytes,
+              item.metadata.map({ $0.title.count <= ResourceLimits.titleCharacters && (1...12).contains($0.month) && (1900...2199).contains($0.year) }) ?? true,
+              item.documentTitle.map({ $0.count <= ResourceLimits.titleCharacters }) ?? true,
+              item.savedURL.map({ $0.isFileURL && $0.pathExtension.lowercased() == "pdf" }) ?? true,
+              item.directURL.map({ (try? DownloadSource.parse($0.absoluteString))?.directURL == $0 }) ?? true,
+              !(item.reference != nil && item.directURL != nil) else { return false }
+        return true
+    }
+
+    static func export(_ data: Data, named name: String, to directory: URL) throws -> URL {
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
+        for suffix in 0..<1000 {
+            let filename = base + (suffix == 0 ? "" : "-\(suffix + 1)") + "." + ext
+            let url = directory.appendingPathComponent(filename)
+            do {
+                try data.write(to: url, options: .withoutOverwriting)
+                return url
+            } catch let error as CocoaError where error.code == .fileWriteFileExists { continue }
+        }
+        throw DownloadError.storage("导出文件过多，请选择其他目录。")
+    }
+
+    // Keep the current queue and draft. Under byte pressure, retain the newest
+    // history and log entries within a shared budget instead of losing all saves.
+    @discardableResult
+    static func write(_ snapshot: WorkspaceSnapshot, to url: URL) throws -> WorkspaceSnapshot {
+        let encoder = JSONEncoder()
+        var retained = snapshot
+        // Avoid first materializing a huge JSON blob for known-oversized states.
+        let textBytes = snapshot.input.utf8.count + (snapshot.items + snapshot.history).reduce(0) { sum, item in
+            sum + item.original.utf8.count + (item.metadata?.title.utf8.count ?? 0)
+                + (item.documentTitle?.utf8.count ?? 0) + (item.error?.utf8.count ?? 0)
+        } + snapshot.logs.reduce(0) { $0 + $1.message.utf8.count + ($1.subject?.utf8.count ?? 0) }
+        var data = textBytes <= byteLimit ? try encoder.encode(retained) : nil
+        if data.map({ $0.count > byteLimit }) ?? true {
+            let base = WorkspaceSnapshot(input: snapshot.input, items: snapshot.items, history: [], logs: [])
+            let baseBytes = try encoder.encode(base).count
+            guard baseBytes <= byteLimit else { throw DownloadError.limit("当前任务过大，历史记录未能保存。") }
+            // Leave headroom so the next event does not repeat the trimming pass.
+            let available = max(0, byteLimit * 3 / 4 - baseBytes)
+            // Count one comma per entry; this slightly overestimates the JSON size.
+            let historySizes = try snapshot.history.map { try encoder.encode($0).count + 1 }
+            let logSizes = try snapshot.logs.map { try encoder.encode($0).count + 1 }
+            let logBudget = min(logSizes.reduce(0, +), available / 2)
+            let historyBudget = min(historySizes.reduce(0, +), available - logBudget)
+            func countFitting(_ sizes: [Int], budget: Int) -> Int {
+                var total = 0, count = 0
+                for size in sizes {
+                    guard total + size <= budget else { break }
+                    total += size; count += 1
+                }
+                return count
+            }
+            let historyCount = countFitting(historySizes, budget: historyBudget)
+            let usedByHistory = historySizes.prefix(historyCount).reduce(0, +)
+            let logCount = countFitting(Array(logSizes.reversed()), budget: available - usedByHistory)
+            retained = WorkspaceSnapshot(input: snapshot.input, items: snapshot.items,
+                                         history: Array(snapshot.history.prefix(historyCount)), logs: Array(snapshot.logs.suffix(logCount)))
+            data = try encoder.encode(retained)
+        }
+        guard let data, data.count <= byteLimit else { throw DownloadError.limit("历史记录过大") }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try data.write(to: url, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return retained
+    }
+}

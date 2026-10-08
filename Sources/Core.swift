@@ -44,7 +44,7 @@ enum DownloadError: LocalizedError {
     }
 }
 
-struct ArxivReference: Hashable, Sendable {
+struct ArxivReference: Hashable, Sendable, Codable {
     private static let expression = try! NSRegularExpression(pattern: #"^((?:[0-9]{2}(?:0[1-9]|1[0-2])\.[0-9]{4,5})|(?:[A-Za-z][A-Za-z.\-]*/[0-9]{2}(?:0[1-9]|1[0-2])[0-9]{3}))(?:v([1-9][0-9]*))?$"#)
     let baseID: String
     let version: Int?
@@ -104,7 +104,7 @@ enum NamingStyle: String, CaseIterable, Sendable {
     }
 }
 
-struct PaperMetadata: Sendable {
+struct PaperMetadata: Sendable, Codable {
     let reference: ArxivReference
     let title: String
     let year: Int
@@ -215,7 +215,7 @@ final class AtomParser: NSObject, XMLParserDelegate {
     }
 }
 
-struct DownloadProgress: Sendable {
+struct DownloadProgress: Sendable, Codable {
     let received: Int64
     let total: Int64
     var fraction: Double? { total > 0 ? min(1, Double(received) / Double(total)) : nil }

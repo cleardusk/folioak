@@ -11,6 +11,8 @@ struct ThemePalette {
     let action: UInt32
     let onAction: UInt32
 
+    var sidebar: UInt32 { surface }
+
     static func color(_ hex: UInt32) -> Color { Color(nsColor: nativeColor(hex)) }
     static func nativeColor(_ hex: UInt32) -> NSColor {
         NSColor(srgbRed: Double((hex >> 16) & 255) / 255,
@@ -24,7 +26,7 @@ enum AppTheme: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .native: return "原生"
+        case .native: return "暖砂"
         case .graphite: return "石墨"
         case .iris: return "鸢尾"
         case .lagoon: return "海湾"
@@ -36,29 +38,29 @@ enum AppTheme: String, CaseIterable {
     func palette(dark: Bool) -> ThemePalette {
         switch (self, dark) {
         case (.native, false):
-            return ThemePalette(canvas: 0xF3F4F6, surface: 0xFFFFFF, text: 0x202124, secondary: 0x5F6368, border: 0xD1D5DB, accent: 0x005AB8, action: 0x0069D9, onAction: 0xFFFFFF)
+            return ThemePalette(canvas: 0xFFFAF8, surface: 0xF5EEEA, text: 0x28201D, secondary: 0x766862, border: 0xE2D8D1, accent: 0x805644, action: 0x805644, onAction: 0xFFFFFF)
         case (.native, true):
-            return ThemePalette(canvas: 0x1E1E1E, surface: 0x252525, text: 0xEAEAEA, secondary: 0xB3B3B3, border: 0x484848, accent: 0x75B5FF, action: 0x75B5FF, onAction: 0x102139)
+            return ThemePalette(canvas: 0x100D0B, surface: 0x1B1613, text: 0xEBE0DA, secondary: 0xBAAAA2, border: 0x41352E, accent: 0xE9BFA9, action: 0x624638, onAction: 0xFFE1CF)
         case (.graphite, false):
-            return ThemePalette(canvas: 0xF7F7F7, surface: 0xFFFFFF, text: 0x242424, secondary: 0x626262, border: 0xD6D6D6, accent: 0x414141, action: 0x242424, onAction: 0xFFFFFF)
+            return ThemePalette(canvas: 0xFAFAFA, surface: 0xF0F0F0, text: 0x242424, secondary: 0x6C6C6C, border: 0xDDDDDD, accent: 0x555555, action: 0x444444, onAction: 0xFFFFFF)
         case (.graphite, true):
-            return ThemePalette(canvas: 0x171717, surface: 0x232323, text: 0xECECEC, secondary: 0xB0B0B0, border: 0x444444, accent: 0xD8D8D8, action: 0xE7E7E7, onAction: 0x202020)
+            return ThemePalette(canvas: 0x101010, surface: 0x1D1D1D, text: 0xE8E8E8, secondary: 0xA8A8A8, border: 0x363636, accent: 0xC9C9C9, action: 0x454545, onAction: 0xF0F0F0)
         case (.iris, false):
-            return ThemePalette(canvas: 0xF6F3FA, surface: 0xFEFCFF, text: 0x2A2532, secondary: 0x675F73, border: 0xD9D0E5, accent: 0x7050A0, action: 0x7050A0, onAction: 0xFFFFFF)
+            return ThemePalette(canvas: 0xFCFAFF, surface: 0xF1EDF7, text: 0x292431, secondary: 0x70687A, border: 0xDED7E7, accent: 0x77608C, action: 0x77608C, onAction: 0xFFFFFF)
         case (.iris, true):
-            return ThemePalette(canvas: 0x211D29, surface: 0x2D2738, text: 0xEDE7F5, secondary: 0xBDB2CA, border: 0x51465F, accent: 0xC9ABEF, action: 0xC9ABEF, onAction: 0x2A183F)
+            return ThemePalette(canvas: 0x110F15, surface: 0x1D1923, text: 0xE9E1EF, secondary: 0xB3A7BD, border: 0x3B3346, accent: 0xD1B9E5, action: 0x51415F, onAction: 0xF3DDFF)
         case (.lagoon, false):
-            return ThemePalette(canvas: 0xF0F6F6, surface: 0xFBFFFF, text: 0x203333, secondary: 0x526A6A, border: 0xC8DADB, accent: 0x007278, action: 0x007278, onAction: 0xFFFFFF)
+            return ThemePalette(canvas: 0xF9FCFB, surface: 0xEBF2F0, text: 0x202E2B, secondary: 0x5E706A, border: 0xD4E0DB, accent: 0x496F64, action: 0x496F64, onAction: 0xFFFFFF)
         case (.lagoon, true):
-            return ThemePalette(canvas: 0x152526, surface: 0x1E3234, text: 0xE2EEEE, secondary: 0xABC2C3, border: 0x3C595C, accent: 0x79CBCD, action: 0x79CBCD, onAction: 0x123335)
+            return ThemePalette(canvas: 0x0D1210, surface: 0x171F1C, text: 0xE0E9E5, secondary: 0xA7B9B1, border: 0x303F38, accent: 0xADCEC0, action: 0x354E43, onAction: 0xD9EFE5)
         case (.amber, false):
-            return ThemePalette(canvas: 0xF8F4EF, surface: 0xFFFCF8, text: 0x352C24, secondary: 0x716254, border: 0xE0D4C7, accent: 0x935719, action: 0x935719, onAction: 0xFFFFFF)
+            return ThemePalette(canvas: 0xFFFBF6, surface: 0xF6EFE4, text: 0x322B21, secondary: 0x776956, border: 0xE5DBCA, accent: 0x85672D, action: 0x87692F, onAction: 0xFFFFFF)
         case (.amber, true):
-            return ThemePalette(canvas: 0x28221C, surface: 0x352D24, text: 0xF0E8DE, secondary: 0xC7B9A8, border: 0x5D4E3E, accent: 0xE8BA7B, action: 0xE8BA7B, onAction: 0x39250D)
+            return ThemePalette(canvas: 0x14110C, surface: 0x221C13, text: 0xEEE4D3, secondary: 0xBBAF9B, border: 0x443B2B, accent: 0xDEC491, action: 0x5B4B2D, onAction: 0xFFEAC0)
         case (.midnight, false):
-            return ThemePalette(canvas: 0xEFF3FA, surface: 0xFCFDFF, text: 0x26324A, secondary: 0x5B6780, border: 0xCDD6E8, accent: 0x365FA9, action: 0x365FA9, onAction: 0xFFFFFF)
+            return ThemePalette(canvas: 0xFAFBFF, surface: 0xEDF0F7, text: 0x242C3C, secondary: 0x646C7F, border: 0xD7DDE9, accent: 0x576C91, action: 0x576C91, onAction: 0xFFFFFF)
         case (.midnight, true):
-            return ThemePalette(canvas: 0x182235, surface: 0x233047, text: 0xE4EAF6, secondary: 0xB0BED7, border: 0x42526C, accent: 0xA3BFFD, action: 0xA3BFFD, onAction: 0x192C50)
+            return ThemePalette(canvas: 0x0E1016, surface: 0x191D27, text: 0xE2E6F1, secondary: 0xADB5C7, border: 0x333B50, accent: 0xB7C7E9, action: 0x3E4B69, onAction: 0xE2EAFF)
         }
     }
 }
@@ -70,12 +72,12 @@ struct PrimaryActionStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: 13, weight: .medium))
             .foregroundStyle(ThemePalette.color(enabled ? (prominent ? palette.onAction : palette.text) : palette.secondary))
-            .padding(.horizontal, 12).frame(maxWidth: .infinity).frame(height: 28)
+            .padding(.horizontal, 12).frame(maxWidth: .infinity).frame(height: 40)
             .background(ThemePalette.color(enabled && prominent ? palette.action : palette.surface).opacity(configuration.isPressed ? 0.85 : 1))
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(enabled && prominent ? Color.clear : ThemePalette.color(palette.border), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(enabled && prominent ? Color.clear : ThemePalette.color(palette.border), lineWidth: 1))
     }
 }
 

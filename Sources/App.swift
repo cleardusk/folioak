@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
 // Use the property wrapper; the latest SDK also exports a State macro that the
 // standalone Command Line Tools compiler cannot load.
@@ -28,7 +29,7 @@ enum AppAppearance: String, CaseIterable {
     }
 }
 
-enum ItemState: Equatable {
+enum ItemState: Equatable, Codable {
     case queued, coordinating, metadata, checkingLocal, downloading, validating, retrying(Int), waiting(Date), paused, saved, existing, failed, cancelled, missing
     var terminal: Bool {
         switch self { case .saved, .existing, .failed, .cancelled, .missing, .paused: return true; default: return false }
@@ -70,8 +71,8 @@ enum ItemState: Equatable {
     }
 }
 
-struct DownloadItem: Identifiable {
-    let id = UUID()
+struct DownloadItem: Identifiable, Codable {
+    var id = UUID()
     let original: String
     let reference: ArxivReference?
     var directURL: URL? = nil
@@ -83,6 +84,10 @@ struct DownloadItem: Identifiable {
     var savedURL: URL?
     var pages: Int?
     var documentTitle: String?
+    var createdAt = Date()
+    var finishedAt: Date?
+    var bytesPerSecond: Double?
+    var transferSample: TransferSample?
     var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.map(DownloadSource.pdf) }
     var title: String { metadata?.title ?? documentTitle ?? source?.label ?? original }
     var canRetry: Bool { source != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
@@ -96,6 +101,7 @@ final class DownloadModel: ObservableObject {
                 input = oldValue
                 notice = "输入超过 64 KB，请分批粘贴。"
             }
+            schedulePersistence()
         }
     }
     @Published var directory: URL {
@@ -111,6 +117,9 @@ final class DownloadModel: ObservableObject {
         didSet { preferences.set(theme.rawValue, forKey: "theme") }
     }
     @Published var items: [DownloadItem] = []
+    @Published var history: [DownloadItem] = []
+    @Published var logs: [ActivityEntry] = []
+    @Published var persistenceNotice: String?
     @Published var batchID = UUID()
     @Published var busy = false
     @Published var cancelling = false
@@ -124,16 +133,174 @@ final class DownloadModel: ObservableObject {
     private let opener: (URL) -> Bool
     private var worker: Task<Void, Never>?
     private var runID = UUID()
+    private let stateURL: URL?
+    private var saveWork: DispatchWorkItem?
+    private var persistenceReady = false
+    private var damagedState = false
+    private var activePanel: NSOpenPanel?
 
-    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
+    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil) {
         self.engine = engine ?? DownloadEngine(cooldownPreferences: preferences, coordinator: RequestCoordinator())
         self.preferences = preferences
         self.opener = opener
+        self.stateURL = stateURL
         let downloadPreferences = DownloadPreferences(preferences)
         naming = downloadPreferences.naming
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "") ?? .native
         directory = downloadPreferences.directory
+        restoreWorkspace()
+        persistenceReady = true
+    }
+
+    var library: [DownloadItem] { history.sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) } }
+
+    func appendInput(_ text: String) {
+        guard !busy else { return }
+        let joined = input.isEmpty ? text : input + (input.hasSuffix("\n") ? "" : "\n") + text
+        guard joined.utf8.count <= ResourceLimits.inputBytes else { notice = "输入超过 64 KB，请分批导入。"; return }
+        input = joined
+        notice = nil
+    }
+
+    func importLinks() {
+        guard !busy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "导入链接"; panel.allowedContentTypes = [.plainText]; panel.allowsMultipleSelection = false
+        let load: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            do {
+                let handle = try PaperStorage.boundedRegularFile(at: url)
+                defer { try? handle.close() }
+                let data = try handle.read(upToCount: ResourceLimits.inputBytes + 1) ?? Data()
+                guard data.count <= ResourceLimits.inputBytes else { throw DownloadError.limit("文件超过 64 KB，请分批导入。") }
+                guard let text = String(data: data, encoding: .utf8) else { throw DownloadError.limit("请选择 UTF-8 编码的文本文件。") }
+                self.appendInput(text.replacingOccurrences(of: "\u{FEFF}", with: ""))
+            } catch { self.notice = error.localizedDescription }
+        }
+        activePanel = panel
+        if let window = NSApp.keyWindow {
+            panel.beginSheetModal(for: window) { [self] response in
+                load(response)
+                activePanel = nil
+            }
+        } else { load(panel.runModal()); activePanel = nil }
+    }
+
+    func copyUnfinished() {
+        let text = items.filter { $0.canRetry || $0.source == nil }.map(\.original).joined(separator: "\n")
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    func exportLogs(_ entries: [ActivityEntry]) {
+        exportData(Data(entries.map(\.line).joined(separator: "\n").utf8), name: "arxiv-log.txt")
+    }
+
+    func exportLibrary() {
+        struct Record: Encodable { let title: String; let source: String; let file: String?; let date: Date?; let pages: Int? }
+        let records = library.map { Record(title: $0.title, source: $0.source?.webURL.absoluteString ?? $0.original, file: $0.savedURL?.path, date: $0.finishedAt, pages: $0.pages) }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        do { exportData(try encoder.encode(records), name: "arxiv-library.json") }
+        catch { notice = "导出失败：\(error.localizedDescription)" }
+    }
+
+    private func exportData(_ data: Data, name: String) {
+        let panel = NSOpenPanel()
+        panel.title = name.hasSuffix(".txt") ? "导出日志" : "导出资料库"
+        panel.prompt = "导出"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true
+        panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
+        panel.directoryURL = directory
+        let save: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let folder = panel.url else { return }
+            do {
+                let url = try WorkspaceStore.export(data, named: name, to: folder)
+                self?.notice = nil
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } catch { self?.notice = "导出失败：\(error.localizedDescription)" }
+        }
+        activePanel = panel
+        if let window = NSApp.keyWindow {
+            panel.beginSheetModal(for: window) { [self] response in
+                save(response)
+                activePanel = nil
+            }
+        } else { save(panel.runModal()); activePanel = nil }
+    }
+
+    func retryFromLibrary(_ item: DownloadItem) {
+        guard !busy, let source = item.source else { return }
+        // Restore the exact version, even when the original request used “latest”.
+        let original = item.metadata?.reference.identifier ?? source.webURL.absoluteString
+        archiveResults()
+        guard let restored = try? DownloadSource.parse(original) else { return }
+        items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued)]
+        duplicateCount = 0; batchID = UUID()
+        record(.info, "重新下载", item: items[0])
+        persistWorkspace()
+        execute(items.map(\.id))
+    }
+
+    func record(_ level: ActivityLevel, _ message: String, item: DownloadItem? = nil) {
+        logs.append(ActivityEntry(level: level, message: ActivityEntry.redacted(message), subject: item.map { ActivityEntry.redacted($0.title) }, itemID: item?.id))
+        if logs.count > WorkspaceStore.logLimit { logs.removeFirst(logs.count - WorkspaceStore.logLimit) }
+    }
+
+    private func archiveResults() {
+        for item in items where item.savedURL != nil || item.state == .missing {
+            history.removeAll { old in
+                old.id == item.id || (item.savedURL != nil && old.savedURL == item.savedURL && old.source == item.source)
+                    || (old.state == .missing && item.savedURL != nil && old.metadata?.reference == item.metadata?.reference && old.source == item.source)
+            }
+            history.insert(item, at: 0)
+        }
+        history = Array(history.prefix(WorkspaceStore.historyLimit))
+    }
+
+    private func schedulePersistence() {
+        guard persistenceReady, stateURL != nil else { return }
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.persistWorkspace() }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    func persistWorkspace() {
+        saveWork?.cancel(); saveWork = nil
+        guard persistenceReady, let stateURL else { return }
+        do {
+            if damagedState, FileManager.default.fileExists(atPath: stateURL.path) {
+                // Preserve unreadable / future-schema files instead of overwriting them.
+                try FileManager.default.moveItem(at: stateURL, to: stateURL.appendingPathExtension("backup-\(UUID().uuidString)"))
+                damagedState = false
+            }
+            let retained = try WorkspaceStore.write(WorkspaceSnapshot(input: input, items: items, history: history, logs: logs), to: stateURL)
+            if retained.history.count != history.count { history = retained.history }
+            if retained.logs.count != logs.count { logs = retained.logs }
+            persistenceNotice = nil
+        } catch { persistenceNotice = "历史记录未能保存：\(error.localizedDescription)" }
+    }
+
+    private func restoreWorkspace() {
+        guard let stateURL else { return }
+        do {
+            guard let snapshot = try WorkspaceStore.read(stateURL) else { return }
+            input = snapshot.input; items = snapshot.items; history = snapshot.history; logs = snapshot.logs
+            var interrupted = 0
+            for i in items.indices {
+                if !items[i].state.terminal {
+                    items[i].state = .cancelled
+                    items[i].error = "上次下载中断，可重试。"
+                    interrupted += 1
+                }
+                items[i].progress = nil; items[i].transferSample = nil; items[i].bytesPerSecond = nil
+            }
+            if interrupted > 0 { record(.warning, "已恢复 \(interrupted) 项未完成任务") }
+        } catch {
+            damagedState = true
+            persistenceNotice = "历史记录无法读取，原文件将在下次保存时备份。"
+        }
     }
 
     func applyAppearance() { NSApplication.shared.appearance = appearance.native }
@@ -191,25 +358,32 @@ final class DownloadModel: ObservableObject {
         let batch: BatchInput
         do { batch = try BatchInput(input) }
         catch { notice = error.localizedDescription; return }
+        archiveResults()
         duplicateCount = batch.duplicates
         batchID = UUID()
         items = batch.entries.map { entry in
             DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL, state: entry.source == nil ? .failed : .queued, error: entry.error)
         }
         guard !items.isEmpty else { notice = "请先粘贴至少一个链接。"; return }
+        record(.info, "开始下载 · \(items.count) 项" + (duplicateCount > 0 ? " · 去重 \(duplicateCount) 条" : ""))
+        for item in items where item.source == nil { record(.error, item.error ?? "无法识别链接", item: item) }
+        persistWorkspace()
         execute(items.filter { $0.source != nil }.map(\.id))
     }
 
     func retry(_ single: UUID? = nil) {
         guard !busy else { return }
         let ids = items.filter { $0.canRetry && (single == nil || $0.id == single) }.map(\.id)
-        for id in ids { update(id) { $0.state = .queued; $0.error = nil; $0.progress = nil } }
+        guard !ids.isEmpty else { return }
+        record(.info, "重试 \(ids.count) 项")
+        for id in ids { update(id) { $0.state = .queued; $0.error = nil; $0.progress = nil; $0.finishedAt = nil; $0.bytesPerSecond = nil; $0.transferSample = nil } }
         execute(ids)
     }
 
     func cancel() {
         guard busy else { return }
         cancelling = true
+        record(.warning, "正在取消下载")
         worker?.cancel()
     }
 
@@ -220,6 +394,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func edit(_ item: DownloadItem) {
+        if !DownloadSource.tokens(in: input).contains(item.original) { appendInput(item.original) }
         editTarget = item.original
         editRequest = UUID()
     }
@@ -241,6 +416,13 @@ final class DownloadModel: ObservableObject {
                 $0.restoreReference = $0.metadata?.reference
                 $0.error = "原位置的 PDF 不存在，可重新下载。"
             }
+            if let index = history.firstIndex(where: { $0.id == item.id }) {
+                history[index].state = .missing; history[index].savedURL = nil
+                history[index].error = "原位置的 PDF 不存在，可重新下载。"
+            }
+            record(.warning, "本地文件不存在", item: item)
+            archiveResults()
+            persistWorkspace()
             return
         }
         if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -270,19 +452,34 @@ final class DownloadModel: ObservableObject {
 
     private func receive(_ event: DownloadEvent, for id: UUID, run: UUID) {
         guard run == runID else { return }
+        guard let before = items.first(where: { $0.id == id }), !before.state.terminal else { return }
         update(id) { item in
-            guard !item.state.terminal else { return }
             switch event {
             case .coordinating: item.state = .coordinating
             case .metadata: item.state = .metadata
             case .resolved(let metadata): item.metadata = metadata; item.state = .downloading
             case .document(let title): item.documentTitle = title
             case .checkingLocal: item.state = .checkingLocal
-            case .progress(let progress): item.progress = progress; item.state = .downloading
-            case .retry(let attempt): item.state = .retrying(attempt); item.progress = nil
+            case .progress(let progress):
+                let now = Date()
+                if let sample = item.transferSample, now.timeIntervalSince(sample.date) >= 0.4 {
+                    let speed = Double(max(0, progress.received - sample.bytes)) / now.timeIntervalSince(sample.date)
+                    item.bytesPerSecond = speed
+                    item.transferSample = TransferSample(date: now, bytes: progress.received)
+                } else if item.transferSample == nil {
+                    item.transferSample = TransferSample(date: now, bytes: progress.received)
+                }
+                item.progress = progress; item.state = .downloading
+            case .retry(let attempt): item.state = .retrying(attempt); item.progress = nil; item.transferSample = nil; item.bytesPerSecond = nil
             case .waiting(let date): item.state = .waiting(date); item.progress = nil
             case .validating: item.state = .validating
             }
+        }
+        if let item = items.first(where: { $0.id == id }), item.state != before.state {
+            let level: ActivityLevel
+            switch item.state { case .retrying, .waiting: level = .warning; default: level = .info }
+            record(level, item.state.label, item: item)
+            schedulePersistence()
         }
     }
 
@@ -295,6 +492,8 @@ final class DownloadModel: ObservableObject {
               FileManager.default.isWritableFile(atPath: directory.path) else {
             directoryNotice = "保存目录不存在或不可写，请重新选择后重试。"
             for id in ids { update(id) { $0.state = .failed; $0.error = nil } }
+            record(.error, directoryNotice!)
+            persistWorkspace()
             return
         }
         busy = true
@@ -311,13 +510,22 @@ final class DownloadModel: ObservableObject {
                       let source = item.restoreReference.map(DownloadSource.arxiv) ?? item.source else { continue }
                 if let until = pausedSources[source.rateLimitKey] {
                     update(id) { $0.state = .paused; $0.error = "下载站点要求暂停请求，可在 \(until.formatted(date: .abbreviated, time: .standard)) 后重试。" }
+                    if let paused = items.first(where: { $0.id == id }) { record(.warning, paused.error ?? "站点限流", item: paused) }
+                    persistWorkspace()
                     continue
                 }
                 update(id) { $0.state = .metadata }
+                record(.info, "获取论文信息", item: item)
+                var continuation: AsyncStream<DownloadEvent>.Continuation!
+                let events = AsyncStream<DownloadEvent>(bufferingPolicy: .bufferingNewest(128)) { continuation = $0 }
+                let sink = continuation!
+                let listener = Task { [weak self] in
+                    for await event in events { self?.receive(event, for: id, run: run) }
+                }
                 do {
-                    let saved = try await engine.download(source, to: target, naming: namingStyle) { [weak self] event in
-                        Task { @MainActor in self?.receive(event, for: id, run: run) }
-                    }
+                    let saved = try await engine.download(source, to: target, naming: namingStyle) { event in sink.yield(event) }
+                    sink.finish()
+                    await listener.value
                     update(id) {
                         $0.metadata = saved.metadata
                         $0.documentTitle = saved.title
@@ -325,14 +533,21 @@ final class DownloadModel: ObservableObject {
                         $0.pages = saved.pages
                         $0.state = saved.alreadyExisted ? .existing : .saved
                         $0.progress = nil
+                        $0.finishedAt = Date()
                     }
+                    if let result = items.first(where: { $0.id == id }) { record(.success, result.state.label, item: result) }
                     input = DownloadSource.tokens(in: input)
                         .filter { (try? DownloadSource.parse($0)) != source }
                         .joined(separator: "\n")
                 } catch is CancellationError {
+                    sink.finish()
+                    await listener.value
+                    record(.warning, "已取消", item: item)
                     update(id) { $0.state = .cancelled; $0.progress = nil }
                     break
                 } catch {
+                    sink.finish()
+                    await listener.value
                     let cooldown: Date?
                     if case DownloadError.cooldown(let seconds) = error {
                         cooldown = Date().addingTimeInterval(seconds)
@@ -350,8 +565,11 @@ final class DownloadModel: ObservableObject {
                             }
                         } else { $0.error = error.localizedDescription }
                     }
+                    if let failed = items.first(where: { $0.id == id }) { record(cooldown == nil ? .error : .warning, failed.error ?? "下载失败", item: failed) }
                     if let cooldown { pausedSources[source.rateLimitKey] = cooldown }
                 }
+                archiveResults()
+                persistWorkspace()
             }
             for id in ids {
                 update(id) { if !$0.state.terminal { $0.state = .cancelled; $0.progress = nil } }
@@ -359,6 +577,9 @@ final class DownloadModel: ObservableObject {
             busy = false
             cancelling = false
             worker = nil
+            archiveResults()
+            record(.info, "本批结束 · 已保存 \(successes) · 失败 \(failures)")
+            persistWorkspace()
         }
     }
 }
@@ -420,7 +641,7 @@ final class LinkTextView: NSTextView {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 8
         let text = NSMutableAttributedString(string: Self.example + "\n", attributes: [.font: font, .foregroundColor: placeholderColor, .paragraphStyle: paragraph])
-        text.append(NSAttributedString(string: "arXiv 或 PDF 链接，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
+        text.append(NSAttributedString(string: "arXiv 编号或 PDF 直链，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
         placeholderStorage.setAttributedString(text)
         placeholderContainer.containerSize = textContainer.containerSize
         placeholderContainer.lineFragmentPadding = textContainer.lineFragmentPadding
@@ -568,181 +789,6 @@ final class LinkScrollView: NSScrollView {
     }
 }
 
-struct DownloaderView: View {
-    @ObservedObject var model: DownloadModel
-    @ViewState private var inputFocused = false
-    @Environment(\.colorScheme) private var scheme
-    private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    Text("论文链接").font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    Button(action: model.paste) { Label("粘贴", systemImage: "doc.on.clipboard") }
-                        .buttonStyle(.borderless).controlSize(.small).disabled(model.busy)
-                        .help("追加剪贴板中的链接；每行一个，也支持空格分隔")
-                        .frame(height: 28)
-                }
-                LinkInput(model: model, focused: $inputFocused, palette: palette)
-                .frame(height: 104)
-                .background(ThemePalette.color(palette.surface))
-                .clipShape(RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(ThemePalette.color(inputFocused && !model.busy ? palette.accent : palette.border), lineWidth: 1))
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    Button(action: model.chooseDirectory) {
-                        HStack(spacing: 7) {
-                            Image(systemName: "folder").foregroundStyle(ThemePalette.color(palette.secondary))
-                            Text(model.directoryLabel).lineLimit(1).truncationMode(.middle)
-                            Image(systemName: "chevron.down").font(.system(size: 9)).foregroundStyle(ThemePalette.color(palette.secondary))
-                        }
-                        .font(.system(size: 12)).contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain).disabled(model.busy)
-                    .help("\(model.directory.path)\n点击更改保存目录")
-                    .accessibilityLabel("保存目录：\(model.directory.path)，点击更改")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("打开", action: model.openDirectory)
-                        .font(.system(size: 12)).frame(width: 40, height: 28)
-                        .buttonStyle(.borderless).foregroundStyle(ThemePalette.color(palette.secondary))
-                        .help("在 Finder 中打开保存目录").accessibilityLabel("打开保存目录")
-                    if model.busy {
-                        Button(model.cancelling ? "正在取消…" : "取消下载", action: model.cancel)
-                            .buttonStyle(PrimaryActionStyle(palette: palette, prominent: false))
-                            .keyboardShortcut(.cancelAction).disabled(model.cancelling)
-                            .frame(width: 108)
-                    } else {
-                        Button("开始下载", action: model.start)
-                            .buttonStyle(PrimaryActionStyle(palette: palette))
-                            .keyboardShortcut(.return, modifiers: .command)
-                            .disabled(model.tokenCount == 0).frame(width: 108)
-                            .help("开始下载（⌘ Return）")
-                    }
-                }.controlSize(.large)
-                if let error = model.directoryNotice {
-                    Text(error).font(.system(size: 11)).foregroundStyle(UIColors.error)
-                }
-            }
-            Divider()
-            if model.items.isEmpty {
-                VStack(spacing: 9) {
-                    Image(systemName: "tray").font(.system(size: 24, weight: .light)).foregroundStyle(.tertiary)
-                    Text("还没有下载任务").font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(model.items) { item in
-                            DownloadRow(item: item, model: model)
-                            if item.id != model.items.last?.id { Divider().padding(.leading, 29) }
-                        }
-                    }
-                }.id(model.batchID).frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if let notice = model.notice {
-                Text(notice).font(.system(size: 11)).foregroundStyle(UIColors.error).textSelection(.enabled)
-            }
-            HStack(spacing: 8) {
-                if model.busy { ProgressView().controlSize(.mini).frame(width: 12) }
-                Text(model.summary).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
-                Spacer()
-                if model.retryCount > 1 && !model.busy {
-                    Button("重试未完成项") { model.retry() }.controlSize(.small)
-                }
-            }.frame(height: 22)
-        }
-        .padding(22).frame(minWidth: 560, minHeight: 450)
-        .foregroundStyle(ThemePalette.color(palette.text))
-        .tint(ThemePalette.color(palette.accent))
-        .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
-        .onAppear { inputFocused = true }
-        .onReceive(model.$editRequest.dropFirst()) { _ in inputFocused = true }
-    }
-
-    static func inputRange(of token: String, in text: String) -> NSRange? {
-        let raw = text as NSString
-        let expression = try! NSRegularExpression(pattern: #"[^\s,;，；]+"#)
-        return expression.matches(in: text, range: NSRange(location: 0, length: raw.length))
-            .first(where: { raw.substring(with: $0.range) == token })?.range
-    }
-}
-
-struct DownloadRow: View {
-    let item: DownloadItem
-    @ObservedObject var model: DownloadModel
-    @Environment(\.colorScheme) private var scheme
-    private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: item.state.symbol).font(.system(size: 16))
-                .foregroundStyle(item.state.color(palette)).frame(width: 19)
-                .accessibilityLabel(item.state.label)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(item.title).font(.system(size: 12, weight: .medium))
-                    .lineLimit(3).textSelection(.enabled).help(item.title)
-                HStack(spacing: 8) {
-                    if let metadata = item.metadata {
-                        Text(metadata.reference.identifier).font(.system(size: 11, design: .monospaced))
-                    } else if let host = item.directURL?.host {
-                        Text(host).lineLimit(1).truncationMode(.middle)
-                    }
-                    Text(item.state.label).foregroundStyle(item.state.color(palette))
-                }.font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
-                if let url = item.savedURL {
-                    Text(url.lastPathComponent).font(.system(size: 10))
-                        .foregroundStyle(ThemePalette.color(palette.secondary))
-                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(url.path)
-                }
-                if let progress = item.progress, item.state == .downloading {
-                    HStack(spacing: 8) {
-                        if let fraction = progress.fraction { ProgressView(value: fraction).tint(ThemePalette.color(palette.accent)) }
-                        Text(progressText(progress)).font(.system(size: 10)).monospacedDigit()
-                            .foregroundStyle(ThemePalette.color(palette.secondary)).fixedSize()
-                    }.frame(maxWidth: 340)
-                }
-                if let error = item.error {
-                    Text(error).font(.system(size: 11))
-                        .foregroundStyle(item.state == .paused ? ThemePalette.color(palette.secondary) : UIColors.error)
-                        .textSelection(.enabled)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if let url = item.savedURL {
-                    Button("打开") { model.openFile(item) }.controlSize(.small).frame(width: 44).help(url.path)
-                    Menu {
-                        Button("在 Finder 中显示") { model.openFile(item, reveal: true) }
-                        Button("文件信息…") { model.fileInfo(item) }
-                        Button("复制文件名") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(url.lastPathComponent, forType: .string)
-                        }
-                        Divider()
-                        Button(item.directURL == nil ? "查看 arXiv 页面" : "查看来源链接") { model.openSource(item) }
-                    } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 20)
-                    .help("\(url.path)\(item.pages.map { "\n\($0) 页" } ?? "")")
-                    .accessibilityLabel("\(item.title)的更多操作")
-                } else if item.canRetry {
-                    Button("重试") { model.retry(item.id) }.controlSize(.small).frame(width: 44).disabled(model.busy)
-                } else if item.source == nil {
-                    Button("修改") { model.edit(item) }.controlSize(.small).frame(width: 44).disabled(model.busy)
-                }
-            }.frame(width: 72, alignment: .leading)
-        }
-        .padding(.vertical, 12).accessibilityElement(children: .contain)
-    }
-
-    private func progressText(_ progress: DownloadProgress) -> String {
-        let received = ByteCountFormatter.string(fromByteCount: progress.received, countStyle: .file)
-        if let fraction = progress.fraction { return "\(Int(fraction * 100))% · \(received)" }
-        return received
-    }
-}
-
 struct SettingsView: View {
     @ObservedObject var model: DownloadModel
     @Environment(\.colorScheme) private var scheme
@@ -820,7 +866,7 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
     private var settingsButton: NSButton?
     private var themeObservation: AnyCancellable?
 
-    init(window: NSWindow, model: DownloadModel, title: String, settingsAction: (() -> Void)? = nil) {
+    init(window: NSWindow, model: DownloadModel, title: String, settingsAction: (() -> Void)? = nil, workspace: Bool = false) {
         self.window = window
         self.titleField = WindowTitleField(labelWithString: title)
         self.settingsAction = settingsAction
@@ -838,7 +884,8 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         toolbar.centeredItemIdentifiers = [Self.titleID]
-        window.toolbar = toolbar
+        window.toolbar = workspace ? nil : toolbar
+        if workspace { window.isMovableByWindowBackground = true }
         themeObservation = model.$theme.sink { [weak self] theme in self?.applyTheme(theme) }
     }
 
@@ -897,19 +944,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindow: NSWindow?
     private var windowChrome: WindowChrome?
     private var settingsChrome: WindowChrome?
-    private let model = DownloadModel()
+    private let model = DownloadModel(stateURL: WorkspaceStore.defaultURL)
     private var terminationPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         model.applyAppearance()
         makeMenu()
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "arXiv下载器"
-        window.setFrameAutosaveName("ArxivDownloaderCompactWindow")
-        windowChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", settingsAction: { [weak self] in self?.showSettings() })
-        window.contentView = NSHostingView(rootView: DownloaderView(model: model))
-        window.minSize = NSSize(width: 584, height: 512)
+        window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow")
+        windowChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", settingsAction: { [weak self] in self?.showSettings() }, workspace: true)
+        window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }))
+        window.minSize = NSSize(width: 820, height: 600)
+        if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
+            var frame = window.frame
+            frame.size = NSSize(width: max(frame.width, window.minSize.width), height: max(frame.height, window.minSize.height))
+            window.setFrame(frame, display: false)
+        }
         window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -919,7 +971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationPending { return .terminateLater }
-        guard model.busy else { return .terminateNow }
+        guard model.busy else { model.persistWorkspace(); return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "仍有论文正在下载"
         alert.informativeText = "已保存的论文会保留。退出将停止当前下载和等待中的任务。"

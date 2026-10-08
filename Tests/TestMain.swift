@@ -87,6 +87,14 @@ actor MockTransport: HTTPTransport {
 struct CoreTests {
     static func main() async {
         do {
+            if CommandLine.arguments.contains("--ui-only") {
+                try sidebarMotionTests()
+                try themeTests()
+                try inputLayoutTests()
+                try windowChromeTests()
+                if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
+                return
+            }
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("arxiv-tests-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -107,11 +115,16 @@ struct CoreTests {
             try await queueTests(root: root, pdf: pdf)
             try await completedInputTests(root: root, pdf: pdf)
             try await restoreVersionTests(root: root, pdf: pdf)
+            try await workspaceTests(root: root, pdf: pdf)
+            try sidebarMotionTests()
             try themeTests()
             try inputLayoutTests()
             try windowChromeTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
-            if CommandLine.arguments.contains("--stress") { try await resourceTests(root: root, pdf: pdf) }
+            if CommandLine.arguments.contains("--stress") {
+                try await resourceTests(root: root, pdf: pdf)
+                try workspaceBenchmark(root: root)
+            }
             if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
             if CommandLine.arguments.contains("--live") { try await liveTests() }
         } catch {
@@ -687,7 +700,7 @@ struct CoreTests {
         app.setActivationPolicy(.prohibited)
         let model = DownloadModel(preferences: preferences)
         let view = NSHostingView(rootView: DownloaderView(model: model))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         func settle() {
             view.layoutSubtreeIfNeeded()
@@ -765,14 +778,14 @@ struct CoreTests {
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 570), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         var chrome: WindowChrome? = WindowChrome(window: window, model: model, title: "arXiv下载器", settingsAction: {})
         weak var released: WindowChrome?
         released = chrome
         let content = NSHostingView(rootView: DownloaderView(model: model))
         window.contentView = content
         defer { window.orderOut(nil) }
-        for width in [584, 680] {
+        for width in [820, 960] {
             window.setContentSize(NSSize(width: width, height: 570))
             window.contentView?.superview?.layoutSubtreeIfNeeded()
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
@@ -805,6 +818,9 @@ struct CoreTests {
         }
         chrome = nil
         try expect(released == nil, "theme observation must not retain window chrome")
+        let workspaceChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", workspace: true)
+        try expect(window.toolbar == nil && window.standardWindowButton(.closeButton) != nil && window.isMovableByWindowBackground, "integrated workspace keeps native controls and window dragging without duplicate title")
+        withExtendedLifetime(workspaceChrome) {}
         print("PASS window chrome: minimum width, header alignment, 12 theme backgrounds and released observer")
     }
 
@@ -820,7 +836,7 @@ struct CoreTests {
             let view = NSHostingView(rootView: content.environment(\.controlActiveState, .key))
             let size = NSSize(width: CGFloat(width), height: height.map { CGFloat($0) } ?? view.fittingSize.height)
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-            let chrome = WindowChrome(window: window, model: model, title: title, settingsAction: title == "设置" ? nil : {})
+            let chrome = WindowChrome(window: window, model: model, title: title, settingsAction: title == "设置" ? nil : {}, workspace: title != "设置")
             let headerHeight = window.frame.height - window.contentLayoutRect.height
             window.setContentSize(NSSize(width: size.width, height: size.height + (height == nil ? headerHeight : 0)))
             window.contentView = view
@@ -848,14 +864,14 @@ struct CoreTests {
             for scheme in [ColorScheme.light, .dark] {
                 let suffix = "\(theme.rawValue)-\(scheme == .light ? "light" : "dark")"
                 app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
-                for width in [584, 680] {
+                for width in [820, 960] {
                     model.input = input
                     model.items = completedItems
-                    try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "\(suffix)-\(width)")
-                    if width == 680 || theme == .native || theme == .midnight {
+                    try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "\(suffix)-\(width)")
+                    if width == 960 || theme == .native || theme == .midnight {
                         model.input = ""
                         model.items = []
-                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "empty-\(suffix)-\(width)")
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "empty-\(suffix)-\(width)")
                     }
                     if theme == .native || theme == .midnight {
                         model.input = input
@@ -864,24 +880,24 @@ struct CoreTests {
                             DownloadItem(original: "2609.22978", reference: paper.reference, metadata: paper, state: .downloading, progress: DownloadProgress(received: 4_500_000, total: 10_000_000)),
                             DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"), state: .queued)
                         ]
-                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "busy-\(suffix)-\(width)")
-                        if theme == .midnight && scheme == .dark && width == 584 {
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "busy-\(suffix)-\(width)")
+                        if theme == .midnight && scheme == .dark && width == 820 {
                             model.cancelling = true
-                            try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "cancelling-\(suffix)-\(width)")
+                            try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "cancelling-\(suffix)-\(width)")
                             model.cancelling = false
                         }
                         model.busy = false
                         model.items[0].state = .waiting(Date().addingTimeInterval(60))
                         model.items[0].progress = nil
                         model.busy = true
-                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "rate-wait-\(suffix)-\(width)")
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "rate-wait-\(suffix)-\(width)")
                         model.items[0].state = .coordinating
-                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "shared-wait-\(suffix)-\(width)")
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "shared-wait-\(suffix)-\(width)")
                         model.busy = false
                         model.items[0].state = .paused
                         model.items[0].error = "arXiv 要求暂停请求，可在 \(Date().addingTimeInterval(120).formatted(date: .abbreviated, time: .standard)) 后重试。"
                         model.items[1].state = .paused
-                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "rate-paused-\(suffix)-\(width)")
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "rate-paused-\(suffix)-\(width)")
                     }
                 }
                 try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)", title: "设置")
@@ -907,7 +923,7 @@ struct CoreTests {
             model.theme = theme
             for scheme in [ColorScheme.light, .dark] {
                 app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
-                try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 584, height: 570, name: "recognized-\(theme.rawValue)-\(scheme == .light ? "light" : "dark")", title: "arXiv下载器")
+                try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 820, height: 600, name: "recognized-\(theme.rawValue)-\(scheme == .light ? "light" : "dark")", title: "arXiv下载器")
             }
         }
         model.input = "https://mirros.ai/report/agent-garten.pdf\nhttps://example.com/download?key=a,b;c\n1706.03762v1"
@@ -918,8 +934,22 @@ struct CoreTests {
         model.theme = .lagoon
         for scheme in [ColorScheme.light, .dark] {
             app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
-            try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 584, height: 570, name: "generic-pdf-\(scheme == .light ? "light" : "dark")")
+            try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 820, height: 600, name: "generic-pdf-\(scheme == .light ? "light" : "dark")")
             try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "generic-settings-\(scheme == .light ? "light" : "dark")", title: "设置")
+        }
+        model.history = completedItems.filter { $0.savedURL != nil }
+        model.record(.info, "开始下载 · 2 项")
+        model.record(.warning, "自动重试 1/3", item: completedItems[1])
+        model.record(.success, "已保存", item: completedItems[0])
+        model.record(.error, "连接超时，自动重试后仍未成功。请检查网络后重试。", item: completedItems[1])
+        for scheme in [ColorScheme.light, .dark] {
+            model.theme = .native
+            app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+            for page in [WorkspacePage.library, .logs] {
+                try capture(DownloaderView(model: model, page: page).environment(\.colorScheme, scheme), width: 960, height: 700, name: "workspace-\(page)-\(scheme == .light ? "light" : "dark")")
+            }
+            model.items = completedItems
+            try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 820, height: 600, name: "workspace-minimum-\(scheme == .light ? "light" : "dark")")
         }
         print("UI snapshots: \(output.path)")
     }

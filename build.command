@@ -14,7 +14,7 @@ mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 \
   -framework AppKit -framework SwiftUI -framework PDFKit \
-  Sources/Core.swift Sources/PDF.swift Sources/Shared.swift Sources/Theme.swift Sources/App.swift \
+  Sources/Core.swift Sources/PDF.swift Sources/Shared.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspaceView.swift Sources/SidebarMotion.swift Sources/App.swift \
   -o "$staged_app/Contents/MacOS/ArxivDownloader"
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 if [[ -f Resources/AppIcon.icns ]]; then
