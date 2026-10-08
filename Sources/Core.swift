@@ -532,7 +532,7 @@ actor DownloadEngine {
             if response.statusCode == 429 {
                 rateLimitStrikes = min(4, rateLimitStrikes + 1)
                 // A missing/invalid Retry-After still requires a shared backoff.
-                after = max(after ?? rateLimitDelay * pow(2, Double(rateLimitStrikes - 1)), rateLimitDelay)
+                after = max(after ?? 0, rateLimitDelay * pow(2, Double(rateLimitStrikes - 1)))
             }
             if let after, after > 0 {
                 let deadline = ContinuousClock().now.advanced(by: .seconds(after))

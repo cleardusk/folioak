@@ -336,6 +336,11 @@ struct CoreTests {
         let fallbackTimes = await fallback.times
         try expect(fallbackTimes[1].timeIntervalSince(fallbackTimes[0]) >= 0.025 && fallbackTimes[2].timeIntervalSince(fallbackTimes[1]) >= 0.055, "missing/invalid Retry-After uses increasing backoff")
 
+        let zeroWait = MockTransport(sourcePDF: pdf, metadata: [.status(429, "0"), .status(429, "0"), .status(200)])
+        _ = try await DownloadEngine(transport: zeroWait, requestInterval: 0, retryDelay: 0, rateLimitDelay: 0.03).download(ref, to: output)
+        let zeroTimes = await zeroWait.times
+        try expect(zeroTimes[2].timeIntervalSince(zeroTimes[1]) >= 0.055, "repeated short Retry-After cannot flatten backoff")
+
         let noHeader = MockTransport(sourcePDF: pdf, metadata: [.status(429)])
         let noHeaderEngine = DownloadEngine(transport: noHeader, requestInterval: 0, retryDelay: 0)
         let waitingJob = Task { try await noHeaderEngine.download(ref, to: output) }
