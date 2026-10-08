@@ -35,6 +35,9 @@ extension CoreTests {
         let humanOptions = try CLIOptions.parse(["2501.12345v2", "-o", override.path, "--naming", "id-title"])
         let humanCode = await CLIRunner.run(humanOptions, version: "test", engine: engine, preferences: prefs, stdout: { human.stdout($0) }, stderr: { human.stderr($0) })
         try expect(humanCode == 0 && human.output == (rows[0]["path"] as! String) + "\n", "ordinary CLI output preserves actual Unicode file path")
+        let terminal = CapturedConsole()
+        let terminalCode = await CLIRunner.run(humanOptions, version: "test", engine: engine, preferences: prefs, stdout: { terminal.stdout($0) }, stderr: { terminal.stderr($0) }, interactive: true, color: true, cursor: false)
+        try expect(terminalCode == 0 && terminal.output.isEmpty && terminal.errors.contains("已存在") && terminal.errors.contains("\u{1b}[32m"), "TTY compact colored results without full file paths")
         try expect(NSDictionary(dictionary: before).isEqual(to: prefs.dictionaryRepresentation()), "CLI overrides do not write shared/UI preferences")
         try expect(!FileManager.default.fileExists(atPath: original.path), "CLI override does not create the shared default directory")
         for args in [[], ["--unknown"], ["-o"], ["--naming", "bad"], ["-o", "--json"], ["2501.12345", "--output="], ["2501.12345", "-o", "a", "-o", "b"]] {
@@ -46,6 +49,20 @@ extension CoreTests {
         try expect(CLIRunner.terminalText("a\u{1b}[31m\n\u{202E}b") == "a [31m  b", "CLI terminal control sequences removed")
         let unicodePath = "/tmp/研究 👩‍💻 👨‍👩‍👧‍👦.pdf"
         try expect(CLIRunner.terminalText(unicodePath) == unicodePath, "CLI preserves Unicode filename joiners")
+        try expect(!CLIConsole.allowsColor(["NO_COLOR": ""]) && !CLIConsole.allowsColor(["TERM": "dumb"]) && CLIConsole.allowsColor(["TERM": "xterm-256color"]), "NO_COLOR and dumb terminals disable colors")
+        let progressOutput = CapturedConsole()
+        let progress = CLIConsole(identifier: "2501.12345v2", interactive: true, color: true, cursor: true, write: { progressOutput.stderr($0) })
+        progress.receive(.metadata)
+        progress.receive(.progress(DownloadProgress(received: 100, total: 1000)))
+        progress.receive(.progress(DownloadProgress(received: 200, total: 1000)))
+        progress.finish(CLIResult(input: "2501.12345v2", identifier: "2501.12345v2", status: "saved"))
+        let completedOutput = progressOutput.errors
+        progress.receive(.metadata)
+        try expect(completedOutput == progressOutput.errors && completedOutput.contains("10%") && !completedOutput.contains("20%") && completedOutput.filter { $0 == "\n" }.count == 1, "single progress line, throttled updates and no late events after completion")
+        let plain = CapturedConsole()
+        let plainConsole = CLIConsole(identifier: "2501.12345", interactive: false, color: true, cursor: true, write: { plain.stderr($0) })
+        plainConsole.receive(.retry(2)); plainConsole.receive(.retry(2)); plainConsole.receive(.metadata)
+        try expect(!plain.errors.contains("\u{1b}") && plain.errors.components(separatedBy: "重试").count == 2, "piped output has no ANSI or duplicate retry notices")
 
         let failed = CapturedConsole()
         let broken = DownloadEngine(transport: MockTransport(sourcePDF: pdf, pdf: [.corrupt]), requestInterval: 0, retryDelay: 0)
@@ -66,6 +83,10 @@ extension CoreTests {
         let throttled = DownloadEngine(transport: MockTransport(sourcePDF: pdf, metadata: [.status(429, "600")]), requestInterval: 0, retryDelay: 0)
         let pausedCode = await CLIRunner.run(pauseOptions, version: "test", engine: throttled, preferences: prefs, stdout: { paused.stdout($0) }, stderr: { paused.stderr($0) })
         try expect(pausedCode == 1 && paused.output.components(separatedBy: "paused").count == 3 && paused.output.contains("retryAfter"), "CLI rate limit pauses remaining inputs")
+        let jsonConsole = CapturedConsole()
+        let jsonCode = await CLIRunner.run(options, version: "test", engine: engine, preferences: prefs, stdout: { jsonConsole.stdout($0) }, stderr: { jsonConsole.stderr($0) }, interactive: true, color: true)
+        try expect(jsonCode == 0 && !jsonConsole.output.contains("\u{1b}") && jsonConsole.errors.isEmpty, "JSON stays machine-readable even with interactive colors requested")
+        _ = try JSONSerialization.jsonObject(with: Data(jsonConsole.output.utf8))
         print("PASS CLI: parsing, bounded batches, config overrides, deduplication, JSON, exit codes, cancellation and cooldown")
     }
 

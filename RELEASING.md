@@ -17,7 +17,7 @@
 ./package.command
 ```
 
-`package.command` 构建 arm64 `.app` 与独立 CLI，验证签名、版本及解压后的架构，再生成 UI DMG / ZIP、CLI ZIP 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
+`package.command` 构建含 CLI 的 arm64 `.app`，先签名内置 CLI，再签名完整应用；验证解压后的签名、架构、CLI 版本及 JSON，并确认内置和独立 CLI 相同。生成统一 DMG / 应用 ZIP、可选 CLI ZIP 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
 
 `test.command` 还支持 `--stress`（200 次模拟下载及释放检查）、`--live`（真实下载至 `build/live-UUID/`）和 `--snapshots`（界面预览输出至 `build/qa/`）。离线检查包含 CLI 退出码、信号取消和独立进程协调；真实下载测试不写入 PapersRepo。
 

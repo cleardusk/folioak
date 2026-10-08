@@ -33,6 +33,22 @@ ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$staging_dir/$asset_na
 ditto -x -k "$staging_dir/$asset_name.zip" "$staging_dir/unpacked"
 codesign --verify --deep --strict "$staging_dir/unpacked/arXiv下载器.app"
 xcrun lipo "$staging_dir/unpacked/arXiv下载器.app/Contents/MacOS/ArxivDownloader" -verify_arch arm64
+bundled_cli="$staging_dir/unpacked/arXiv下载器.app/Contents/MacOS/arxiv-download"
+codesign --verify --strict "$bundled_cli"
+xcrun lipo "$bundled_cli" -verify_arch arm64
+test "$("$bundled_cli" --version)" = "$version"
+"$bundled_cli" --help > /dev/null
+cmp "$bundled_cli" "$staging_dir/cli-unpacked/arxiv-download/arxiv-download"
+if "$bundled_cli" not-an-arxiv-link --json > "$staging_dir/invalid.json" 2> "$staging_dir/invalid.stderr"; then
+  print -u2 '内置 CLI 错误输入检查失败。'
+  exit 1
+else
+  test "$?" = 1
+fi
+xcrun swift -e 'import Foundation
+let report = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))) as! [String: Any]
+let rows = report["results"] as! [[String: Any]]
+precondition(report["schema"] as? Int == 1 && rows.count == 1 && rows[0]["status"] as? String == "failed")' "$staging_dir/invalid.json"
 mkdir -p "$staging_dir/dmg"
 ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/arXiv下载器.app"
 ln -s /Applications "$staging_dir/dmg/Applications"

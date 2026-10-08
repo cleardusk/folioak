@@ -27,13 +27,13 @@
 
 ## 命令行
 
-同版本 Release 提供独立 CLI ZIP，无需启动 UI。解压后运行：
+DMG / 应用 ZIP 已内置 CLI，安装一次即可同时使用 UI 和命令行，无需启动 UI：
 
 ```sh
-./arxiv-download https://arxiv.org/html/2605.18678 -o ~/Downloads/Papers
+"/Applications/arXiv下载器.app/Contents/MacOS/arxiv-download" --help
 ```
 
-UI 与 CLI 共用默认目录、命名及限流；命令参数只影响本次执行。[CLI 用法](CLI-README.md)。
+UI 与 CLI 共用默认目录、命名及限流；命令参数只影响本次执行。仅使用 CLI 也可下载独立 CLI ZIP。[CLI 用法](CLI-README.md)。
 
 ## 开发
 

@@ -72,7 +72,8 @@ struct CLIOptions {
 
         默认读取 UI 的保存目录和命名方式；命令参数仅影响本次执行。
         支持摘要、PDF、HTML 链接及编号，每批最多 200 条，自动去重。
-        下载进度写入 stderr；普通模式的 stdout 仅输出已保存文件路径。
+        终端显示简短彩色结果；NO_COLOR=1 关闭颜色。
+        重定向 stdout 时仅输出文件路径；--json 始终为无颜色 JSON。
         退出码：0 成功；1 有失败或暂停；2 参数/目录错误；130 SIGINT；143 SIGTERM。
         """ + "\n"
     }
@@ -94,6 +95,84 @@ struct CLIReport: Encodable {
     let results: [CLIResult]
 }
 
+final class CLIConsole: @unchecked Sendable {
+    private let lock = NSLock()
+    private let write: @Sendable (String) -> Void
+    private let interactive: Bool
+    private let color: Bool
+    private let cursor: Bool
+    private var identifier: String
+    private var lastLine = ""
+    private var lastProgress = 0.0
+    private var lastRetry = 0
+    private var activeLine = false
+    private var finished = false
+
+    init(identifier: String, interactive: Bool, color: Bool, cursor: Bool, write: @escaping @Sendable (String) -> Void) {
+        self.identifier = identifier; self.interactive = interactive
+        self.color = color && interactive; self.cursor = cursor && interactive; self.write = write
+    }
+    static func allowsColor(_ environment: [String: String]) -> Bool {
+        environment["NO_COLOR"] == nil && environment["TERM"] != "dumb"
+    }
+    private func styled(_ text: String, _ code: Int) -> String {
+        color ? "\u{1b}[\(code)m\(text)\u{1b}[0m" : text
+    }
+    static func time(_ date: Date) -> String {
+        date.formatted(date: date.timeIntervalSinceNow > 86_400 ? .abbreviated : .omitted, time: .standard)
+    }
+    func receive(_ event: DownloadEvent) {
+        lock.lock(); defer { lock.unlock() }
+        guard !finished else { return }
+        let message: String
+        switch event {
+        case .coordinating: message = "等待其他下载任务"
+        case .metadata: message = "获取信息"
+        case .resolved(let paper): identifier = paper.reference.identifier; message = "准备下载"
+        case .checkingLocal: message = "检查本地文件"
+        case .validating: message = "保存中"
+        case .waiting(let date): message = "等待至 \(Self.time(date))"
+        case .retry(let attempt):
+            guard attempt != lastRetry else { return }
+            lastRetry = attempt; message = "重试 \(attempt)/3"
+        case .progress(let progress):
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastProgress >= 0.2 else { return }
+            lastProgress = now
+            if let fraction = progress.fraction { message = "下载 \(Int(fraction * 100))%" }
+            else { message = String(format: "下载 %.1f MB", Double(progress.received) / 1_048_576) }
+        }
+        let line = "\(identifier)  \(message)"
+        guard line != lastLine else { return }
+        lastLine = line
+        if interactive {
+            if cursor { write("\r\u{1b}[2K" + styled("…", 36) + " " + line); activeLine = true }
+        } else {
+            switch event {
+            case .coordinating, .waiting, .retry: write(line + "\n")
+            default: break
+            }
+        }
+    }
+    func finish(_ result: CLIResult) {
+        lock.lock(); defer { lock.unlock() }
+        finished = true
+        guard interactive else { return }
+        let symbol: String; let status: String; let tint: Int
+        switch result.status {
+        case "saved": symbol = "✓"; status = "已保存"; tint = 32
+        case "existing": symbol = "✓"; status = "已存在"; tint = 32
+        case "cancelled": symbol = "–"; status = "已取消"; tint = 90
+        case "paused": symbol = "◷"; status = "等待重试" + (result.retryAfter.map { " · \(Self.time($0)) 后" } ?? ""); tint = 33
+        default: symbol = "✕"; status = "失败" + (result.error.map { " · \(CLIRunner.terminalText($0))" } ?? ""); tint = 31
+        }
+        let reference = CLIRunner.terminalText(result.identifier ?? result.input)
+        let compact = reference.count > 48 ? String(reference.prefix(48)) + "…" : reference
+        write((activeLine ? "\r\u{1b}[2K" : "") + styled(symbol, tint) + " " + compact + "  " + styled(status, tint) + "\n")
+        activeLine = false
+    }
+}
+
 enum CLIRunner {
     static func terminalText(_ text: String) -> String {
         // Retain filename joiners so displayed Unicode paths stay copyable.
@@ -103,7 +182,7 @@ enum CLIRunner {
     }
     static func run(_ options: CLIOptions, version: String, engine: DownloadEngine, preferences: UserDefaults,
                     stdout: @escaping @Sendable (String) -> Void, stderr: @escaping @Sendable (String) -> Void,
-                    interactive: Bool = false) async -> Int32 {
+                    interactive: Bool = false, color: Bool = false, cursor: Bool = true) async -> Int32 {
         do {
             if options.action == .help { stdout(CLIOptions.help(version: version)); return 0 }
             if options.action == .version { stdout(version + "\n"); return 0 }
@@ -123,26 +202,23 @@ enum CLIRunner {
             }
             var results: [CLIResult] = []
             var pause: Date?
+            let human = interactive && !options.json
             for entry in batch.entries {
                 var result = CLIResult(input: entry.original, identifier: entry.reference?.identifier, status: "failed", error: entry.error)
+                let console = CLIConsole(identifier: entry.reference?.identifier ?? "", interactive: human, color: color, cursor: cursor, write: stderr)
+                defer { console.finish(result) }
                 guard let reference = entry.reference else { results.append(result); continue }
                 if Task.isCancelled { result.status = "cancelled"; results.append(result); continue }
                 if let pause { result.status = "paused"; result.retryAfter = pause; results.append(result); continue }
                 do {
-                    if interactive { stderr("下载：\(reference.identifier)\n") }
                     let paper = try await engine.download(reference, to: directory, naming: naming) { event in
-                        switch event {
-                        case .coordinating: stderr("等待其他下载任务；可用 Ctrl+C 取消。\n")
-                        case .waiting(let date): stderr("等待请求至 \(date.formatted(date: .abbreviated, time: .standard))。\n")
-                        case .retry(let attempt): stderr("自动重试 \(attempt)/3。\n")
-                        default: break
-                        }
+                        console.receive(event)
                     }
                     result.identifier = paper.metadata.reference.identifier
                     result.status = paper.alreadyExisted ? "existing" : "saved"
                     result.path = paper.url.path
                     result.pages = paper.pages
-                    if !options.json { stdout(terminalText(paper.url.path) + "\n") }
+                    if !options.json && !human { stdout(terminalText(paper.url.path) + "\n") }
                 } catch is CancellationError { result.status = "cancelled" }
                 catch DownloadError.cooldown(let seconds) {
                     pause = Date().addingTimeInterval(seconds)
@@ -158,7 +234,7 @@ enum CLIRunner {
                 let data = try encoder.encode(CLIReport(version: version, deduplicated: batch.duplicates, results: results))
                 stdout(String(decoding: data, as: UTF8.self) + "\n")
             }
-            for result in results where result.status == "failed" || result.status == "paused" {
+            for result in results where !human && (result.status == "failed" || result.status == "paused") {
                 stderr("\(terminalText(result.input))：\(terminalText(result.error ?? "等待重试"))\n")
             }
             if results.contains(where: { $0.status == "cancelled" }) { return 130 }
@@ -221,16 +297,20 @@ private final class TerminalOutput: @unchecked Sendable {
                 exit(output.failure ? 1 : 0)
             }
             let cancellation = SignalCancellation()
-            let preferences = DownloadPreferences.shared
+            // The same domain applies inside the app bundle and standalone.
+            let preferences = UserDefaults(suiteName: DownloadPreferences.domain)!
             #if CLI_TESTING
             let coordinator = ProcessInfo.processInfo.environment["ARXIV_TEST_COORDINATION"].map { RequestCoordinator(directory: URL(fileURLWithPath: $0)) } ?? RequestCoordinator()
             #else
             let coordinator = RequestCoordinator()
             #endif
             let engine = DownloadEngine(cooldownPreferences: preferences, coordinator: coordinator)
+            let environment = ProcessInfo.processInfo.environment
+            let interactive = isatty(STDOUT_FILENO) != 0 && isatty(STDERR_FILENO) != 0 && !options.json
             let task = Task {
                 await CLIRunner.run(options, version: BuildVersion.current, engine: engine, preferences: preferences,
-                    stdout: { output.write($0, to: .standardOutput) }, stderr: { output.write($0, to: .standardError) }, interactive: isatty(STDERR_FILENO) != 0)
+                    stdout: { output.write($0, to: .standardOutput) }, stderr: { output.write($0, to: .standardError) },
+                    interactive: interactive, color: CLIConsole.allowsColor(environment), cursor: environment["TERM"] != "dumb")
             }
             cancellation.attach(task)
             let result = await task.value

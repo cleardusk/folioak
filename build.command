@@ -20,9 +20,6 @@ cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 if [[ -f Resources/AppIcon.icns ]]; then
   cp Resources/AppIcon.icns "$staged_app/Contents/Resources/AppIcon.icns"
 fi
-codesign --force --options runtime --timestamp=none --sign - "$staged_app"
-codesign --verify --deep --strict "$staged_app"
-xcrun lipo "$staged_app/Contents/MacOS/ArxivDownloader" -verify_arch arm64
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 -framework PDFKit \
   Sources/Core.swift Sources/Shared.swift Sources/CLI.swift "$staging_dir/Version.swift" \
@@ -32,6 +29,15 @@ codesign --verify --strict "$staging_dir/arxiv-download"
 xcrun lipo "$staging_dir/arxiv-download" -verify_arch arm64
 test "$("$staging_dir/arxiv-download" --version)" = "$version"
 "$staging_dir/arxiv-download" --help > /dev/null
+cp "$staging_dir/arxiv-download" "$staged_app/Contents/MacOS/arxiv-download"
+# Sign nested code first, then seal the complete app bundle.
+codesign --force --options runtime --timestamp=none --sign - "$staged_app"
+codesign --verify --deep --strict "$staged_app"
+codesign --verify --strict "$staged_app/Contents/MacOS/arxiv-download"
+xcrun lipo "$staged_app/Contents/MacOS/ArxivDownloader" -verify_arch arm64
+test "$("$staged_app/Contents/MacOS/arxiv-download" --version)" = "$version"
+"$staged_app/Contents/MacOS/arxiv-download" --help > /dev/null
+cmp "$staging_dir/arxiv-download" "$staged_app/Contents/MacOS/arxiv-download"
 rm -rf "$app_dir"
 mv "$staged_app" "$app_dir"
 mv -f "$staging_dir/arxiv-download" "$project_dir/dist/arxiv-download"
