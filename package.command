@@ -44,11 +44,12 @@ xcrun lipo "$bundled_cli" -verify_arch arm64
 test "$("$bundled_cli" --version)" = "$version"
 "$bundled_cli" --help > /dev/null
 cmp "$bundled_cli" "$staging_dir/cli-unpacked/arxiv-download/arxiv-download"
-if "$bundled_cli" not-an-arxiv-link --json > "$staging_dir/invalid.json" 2> "$staging_dir/invalid.stderr"; then
-  print -u2 '内置 CLI 错误输入检查失败。'
+invalid_status=0
+"$bundled_cli" not-an-arxiv-link --json > "$staging_dir/invalid.json" 2> "$staging_dir/invalid.stderr" || invalid_status=$?
+if [[ "$invalid_status" != 1 ]]; then
+  cat "$staging_dir/invalid.stderr" >&2
+  print -u2 -- "内置 CLI 错误输入检查失败：退出码 $invalid_status，期望 1。"
   exit 1
-else
-  test "$?" = 1
 fi
 xcrun swift -e 'import Foundation
 let report = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))) as! [String: Any]
