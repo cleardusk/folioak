@@ -353,10 +353,7 @@ final class URLSessionTransport: HTTPTransport {
     }
     deinit { session.invalidateAndCancel() }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        try await policy.validate(request.url, resolver: resolver)
-        let observer = ProgressObserver(policy: policy, resolver: resolver)
-        defer { observer.stop() }
-        do {
+        try await perform(request) { observer in
             let (bytes, response) = try await session.bytes(for: request, delegate: observer)
             defer { bytes.task.cancel() }
             if let failure = observer.failure { throw failure }
@@ -373,18 +370,11 @@ final class URLSessionTransport: HTTPTransport {
             }
             try Task.checkCancellation()
             return (body, http)
-        } catch {
-            if let failure = observer.failure { throw failure }
-            if let response = observer.httpFailure { throw HTTPResponseFailure(response: response) }
-            throw error
         }
     }
     func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
-        try await policy.validate(request.url, resolver: resolver)
         let conditional = policy == .externalPDF && (request.value(forHTTPHeaderField: "If-None-Match") != nil || request.value(forHTTPHeaderField: "If-Modified-Since") != nil)
-        let observer = ProgressObserver(policy: policy, allowNotModified: conditional, resolver: resolver, progress)
-        defer { observer.stop() }
-        do {
+        return try await perform(request, conditional: conditional, progress: progress) { observer in
             let (url, response) = try await session.download(for: request, delegate: observer)
             do {
                 if let failure = observer.failure { throw failure }
@@ -393,7 +383,16 @@ final class URLSessionTransport: HTTPTransport {
                 if http.statusCode == 304 && !observer.acceptsNotModified { throw HTTPResponseFailure(response: http) }
                 return (url, http)
             } catch { try? FileManager.default.removeItem(at: url); throw error }
-        } catch {
+        }
+    }
+    private func perform<T>(_ request: URLRequest, conditional: Bool = false,
+                            progress: @escaping @Sendable (DownloadProgress) -> Void = { _ in },
+                            operation: (ProgressObserver) async throws -> T) async throws -> T {
+        try await policy.validate(request.url, resolver: resolver)
+        let observer = ProgressObserver(policy: policy, allowNotModified: conditional, resolver: resolver, progress)
+        defer { observer.stop() }
+        do { return try await operation(observer) }
+        catch {
             if let failure = observer.failure { throw failure }
             if let response = observer.httpFailure { throw HTTPResponseFailure(response: response) }
             throw error
@@ -416,23 +415,22 @@ enum PaperStorage {
         let sha256: String
     }
 
-    private static func sourceRecord(from handle: FileHandle) -> SourceRecord? {
-        let size = fgetxattr(handle.fileDescriptor, sourceAttribute, nil, 0, 0, 0)
-        guard size > 0, size <= 1024 else { return nil }
+    static func readRecord<T: Decodable>(_ type: T.Type, at url: URL, attribute: String, limit: Int) -> T? {
+        guard let handle = try? boundedRegularFile(at: url) else { return nil }
+        defer { try? handle.close() }
+        let size = fgetxattr(handle.fileDescriptor, attribute, nil, 0, 0, 0)
+        guard size > 0, size <= limit else { return nil }
         var data = Data(count: size)
-        let read = data.withUnsafeMutableBytes { fgetxattr(handle.fileDescriptor, sourceAttribute, $0.baseAddress, size, 0, 0) }
-        guard read == size else { return nil }
-        return try? JSONDecoder().decode(SourceRecord.self, from: data)
+        let read = data.withUnsafeMutableBytes { fgetxattr(handle.fileDescriptor, attribute, $0.baseAddress, size, 0, 0) }
+        return read == size ? try? JSONDecoder().decode(type, from: data) : nil
     }
 
-    private static func recordSource(at url: URL, metadata: PaperMetadata, hash: SHA256.Digest) {
-        guard metadata.reference.version != nil else { return }
+    // Unsupported or read-only extended attributes only disable the fast path.
+    static func writeRecord<T: Encodable>(_ record: T, at url: URL, attribute: String, limit: Int = .max) {
         guard let handle = try? boundedRegularFile(at: url) else { return }
         defer { try? handle.close() }
-        let record = SourceRecord(schema: 1, identifier: metadata.reference.identifier, sha256: hash.map { String(format: "%02x", $0) }.joined())
-        guard let data = try? JSONEncoder().encode(record) else { return }
-        // Unsupported or read-only extended attributes only disable the fast path.
-        _ = data.withUnsafeBytes { fsetxattr(handle.fileDescriptor, sourceAttribute, $0.baseAddress, data.count, 0, 0) }
+        guard let data = try? JSONEncoder().encode(record), data.count <= limit else { return }
+        _ = data.withUnsafeBytes { fsetxattr(handle.fileDescriptor, attribute, $0.baseAddress, data.count, 0, 0) }
     }
 
     static func existing(metadata: PaperMetadata, directory: URL, naming: NamingStyle) throws -> SavedPaper? {
@@ -460,9 +458,7 @@ enum PaperStorage {
 
     private static func trustedExisting(at url: URL, metadata: PaperMetadata) throws -> SavedPaper? {
         try Task.checkCancellation()
-        guard let handle = try? boundedRegularFile(at: url) else { return nil }
-        let record = sourceRecord(from: handle)
-        try? handle.close()
+        let record = readRecord(SourceRecord.self, at: url, attribute: sourceAttribute, limit: 1024)
         guard record?.schema == 1, record?.identifier == metadata.reference.identifier else { return nil }
         do {
             let digest = try hash(at: url).map { String(format: "%02x", $0) }.joined()
@@ -476,20 +472,15 @@ enum PaperStorage {
     static func boundedRegularFile(at url: URL) throws -> FileHandle {
         let descriptor = url.path.withCString { Darwin.open($0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) }
         guard descriptor >= 0 else { throw DownloadError.storage(String(cString: strerror(errno))) }
+        var handedOff = false
+        defer { if !handedOff { Darwin.close(descriptor) } }
         var info = stat()
-        guard fstat(descriptor, &info) == 0 else {
-            let failure = errno
-            Darwin.close(descriptor)
-            throw DownloadError.storage(String(cString: strerror(failure)))
-        }
-        guard info.st_mode & S_IFMT == S_IFREG else {
-            Darwin.close(descriptor)
-            throw DownloadError.invalidPDF
-        }
+        guard fstat(descriptor, &info) == 0 else { throw DownloadError.storage(String(cString: strerror(errno))) }
+        guard info.st_mode & S_IFMT == S_IFREG else { throw DownloadError.invalidPDF }
         guard info.st_size >= 0, info.st_size <= ResourceLimits.pdfBytes else {
-            Darwin.close(descriptor)
             throw DownloadError.limit("PDF 超过 256 MB，未处理。")
         }
+        handedOff = true
         return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     }
 
@@ -529,7 +520,10 @@ enum PaperStorage {
         let tag = metadata.reference.identifier.replacingOccurrences(of: "/", with: "-")
         let saved = try publish(downloaded: downloaded, directory: directory, tag: tag,
             filename: { metadata.filename(style: naming, suffix: $0) },
-            record: { recordSource(at: $0, metadata: metadata, hash: $1) })
+            record: { file, hash in
+                guard metadata.reference.version != nil else { return }
+                writeRecord(SourceRecord(schema: 1, identifier: metadata.reference.identifier, sha256: hash.map { String(format: "%02x", $0) }.joined()), at: file, attribute: sourceAttribute)
+            })
         return SavedPaper(metadata: metadata, url: saved.url, alreadyExisted: saved.existing, pages: saved.pages)
     }
 

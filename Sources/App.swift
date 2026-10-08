@@ -960,36 +960,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func makeMenu() {
         let menu = NSMenu()
-        let appItem = NSMenuItem()
-        menu.addItem(appItem)
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "关于 arXiv下载器", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        appMenu.addItem(.separator())
-        let settingsItem = appMenu.addItem(withTitle: "设置…", action: #selector(showSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "隐藏 arXiv下载器", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "退出 arXiv下载器", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-        let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
-        menu.addItem(editItem)
-        let edit = NSMenu(title: "编辑")
-        edit.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = edit.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
-        redo.keyEquivalentModifierMask = [.command, .shift]
-        edit.addItem(.separator())
-        edit.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = edit
-        let windowItem = NSMenuItem(title: "窗口", action: nil, keyEquivalent: "")
-        menu.addItem(windowItem)
-        let windowMenu = NSMenu(title: "窗口")
-        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        windowItem.submenu = windowMenu
-        NSApp.windowsMenu = windowMenu
+        func add(_ title: String, _ items: [(String, Selector?, String)]) -> NSMenu {
+            let submenu = NSMenu(title: title)
+            for (name, action, key) in items {
+                submenu.addItem(name.isEmpty ? .separator() : NSMenuItem(title: name, action: action, keyEquivalent: key))
+            }
+            let parent = title.isEmpty ? NSMenuItem() : NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            parent.submenu = submenu; menu.addItem(parent)
+            return submenu
+        }
+        let app = add("", [
+            ("关于 arXiv下载器", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""), ("", nil, ""),
+            ("设置…", #selector(showSettings), ","), ("", nil, ""),
+            ("隐藏 arXiv下载器", #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
+            ("退出 arXiv下载器", #selector(NSApplication.terminate(_:)), "q")
+        ])
+        app.item(withTitle: "设置…")?.target = self
+        let edit = add("编辑", [
+            ("撤销", Selector(("undo:")), "z"), ("重做", Selector(("redo:")), "z"), ("", nil, ""),
+            ("剪切", #selector(NSText.cut(_:)), "x"), ("复制", #selector(NSText.copy(_:)), "c"),
+            ("粘贴", #selector(NSText.paste(_:)), "v"), ("全选", #selector(NSText.selectAll(_:)), "a")
+        ])
+        edit.item(withTitle: "重做")?.keyEquivalentModifierMask = [.command, .shift]
+        NSApp.windowsMenu = add("窗口", [("最小化", #selector(NSWindow.performMiniaturize(_:)), "m")])
         NSApp.mainMenu = menu
     }
 }

@@ -199,16 +199,9 @@ enum PDFStorage {
         for case let file as URL in entries {
             try Task.checkCancellation(); visited += 1
             guard visited <= ResourceLimits.localScanEntries else { break }
-            guard file.pathExtension.lowercased() == "pdf", let handle = try? PaperStorage.boundedRegularFile(at: file) else { continue }
-            let record: Record? = {
-                defer { try? handle.close() }
-                let size = fgetxattr(handle.fileDescriptor, attribute, nil, 0, 0, 0)
-                guard size > 0, size <= 2048 else { return nil }
-                var data = Data(count: size)
-                let read = data.withUnsafeMutableBytes { fgetxattr(handle.fileDescriptor, attribute, $0.baseAddress, size, 0, 0) }
-                return read == size ? try? JSONDecoder().decode(Record.self, from: data) : nil
-            }()
-            guard let record, record.schema == 1, record.source == sourceKey, record.hash.utf8.count == 64,
+            guard file.pathExtension.lowercased() == "pdf",
+                  let record = PaperStorage.readRecord(Record.self, at: file, attribute: attribute, limit: 2048),
+                  record.schema == 1, record.source == sourceKey, record.hash.utf8.count == 64,
                   record.hash.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }), record.updated.timeIntervalSince1970.isFinite,
                   record.updated.timeIntervalSinceNow <= 60 else { continue }
             candidates.append((file, record))
@@ -235,15 +228,12 @@ enum PDFStorage {
         let sourceKey = key(source.absoluteString)
         let saved = try PaperStorage.publish(downloaded: downloaded, directory: directory, tag: String(sourceKey.prefix(10)),
             filename: { PaperMetadata.filename(title: title, ending: $0 + ".pdf") }, record: { file, hash in
-                guard let handle = try? PaperStorage.boundedRegularFile(at: file) else { return }
-                defer { try? handle.close() }
                 // Validators identify this exact resource, not a redirect target.
                 let direct = response.url == source
                 let record = Record(schema: 1, source: sourceKey, hash: hash.map { String(format: "%02x", $0) }.joined(),
                     etag: direct ? header(response.value(forHTTPHeaderField: "ETag"), limit: 1024) : nil,
                     modified: direct ? header(response.value(forHTTPHeaderField: "Last-Modified"), limit: 128) : nil, updated: Date())
-                guard let data = try? JSONEncoder().encode(record), data.count <= 2048 else { return }
-                _ = data.withUnsafeBytes { fsetxattr(handle.fileDescriptor, attribute, $0.baseAddress, data.count, 0, 0) }
+                PaperStorage.writeRecord(record, at: file, attribute: attribute, limit: 2048)
             })
         return SavedDocument(title: saved.url.deletingPathExtension().lastPathComponent, url: saved.url.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: saved.existing, pages: saved.pages)
     }
