@@ -29,7 +29,7 @@ enum DownloadError: LocalizedError {
         case .metadata(let message): return message
         case .http(let code, _):
             if code == 404 { return "arXiv 未找到这篇论文或指定版本（404）。" }
-            if code == 429 { return "arXiv 请求过多，请稍后重试（429）。" }
+            if code == 429 { return "arXiv 暂时限流（429），请稍后重试。" }
             return "arXiv 返回 HTTP \(code)，请稍后重试。"
         case .cooldown(let seconds):
             guard seconds.isFinite, seconds >= 0, seconds <= ResourceLimits.retryAfterSeconds else { return "arXiv 要求暂停请求，请稍后重试。" }
@@ -221,6 +221,7 @@ enum DownloadEvent: Sendable {
     case checkingLocal
     case progress(DownloadProgress)
     case retry(Int)
+    case waiting(Date)
     case validating
 }
 
@@ -482,25 +483,44 @@ actor DownloadEngine {
     private let transport: HTTPTransport
     private let requestInterval: Double
     private let retryDelay: Double
+    private let rateLimitDelay: Double
+    private let cooldownPreferences: UserDefaults?
     private var lastRequest: ContinuousClock.Instant?
     private var cooldownUntil: ContinuousClock.Instant?
+    private var rateLimitStrikes = 0
+    private static let cooldownKey = "requestCooldownUntil"
 
-    init(transport: HTTPTransport = URLSessionTransport(), requestInterval: Double = 3.1, retryDelay: Double = 3) {
+    init(transport: HTTPTransport = URLSessionTransport(), requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil) {
         self.transport = transport
         self.requestInterval = requestInterval
         self.retryDelay = retryDelay
+        self.rateLimitDelay = rateLimitDelay
+        self.cooldownPreferences = cooldownPreferences
+        if let date = cooldownPreferences?.object(forKey: Self.cooldownKey) as? Date {
+            let remaining = date.timeIntervalSinceNow
+            if remaining.isFinite, remaining > 0, remaining <= ResourceLimits.retryAfterSeconds {
+                cooldownUntil = ContinuousClock().now.advanced(by: .seconds(remaining))
+            } else { cooldownPreferences?.removeObject(forKey: Self.cooldownKey) }
+        }
     }
 
-    private func pace() async throws {
+    private func pace(event: @escaping @Sendable (DownloadEvent) -> Void) async throws {
         try Task.checkCancellation()
         if let deadline = cooldownUntil {
             let remaining = Self.seconds(ContinuousClock().now.duration(to: deadline))
             if remaining > 60 { throw DownloadError.cooldown(remaining) }
-            if remaining > 0 { try await ContinuousClock().sleep(until: deadline) }
+            if remaining > 0 {
+                event(.waiting(Date().addingTimeInterval(remaining)))
+                try await ContinuousClock().sleep(until: deadline)
+            }
             cooldownUntil = nil
+            cooldownPreferences?.removeObject(forKey: Self.cooldownKey)
         }
         if let previous = lastRequest {
-            try await ContinuousClock().sleep(until: previous.advanced(by: .seconds(requestInterval)))
+            let deadline = previous.advanced(by: .seconds(requestInterval))
+            let remaining = Self.seconds(ContinuousClock().now.duration(to: deadline))
+            if remaining > 0.5 { event(.waiting(Date().addingTimeInterval(remaining))) }
+            try await ContinuousClock().sleep(until: deadline)
         }
         try Task.checkCancellation()
         lastRequest = ContinuousClock().now
@@ -508,13 +528,21 @@ actor DownloadEngine {
 
     private func check(_ response: HTTPURLResponse) throws {
         guard (200..<300).contains(response.statusCode) else {
-            let after = Self.retryAfter(response.value(forHTTPHeaderField: "Retry-After"))
+            var after = Self.retryAfter(response.value(forHTTPHeaderField: "Retry-After"))
+            if response.statusCode == 429 {
+                rateLimitStrikes = min(4, rateLimitStrikes + 1)
+                // A missing/invalid Retry-After still requires a shared backoff.
+                after = max(after ?? rateLimitDelay * pow(2, Double(rateLimitStrikes - 1)), rateLimitDelay)
+            }
             if let after, after > 0 {
                 let deadline = ContinuousClock().now.advanced(by: .seconds(after))
                 cooldownUntil = max(cooldownUntil ?? deadline, deadline)
+                let remaining = Self.seconds(ContinuousClock().now.duration(to: cooldownUntil!))
+                cooldownPreferences?.set(Date().addingTimeInterval(remaining), forKey: Self.cooldownKey)
             }
             throw DownloadError.http(response.statusCode, retryAfter: after)
         }
+        rateLimitStrikes = 0
     }
 
     private static func seconds(_ duration: Duration) -> Double {
@@ -539,7 +567,7 @@ actor DownloadEngine {
     private func retried<T>(event: @escaping @Sendable (DownloadEvent) -> Void, operation: () async throws -> T) async throws -> T {
         for attempt in 1...3 {
             do {
-                try await pace()
+                try await pace(event: event)
                 return try await operation()
             } catch {
                 if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
@@ -556,9 +584,16 @@ actor DownloadEngine {
                     }
                 }
                 if case DownloadError.invalidPDF = error { retry = true }
-                guard retry, attempt < 3 else { throw error }
+                guard retry, attempt < 3 else {
+                    if case DownloadError.http(429, let after) = error { throw DownloadError.cooldown(after ?? rateLimitDelay) }
+                    throw error
+                }
                 event(.retry(attempt + 1))
-                if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+                if delay > 0 {
+                    if case DownloadError.http(429, _) = error { event(.waiting(Date().addingTimeInterval(delay))) }
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    event(.retry(attempt + 1))
+                }
             }
         }
         fatalError("Unreachable retry state")
@@ -571,6 +606,7 @@ actor DownloadEngine {
         var request = URLRequest(url: components.url!)
         request.setValue("application/atom+xml", forHTTPHeaderField: "Accept")
         let metadata: PaperMetadata = try await retried(event: event) {
+            event(.metadata)
             let (data, response) = try await self.transport.data(for: request)
             try self.check(response)
             return try AtomParser.metadata(data, requested: reference)
@@ -578,8 +614,8 @@ actor DownloadEngine {
         event(.resolved(metadata))
         event(.checkingLocal)
         if let existing = try PaperStorage.existing(metadata: metadata, directory: directory, naming: naming) { return existing }
-        event(.resolved(metadata))
         let local: URL = try await retried(event: event) {
+            event(.resolved(metadata))
             let request = URLRequest(url: metadata.reference.pdfURL)
             let (file, response) = try await self.transport.download(for: request) { event(.progress($0)) }
             do {

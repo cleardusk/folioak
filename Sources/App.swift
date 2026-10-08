@@ -29,9 +29,9 @@ enum AppAppearance: String, CaseIterable {
 }
 
 enum ItemState: Equatable {
-    case queued, metadata, checkingLocal, downloading, validating, retrying(Int), saved, existing, failed, cancelled, missing
+    case queued, metadata, checkingLocal, downloading, validating, retrying(Int), waiting(Date), paused, saved, existing, failed, cancelled, missing
     var terminal: Bool {
-        switch self { case .saved, .existing, .failed, .cancelled, .missing: return true; default: return false }
+        switch self { case .saved, .existing, .failed, .cancelled, .missing, .paused: return true; default: return false }
     }
     var label: String {
         switch self {
@@ -41,6 +41,8 @@ enum ItemState: Equatable {
         case .downloading: return "下载中"
         case .validating: return "校验并保存"
         case .retrying(let attempt): return "自动重试 \(attempt)/3"
+        case .waiting(let date): return "等待请求 · \(date.formatted(date: .omitted, time: .standard)) 后继续"
+        case .paused: return "等待重试"
         case .saved: return "已保存"
         case .existing: return "文件已存在"
         case .failed: return "下载失败"
@@ -61,6 +63,7 @@ enum ItemState: Equatable {
         case .saved, .existing: return "checkmark.circle.fill"
         case .failed, .missing: return "exclamationmark.circle.fill"
         case .cancelled: return "minus.circle"
+        case .waiting, .paused: return "clock"
         default: return "circle.dotted"
         }
     }
@@ -77,7 +80,7 @@ struct DownloadItem: Identifiable {
     var savedURL: URL?
     var pages: Int?
     var title: String { metadata?.title ?? reference?.identifier ?? original }
-    var canRetry: Bool { reference != nil && (state == .failed || state == .cancelled || state == .missing) }
+    var canRetry: Bool { reference != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
 }
 
 @MainActor
@@ -117,8 +120,8 @@ final class DownloadModel: ObservableObject {
     private var worker: Task<Void, Never>?
     private var runID = UUID()
 
-    init(engine: DownloadEngine = DownloadEngine(), preferences: UserDefaults = .standard, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
-        self.engine = engine
+    init(engine: DownloadEngine? = nil, preferences: UserDefaults = .standard, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
+        self.engine = engine ?? DownloadEngine(cooldownPreferences: preferences)
         self.preferences = preferences
         self.opener = opener
         naming = NamingStyle(rawValue: preferences.string(forKey: "namingStyle") ?? "") ?? .dateTitle
@@ -151,6 +154,8 @@ final class DownloadModel: ObservableObject {
         if failures > 0 { parts.append("\(failures) 篇失败") }
         let cancelled = items.filter { $0.state == .cancelled }.count
         if cancelled > 0 { parts.append("\(cancelled) 篇取消") }
+        let paused = items.filter { $0.state == .paused }.count
+        if paused > 0 { parts.append("\(paused) 篇待重试") }
         if duplicateCount > 0 { parts.append("已去重 \(duplicateCount) 条") }
         return parts.joined(separator: " · ")
     }
@@ -274,6 +279,7 @@ final class DownloadModel: ObservableObject {
             case .checkingLocal: item.state = .checkingLocal
             case .progress(let progress): item.progress = progress; item.state = .downloading
             case .retry(let attempt): item.state = .retrying(attempt); item.progress = nil
+            case .waiting(let date): item.state = .waiting(date); item.progress = nil
             case .validating: item.state = .validating
             }
         }
@@ -297,6 +303,7 @@ final class DownloadModel: ObservableObject {
         let run = UUID()
         runID = run
         worker = Task { [self] in
+            var pausedByRateLimit = false
             for id in ids {
                 if Task.isCancelled { break }
                 guard let reference = items.first(where: { $0.id == id })?.reference else { continue }
@@ -330,10 +337,11 @@ final class DownloadModel: ObservableObject {
                             }
                         } else { $0.error = error.localizedDescription }
                     }
+                    if case DownloadError.cooldown = error { pausedByRateLimit = true; break }
                 }
             }
             for id in ids {
-                update(id) { if !$0.state.terminal { $0.state = .cancelled; $0.progress = nil } }
+                update(id) { if !$0.state.terminal { $0.state = pausedByRateLimit ? .paused : .cancelled; $0.progress = nil } }
             }
             busy = false
             cancelling = false

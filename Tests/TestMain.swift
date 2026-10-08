@@ -316,7 +316,7 @@ struct CoreTests {
         try expect(await permanent.pdfCalls == 0, "404 downloaded PDF")
 
         let limited = MockTransport(sourcePDF: pdf, metadata: [.status(429, "0"), .status(200)])
-        _ = try await DownloadEngine(transport: limited, requestInterval: 0, retryDelay: 0).download(ref, to: output)
+        _ = try await DownloadEngine(transport: limited, requestInterval: 0, retryDelay: 0, rateLimitDelay: 0).download(ref, to: output)
         try expect(await limited.metadataCalls == 2, "429 retry")
 
         let longPause = MockTransport(sourcePDF: pdf, metadata: [.status(429, "600")])
@@ -327,9 +327,41 @@ struct CoreTests {
         }
         try expect(await longPause.metadataCalls == 1, "long Retry-After must not be shortened")
         let shortPause = MockTransport(sourcePDF: pdf, metadata: [.status(429, "1"), .status(200)])
-        _ = try await DownloadEngine(transport: shortPause, requestInterval: 0, retryDelay: 0).download(ref, to: output)
+        _ = try await DownloadEngine(transport: shortPause, requestInterval: 0, retryDelay: 0, rateLimitDelay: 0).download(ref, to: output)
         let shortTimes = await shortPause.times
         try expect(shortTimes[1].timeIntervalSince(shortTimes[0]) >= 0.95, "short Retry-After observed")
+
+        let fallback = MockTransport(sourcePDF: pdf, metadata: [.status(429), .status(429, "broken"), .status(200)])
+        _ = try await DownloadEngine(transport: fallback, requestInterval: 0, retryDelay: 0, rateLimitDelay: 0.03).download(ref, to: output)
+        let fallbackTimes = await fallback.times
+        try expect(fallbackTimes[1].timeIntervalSince(fallbackTimes[0]) >= 0.025 && fallbackTimes[2].timeIntervalSince(fallbackTimes[1]) >= 0.055, "missing/invalid Retry-After uses increasing backoff")
+
+        let noHeader = MockTransport(sourcePDF: pdf, metadata: [.status(429)])
+        let noHeaderEngine = DownloadEngine(transport: noHeader, requestInterval: 0, retryDelay: 0)
+        let waitingJob = Task { try await noHeaderEngine.download(ref, to: output) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try expect(await noHeader.metadataCalls == 1, "default 429 without header does not immediately retry")
+        waitingJob.cancel()
+        do { _ = try await waitingJob.value; throw TestFailure.failed("rate-limit wait ignored cancellation") }
+        catch is CancellationError { }
+        let manualRetry = Task { try await noHeaderEngine.download(ref, to: output) }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        manualRetry.cancel()
+        do { _ = try await manualRetry.value; throw TestFailure.failed("manual retry ignored shared cooldown") }
+        catch is CancellationError { }
+        try expect(await noHeader.metadataCalls == 1, "manual retry cannot bypass cooldown")
+
+        let cooldownSuite = "arxiv-cooldown-test-\(UUID().uuidString)"
+        let cooldownPrefs = UserDefaults(suiteName: cooldownSuite)!
+        defer { cooldownPrefs.removePersistentDomain(forName: cooldownSuite) }
+        let persisted = MockTransport(sourcePDF: pdf, metadata: [.status(429, "600")])
+        let persistedEngine = DownloadEngine(transport: persisted, requestInterval: 0, retryDelay: 0, cooldownPreferences: cooldownPrefs)
+        do { _ = try await persistedEngine.download(ref, to: output); throw TestFailure.failed("persistent cooldown ignored") }
+        catch DownloadError.cooldown { }
+        let restarted = DownloadEngine(transport: persisted, requestInterval: 0, retryDelay: 0, cooldownPreferences: cooldownPrefs)
+        do { _ = try await restarted.download(ref, to: output); throw TestFailure.failed("restart lost cooldown") }
+        catch DownloadError.cooldown(let remaining) { try expect(remaining > 590, "restored cooldown shortened") }
+        try expect(await persisted.metadataCalls == 1, "restart does not request during persisted cooldown")
 
         let exhausted = MockTransport(sourcePDF: pdf, metadata: [.network(.timedOut)])
         do { _ = try await DownloadEngine(transport: exhausted, requestInterval: 0, retryDelay: 0).download(ref, to: output); throw TestFailure.failed("network failure succeeded") }
@@ -442,6 +474,33 @@ struct CoreTests {
         model.start()
         try expect(!model.busy && model.directoryNotice != nil && model.items.first?.state == .failed && model.items.first?.error == nil, "missing directory feedback appears once")
         try expect(model.input == "2501.12345", "unwritable destination preserves input")
+
+        let throttled = MockTransport(sourcePDF: pdf, metadata: [.status(429, "600"), .status(200)])
+        let paused = DownloadModel(engine: DownloadEngine(transport: throttled, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        paused.directory = output
+        paused.input = "2501.12345\n2501.12345v2"
+        paused.start()
+        try await waitForQueue(paused)
+        try expect(paused.items.map(\.state) == [.failed, .paused] && paused.retryCount == 2, "rate-limit exhaustion pauses remaining queue")
+        try expect(paused.input == "2501.12345\n2501.12345v2" && paused.summary.contains("1 篇待重试"), "paused queue preserves inputs and explains pending rows")
+        paused.retry()
+        try await waitForQueue(paused)
+        let pausedCalls = await (throttled.metadataCalls, throttled.pdfCalls)
+        try expect(pausedCalls.0 == 1 && pausedCalls.1 == 0, "batch retry cannot bypass cooldown")
+
+        let waitTransport = MockTransport(sourcePDF: pdf, metadata: [.status(429, "0")])
+        let waiting = DownloadModel(engine: DownloadEngine(transport: waitTransport, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        waiting.directory = output
+        waiting.input = "2501.12345"
+        waiting.start()
+        for _ in 0..<100 {
+            if case .waiting = waiting.items.first?.state { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard case .waiting(let deadline) = waiting.items.first?.state else { throw TestFailure.failed("rate-limit wait not visible in UI") }
+        try expect(deadline.timeIntervalSinceNow > 58 && waiting.busy && waiting.items[0].state.label.contains("后继续"), "Retry-After zero still uses the safe default wait")
+        await waiting.cancelAndWait()
+        try expect(waiting.input == "2501.12345" && waiting.items[0].state == .cancelled && !waiting.busy, "visible rate-limit waiting remains cancellable")
     }
 
     static func existingFileTests(root: URL, pdf: URL) async throws {
@@ -763,6 +822,15 @@ struct CoreTests {
                             model.cancelling = false
                         }
                         model.busy = false
+                        model.items[0].state = .waiting(Date().addingTimeInterval(60))
+                        model.items[0].progress = nil
+                        model.busy = true
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "rate-wait-\(suffix)-\(width)")
+                        model.busy = false
+                        model.items[0].state = .failed
+                        model.items[0].error = DownloadError.cooldown(120).localizedDescription
+                        model.items[1].state = .paused
+                        try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 570, name: "rate-paused-\(suffix)-\(width)")
                     }
                 }
                 try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)", title: "设置")
