@@ -348,9 +348,9 @@ final class DownloadModel: ObservableObject {
         panel.directoryURL = directory
         if let window = NSApp.keyWindow {
             panel.beginSheetModal(for: window) { response in
-                if response == .OK, let url = panel.url { self.directory = url }
+                if response == .OK, !self.busy, let url = panel.url { self.directory = url }
             }
-        } else if panel.runModal() == .OK, let url = panel.url { directory = url }
+        } else if panel.runModal() == .OK, !busy, let url = panel.url { directory = url }
     }
 
     func start() {
@@ -885,6 +885,8 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
         toolbar.allowsUserCustomization = false
         toolbar.centeredItemIdentifiers = [Self.titleID]
         window.toolbar = workspace ? nil : toolbar
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = !window.styleMask.contains(.miniaturizable)
+        window.standardWindowButton(.zoomButton)?.isHidden = !window.styleMask.contains(.resizable)
         if workspace { window.isMovableByWindowBackground = true }
         themeObservation = model.$theme.sink { [weak self] theme in self?.applyTheme(theme) }
     }

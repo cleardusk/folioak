@@ -120,10 +120,12 @@ private struct AnimatedSelectionIndicator: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !moving)) { timeline in
             let rect = moving ? motion.rect(at: timeline.date) : motion.target
-            Capsule().fill(color).frame(width: rect.width, height: rect.height)
-                .position(x: rect.midX, y: rect.midY)
+            // Draw in local coordinates without animatable frame/position modifiers.
+            // The canvas still inherits its parent's movement during sidebar resizing.
+            Canvas { context, _ in
+                context.fill(Path(roundedRect: rect, cornerRadius: min(rect.width, rect.height) / 2), with: .color(color))
+            }
         }
-        .transaction { $0.animation = nil }
         .allowsHitTesting(false).accessibilityHidden(true)
         .onChange(of: target) { destination in
             motion.select(destination, at: Date(), reduceMotion: reduceMotion)
@@ -138,10 +140,23 @@ private struct AnimatedSelectionIndicator: View {
     }
 }
 
-private struct FilterTabBounds: PreferenceKey {
-    static var defaultValue: [Int: Anchor<CGRect>] = [:]
-    static func reduce(value: inout [Int: Anchor<CGRect>], nextValue: () -> [Int: Anchor<CGRect>]) {
+private struct FilterTabWidths: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] = [:]
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+enum FilterTabLayout {
+    // Widths are local to the tabs: moving their parent must not retarget the underline.
+    static func indicator(widths: [Int: CGFloat], index: Int) -> CGRect? {
+        guard index >= 0, let width = widths[index] else { return nil }
+        var x: CGFloat = 12
+        for previous in 0..<index {
+            guard let precedingWidth = widths[previous] else { return nil }
+            x += precedingWidth + 4
+        }
+        return CGRect(x: x, y: 33, width: max(0, width - 24), height: 3)
     }
 }
 
@@ -161,20 +176,65 @@ struct FilterTabs<Selection: Hashable>: View {
                         .padding(.horizontal, 12).frame(height: 36).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).accessibilityAddTraits(selection == option ? .isSelected : [])
-                .anchorPreference(key: FilterTabBounds.self, value: .bounds) { [index: $0] }
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: FilterTabWidths.self, value: [index: geometry.size.width])
+                })
             }
         }
         .fixedSize(horizontal: true, vertical: false)
-        .overlayPreferenceValue(FilterTabBounds.self) { bounds in
-            GeometryReader { geometry in
-                if let index = options.firstIndex(of: selection), let anchor = bounds[index] {
-                    let frame = geometry[anchor]
-                    AnimatedSelectionIndicator(target: CGRect(x: frame.minX + 12, y: frame.maxY - 3, width: max(0, frame.width - 24), height: 3),
-                                               axis: .horizontal, color: ThemePalette.color(palette.accent))
-                }
-            }.allowsHitTesting(false).accessibilityHidden(true)
+        .overlayPreferenceValue(FilterTabWidths.self) { widths in
+            if let index = options.firstIndex(of: selection), let rect = FilterTabLayout.indicator(widths: widths, index: index) {
+                AnimatedSelectionIndicator(target: rect, axis: .horizontal, color: ThemePalette.color(palette.accent))
+            }
         }
     }
+}
+
+struct ComposerActivityOutline: NSViewRepresentable {
+    let color: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeNSView(context: Context) -> ActivityOutlineView { ActivityOutlineView() }
+    func updateNSView(_ view: ActivityOutlineView, context: Context) {
+        view.update(color: NSColor(color), animate: !reduceMotion)
+    }
+    static func dismantleNSView(_ view: ActivityOutlineView, coordinator: ()) { view.stopAnimating() }
+}
+
+final class ActivityOutlineView: NSView {
+    private let outline = CAShapeLayer()
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(outline)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        outline.frame = bounds
+        outline.path = CGPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 23.5, cornerHeight: 23.5, transform: nil)
+        CATransaction.commit()
+    }
+
+    func update(color: NSColor, animate: Bool) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        outline.strokeColor = color.cgColor
+        outline.fillColor = nil
+        outline.lineWidth = 1
+        outline.opacity = animate ? 0.2 : 0.5
+        CATransaction.commit()
+        if animate && outline.animation(forKey: "breathing") == nil {
+            // Core Animation interpolates opacity without redrawing SwiftUI every frame.
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.2; pulse.toValue = 0.65
+            pulse.duration = 1.5; pulse.autoreverses = true; pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            outline.add(pulse, forKey: "breathing")
+        } else if !animate { outline.removeAnimation(forKey: "breathing") }
+    }
+    func stopAnimating() { outline.removeAllAnimations() }
 }
 
 struct SidebarButtonStyle: ButtonStyle {

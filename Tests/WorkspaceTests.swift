@@ -61,6 +61,10 @@ extension CoreTests {
         }
         tabs.select(lastTab, at: start, reduceMotion: true)
         try expect(tabs.rect(at: start) == lastTab, "reduced motion also applies to horizontal tabs")
+        let widths: [Int: CGFloat] = [0: 48, 1: 60, 2: 72]
+        try expect(FilterTabLayout.indicator(widths: widths, index: 0) == firstTab, "first underline has local text insets")
+        try expect(FilterTabLayout.indicator(widths: widths, index: 2) == CGRect(x: 128, y: 33, width: 48, height: 3), "unequal labels include their widths and inter-tab gaps")
+        try expect(FilterTabLayout.indicator(widths: [2: 72], index: 2) == nil, "incomplete layout cannot place the indicator in a guessed position")
         print("PASS selection motion: both axes, measured widths, stretch, settle, interrupted reversal, reduced motion and symbols")
     }
 

@@ -92,6 +92,7 @@ struct CoreTests {
                 try themeTests()
                 try inputLayoutTests()
                 try windowChromeTests()
+                try filterRenderingTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
             }
@@ -120,6 +121,7 @@ struct CoreTests {
             try themeTests()
             try inputLayoutTests()
             try windowChromeTests()
+            try filterRenderingTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
             if CommandLine.arguments.contains("--stress") {
                 try await resourceTests(root: root, pdf: pdf)
@@ -820,6 +822,12 @@ struct CoreTests {
         try expect(released == nil, "theme observation must not retain window chrome")
         let workspaceChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", workspace: true)
         try expect(window.toolbar == nil && window.standardWindowButton(.closeButton) != nil && window.isMovableByWindowBackground, "integrated workspace keeps native controls and window dragging without duplicate title")
+        try expect(window.standardWindowButton(.miniaturizeButton)?.isHidden == false && window.standardWindowButton(.zoomButton)?.isHidden == false, "main window keeps working minimize and zoom controls")
+        let settings = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 620), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let settingsChrome = WindowChrome(window: settings, model: model, title: "设置")
+        try expect(settings.standardWindowButton(.closeButton)?.isHidden == false, "settings keeps its close control")
+        try expect(settings.standardWindowButton(.miniaturizeButton)?.isHidden != false && settings.standardWindowButton(.zoomButton)?.isHidden != false, "settings hides unavailable minimize and zoom controls")
+        withExtendedLifetime(settingsChrome) {}
         withExtendedLifetime(workspaceChrome) {}
         print("PASS window chrome: minimum width, header alignment, 12 theme backgrounds and released observer")
     }
@@ -835,7 +843,8 @@ struct CoreTests {
         func capture<V: View>(_ content: V, width: Int, height: Int? = nil, name: String, title: String = "arXiv下载器") throws {
             let view = NSHostingView(rootView: content.environment(\.controlActiveState, .key))
             let size = NSSize(width: CGFloat(width), height: height.map { CGFloat($0) } ?? view.fittingSize.height)
-            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            let style: NSWindow.StyleMask = title == "设置" ? [.titled, .closable] : [.titled, .closable, .miniaturizable, .resizable]
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: style, backing: .buffered, defer: false)
             let chrome = WindowChrome(window: window, model: model, title: title, settingsAction: title == "设置" ? nil : {}, workspace: title != "设置")
             let headerHeight = window.frame.height - window.contentLayoutRect.height
             window.setContentSize(NSSize(width: size.width, height: size.height + (height == nil ? headerHeight : 0)))

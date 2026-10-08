@@ -51,10 +51,17 @@ struct RoundButtonStyle: ButtonStyle {
 }
 
 struct DownloaderView: View {
+    private struct LogScrollTarget: Hashable {
+        let lastID: UUID?
+        let count: Int
+        let following: Bool
+    }
     @ObservedObject var model: DownloadModel
     @WorkspaceViewState var page: WorkspacePage = .downloads
     var showSettings: () -> Void = {}
     @WorkspaceViewState private var collapsed = false
+    @WorkspaceViewState private var navigationHovered = false
+    @WorkspaceViewState private var navigationActivatedAt: Date?
     @WorkspaceViewState private var inputFocused = false
     @WorkspaceViewState private var query = ""
     @WorkspaceViewState private var filter: QueueFilter = .all
@@ -65,6 +72,9 @@ struct DownloaderView: View {
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
+    private var transferring: Bool {
+        model.busy && !model.cancelling && model.items.contains { [.metadata, .checkingLocal, .downloading, .validating].contains($0.state) }
+    }
     private var visibleItems: [DownloadItem] {
         let source = page == .library ? model.library : model.items
         return source.filter { item in
@@ -112,7 +122,7 @@ struct DownloaderView: View {
             }.padding(.top, 34).padding(.bottom, 10)
             VStack(spacing: 6) {
                 ForEach(WorkspacePage.allCases, id: \.self) { destination in
-                    Button { page = destination } label: {
+                    Button { page = destination; navigationActivatedAt = Date() } label: {
                         HStack(spacing: 13) {
                             SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: destination == page)
                                 .font(.system(size: 19, weight: .regular)).frame(width: 24, height: 24)
@@ -124,7 +134,7 @@ struct DownloaderView: View {
                         }
                         .foregroundStyle(ThemePalette.color(palette.secondary))
                         .frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
-                        .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped()
+                        .frame(width: collapsed ? 50 : 166, alignment: .leading).compositingGroup().clipped()
                         .contentShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .buttonStyle(SidebarButtonStyle(palette: palette, selected: destination == page))
@@ -134,6 +144,14 @@ struct DownloaderView: View {
             }
             .overlay(alignment: .topLeading) {
                 SidebarSelectionIndicator(index: WorkspacePage.allCases.firstIndex(of: page) ?? 0, color: accent)
+                    .opacity(navigationHovered || navigationActivatedAt != nil ? 1 : 0)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: navigationHovered || navigationActivatedAt != nil)
+            }
+            .onHover { navigationHovered = $0 }
+            .task(id: navigationActivatedAt) {
+                guard navigationActivatedAt != nil else { return }
+                do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+                navigationActivatedAt = nil
             }
             Spacer()
             Button(action: showSettings) {
@@ -143,7 +161,7 @@ struct DownloaderView: View {
                         .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     Spacer(minLength: 0)
                 }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
-                    .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
+                    .frame(width: collapsed ? 50 : 166, alignment: .leading).compositingGroup().clipped().contentShape(Rectangle())
             }.buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary).help("设置（⌘,）").accessibilityLabel("设置")
         }.padding(.horizontal, 12).padding(.bottom, 16).frame(width: collapsed ? 74 : 190)
             .background(ThemePalette.color(palette.sidebar))
@@ -175,9 +193,9 @@ struct DownloaderView: View {
                 Image(systemName: "link").font(.system(size: 15, weight: .medium))
                 Text("添加论文").font(.system(size: 14, weight: .medium))
                 Spacer()
-                Button(action: model.importLinks) { Image(systemName: "square.and.arrow.down").frame(width: 32, height: 32) }
+                Button(action: model.importLinks) { Image(systemName: "square.and.arrow.down").frame(width: 32, height: 32).contentShape(Rectangle()) }
                     .help("从文本文件导入链接").accessibilityLabel("导入链接")
-                Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32) }
+                Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
                     .help("追加剪贴板中的链接").accessibilityLabel("粘贴链接")
             }.buttonStyle(.plain).disabled(model.busy).padding(.horizontal, 20).padding(.top, 12)
             LinkInput(model: model, focused: $inputFocused, palette: palette)
@@ -206,6 +224,9 @@ struct DownloaderView: View {
         .background(ThemePalette.color(palette.surface))
         .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).stroke(inputFocused && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
+        .overlay {
+            if transferring { ComposerActivityOutline(color: accent).allowsHitTesting(false).accessibilityHidden(true) }
+        }
     }
 
     private var searchField: some View {
@@ -214,7 +235,7 @@ struct DownloaderView: View {
             TextField("搜索", text: $query).textFieldStyle(.plain).font(.system(size: 13))
                 .accessibilityLabel(page == .logs ? "搜索日志" : "搜索论文")
             if !query.isEmpty {
-                Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary) }
+                Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary).frame(width: 24, height: 24).contentShape(Rectangle()) }
                     .buttonStyle(.plain).accessibilityLabel("清除搜索")
             }
         }.padding(.horizontal, 13).frame(width: 178, height: 36)
@@ -232,11 +253,12 @@ struct DownloaderView: View {
                     if model.canRetry && !model.busy {
                         Button("重试未完成") { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
                     }
-                    Menu {
-                        Button("复制未完成链接", action: model.copyUnfinished)
-                            .disabled(!model.items.contains { $0.canRetry || $0.source == nil })
-                    } label: { Image(systemName: "ellipsis").frame(width: 22, height: 30) }
-                        .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("任务操作")
+                    if model.items.contains(where: { $0.canRetry || $0.source == nil }) {
+                        Menu {
+                            Button("复制未完成链接", action: model.copyUnfinished)
+                        } label: { Image(systemName: "ellipsis").frame(width: 22, height: 30) }
+                            .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("任务操作")
+                    }
                 } else {
                     Text("最近下载").font(.system(size: 13)).foregroundStyle(secondary)
                     Spacer()
@@ -296,9 +318,11 @@ struct DownloaderView: View {
                             }
                         }.background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
                     }
-                    .onAppear { if followLogs, let last = entries.last { proxy.scrollTo(last.id, anchor: .bottom) } }
-                    .onChange(of: entries.last?.id) { _ in if followLogs, let last = entries.last { proxy.scrollTo(last.id, anchor: .bottom) } }
-                    .onChange(of: followLogs) { follow in if follow, let last = entries.last { proxy.scrollTo(last.id, anchor: .bottom) } }
+                    .task(id: LogScrollTarget(lastID: entries.last?.id, count: entries.count, following: followLogs)) {
+                        // Let the lazy rows register their scroll targets on first entry.
+                        await Task.yield()
+                        if !Task.isCancelled, followLogs, let last = entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
                 }
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
