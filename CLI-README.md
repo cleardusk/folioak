@@ -22,9 +22,15 @@ arxiv-download https://arxiv.org/html/2605.18678
 ./arxiv-download 1706.03762v1 2609.22978v1 --naming id-title --json
 ```
 
-默认使用 UI 中的保存目录与命名方式。`-o` 和 `--naming` 仅影响本次执行，不修改设置；显式 `-o` 的目录不存在时会创建。命名可选 `date-title`、`id-title`、`title`。自动化脚本建议显式指定目录和命名方式。
+默认使用 UI 中的保存目录与命名方式。`-o` 和 `--naming` 仅影响本次执行，不修改设置；显式 `-o` 的目录不存在时会创建。arXiv 命名可选 `date-title`、`id-title`、`title`；通用 PDF 使用文档标题或原文件名。自动化脚本建议显式指定目录和命名方式。
 
-支持摘要、PDF、HTML 链接或编号，最多 200 条/批，自动去重。终端中进度原位更新，每篇只保留简短结果，状态使用颜色；设置 `NO_COLOR=1` 可关闭颜色。重定向 stdout 时输出成功文件的绝对路径；`--json` 始终输出无颜色的 schema 1 批次对象。进度与错误写入 stderr。Ctrl+C 取消并清理临时文件，完成的 PDF 保留。
+支持 arXiv 摘要、PDF、HTML 链接或编号，以及通用 HTTPS PDF 直链，可混合输入。最多 200 条/批，自动去重。终端中进度原位更新，每篇只保留简短结果，状态使用颜色；设置 `NO_COLOR=1` 可关闭颜色。重定向 stdout 时输出成功文件的绝对路径；`--json` 始终输出无颜色的 schema 1 批次对象。进度与错误写入 stderr。Ctrl+C 取消并清理临时文件，完成的 PDF 保留。
+
+```sh
+arxiv-download https://mirros.ai/report/agent-garten.pdf
+```
+
+通用 PDF 用 ETag / Last-Modified 条件请求检查更新，304 时复用内容未变的本地文件。没有可靠更新标记或发生重定向时重新下载校验；登录网页和 HTML 页面不能作为 PDF 保存。限流只暂停同一输入站点，其余站点可继续下载。
 
 退出码：0 全部成功；1 有失败或待重试项；2 参数或目录错误；130 SIGINT 取消；143 SIGTERM 取消。JSON 的结果状态为 saved、existing、failed、paused、cancelled；暂停项可能包含 retryAfter（ISO 8601）。
 

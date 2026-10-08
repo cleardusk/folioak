@@ -74,6 +74,7 @@ struct DownloadItem: Identifiable {
     let id = UUID()
     let original: String
     let reference: ArxivReference?
+    var directURL: URL? = nil
     var restoreReference: ArxivReference?
     var metadata: PaperMetadata?
     var state: ItemState
@@ -81,8 +82,10 @@ struct DownloadItem: Identifiable {
     var error: String?
     var savedURL: URL?
     var pages: Int?
-    var title: String { metadata?.title ?? reference?.identifier ?? original }
-    var canRetry: Bool { reference != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
+    var documentTitle: String?
+    var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.map(DownloadSource.pdf) }
+    var title: String { metadata?.title ?? documentTitle ?? source?.label ?? original }
+    var canRetry: Bool { source != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
 }
 
 @MainActor
@@ -139,7 +142,7 @@ final class DownloadModel: ObservableObject {
         PaperMetadata(reference: ArxivReference(baseID: "1706.03762", version: 1), title: "Attention Is All You Need", year: 2017, month: 6).filename(style: naming)
     }
 
-    var tokenCount: Int { ArxivReference.tokens(in: input).count }
+    var tokenCount: Int { DownloadSource.tokens(in: input).count }
     var retryCount: Int { items.filter(\.canRetry).count }
     var canRetry: Bool { items.contains(where: \.canRetry) }
     var completed: Int { items.filter { $0.state.terminal }.count }
@@ -191,10 +194,10 @@ final class DownloadModel: ObservableObject {
         duplicateCount = batch.duplicates
         batchID = UUID()
         items = batch.entries.map { entry in
-            DownloadItem(original: entry.original, reference: entry.reference, state: entry.reference == nil ? .failed : .queued, error: entry.error)
+            DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL, state: entry.source == nil ? .failed : .queued, error: entry.error)
         }
-        guard !items.isEmpty else { notice = "请先粘贴至少一个 arXiv 链接。"; return }
-        execute(items.filter { $0.reference != nil }.map(\.id))
+        guard !items.isEmpty else { notice = "请先粘贴至少一个链接。"; return }
+        execute(items.filter { $0.source != nil }.map(\.id))
     }
 
     func retry(_ single: UUID? = nil) {
@@ -246,8 +249,8 @@ final class DownloadModel: ObservableObject {
     }
 
     func openSource(_ item: DownloadItem) {
-        if let reference = item.metadata?.reference ?? item.reference {
-            notice = opener(reference.abstractURL) ? nil : "无法打开 arXiv 页面，请检查默认浏览器。"
+        if let source = item.source {
+            notice = opener(source.webURL) ? nil : "无法打开来源页面，请检查默认浏览器。"
         }
     }
 
@@ -255,7 +258,7 @@ final class DownloadModel: ObservableObject {
         guard let url = item.savedURL else { return }
         let alert = NSAlert()
         alert.messageText = "文件信息"
-        alert.informativeText = "\(url.lastPathComponent)\n\n\(url.deletingLastPathComponent().path)\n\n\(item.pages.map { "\($0) 页 · " } ?? "")\(item.metadata?.reference.identifier ?? "")"
+        alert.informativeText = "\(url.lastPathComponent)\n\n\(url.deletingLastPathComponent().path)\n\n\(item.pages.map { "\($0) 页 · " } ?? "")\(item.metadata?.reference.identifier ?? item.source?.label ?? "")"
         alert.addButton(withTitle: "完成")
         if let window = NSApp.keyWindow { alert.beginSheetModal(for: window) }
     }
@@ -273,6 +276,7 @@ final class DownloadModel: ObservableObject {
             case .coordinating: item.state = .coordinating
             case .metadata: item.state = .metadata
             case .resolved(let metadata): item.metadata = metadata; item.state = .downloading
+            case .document(let title): item.documentTitle = title
             case .checkingLocal: item.state = .checkingLocal
             case .progress(let progress): item.progress = progress; item.state = .downloading
             case .retry(let attempt): item.state = .retrying(attempt); item.progress = nil
@@ -300,25 +304,30 @@ final class DownloadModel: ObservableObject {
         let run = UUID()
         runID = run
         worker = Task { [self] in
-            var pausedByRateLimit = false
+            var pausedSources: [String: Date] = [:]
             for id in ids {
                 if Task.isCancelled { break }
                 guard let item = items.first(where: { $0.id == id }),
-                      let reference = item.restoreReference ?? item.reference else { continue }
+                      let source = item.restoreReference.map(DownloadSource.arxiv) ?? item.source else { continue }
+                if let until = pausedSources[source.rateLimitKey] {
+                    update(id) { $0.state = .paused; $0.error = "下载站点要求暂停请求，可在 \(until.formatted(date: .abbreviated, time: .standard)) 后重试。" }
+                    continue
+                }
                 update(id) { $0.state = .metadata }
                 do {
-                    let saved = try await engine.download(reference, to: target, naming: namingStyle) { [weak self] event in
+                    let saved = try await engine.download(source, to: target, naming: namingStyle) { [weak self] event in
                         Task { @MainActor in self?.receive(event, for: id, run: run) }
                     }
                     update(id) {
                         $0.metadata = saved.metadata
+                        $0.documentTitle = saved.title
                         $0.savedURL = saved.url
                         $0.pages = saved.pages
                         $0.state = saved.alreadyExisted ? .existing : .saved
                         $0.progress = nil
                     }
-                    input = ArxivReference.tokens(in: input)
-                        .filter { (try? ArxivReference.parse($0)) != reference }
+                    input = DownloadSource.tokens(in: input)
+                        .filter { (try? DownloadSource.parse($0)) != source }
                         .joined(separator: "\n")
                 } catch is CancellationError {
                     update(id) { $0.state = .cancelled; $0.progress = nil }
@@ -332,7 +341,7 @@ final class DownloadModel: ObservableObject {
                         $0.state = cooldown == nil ? .failed : .paused
                         $0.progress = nil
                         if let cooldown {
-                            $0.error = "arXiv 要求暂停请求，可在 \(cooldown.formatted(date: .abbreviated, time: .standard)) 后重试。"
+                            $0.error = "下载站点要求暂停请求，可在 \(cooldown.formatted(date: .abbreviated, time: .standard)) 后重试。"
                         } else if let network = error as? URLError {
                             if [.cannotCreateFile, .cannotOpenFile, .cannotWriteToFile].contains(network.code) {
                                 $0.error = "临时文件无法写入，请检查磁盘空间和权限。"
@@ -341,11 +350,11 @@ final class DownloadModel: ObservableObject {
                             }
                         } else { $0.error = error.localizedDescription }
                     }
-                    if case DownloadError.cooldown = error { pausedByRateLimit = true; break }
+                    if let cooldown { pausedSources[source.rateLimitKey] = cooldown }
                 }
             }
             for id in ids {
-                update(id) { if !$0.state.terminal { $0.state = pausedByRateLimit ? .paused : .cancelled; $0.progress = nil } }
+                update(id) { if !$0.state.terminal { $0.state = .cancelled; $0.progress = nil } }
             }
             busy = false
             cancelling = false
@@ -358,7 +367,6 @@ final class DownloadModel: ObservableObject {
 // SwiftUI Text over TextEditor has a different first-line baseline on macOS.
 final class LinkTextView: NSTextView {
     static let example = "https://arxiv.org/abs/2609.22978"
-    private static let tokens = try! NSRegularExpression(pattern: #"[^\s,;，；]+"#)
     var placeholderColor = NSColor.secondaryLabelColor { didSet { if placeholderColor != oldValue { needsDisplay = true } } }
     var focusChanged: ((Bool) -> Void)?
     private var styledInput: String?
@@ -388,17 +396,17 @@ final class LinkTextView: NSTextView {
         storage.beginEditing()
         storage.addAttribute(.foregroundColor, value: textColor, range: fullRange)
         storage.removeAttribute(.underlineStyle, range: fullRange)
-        var count = 0
-        Self.tokens.enumerateMatches(in: string, range: fullRange) { match, _, stop in
-            guard let match else { return }
-            count += 1
-            if (try? ArxivReference.parse(text.substring(with: match.range))) != nil {
-                storage.addAttribute(.foregroundColor, value: accentColor, range: match.range)
+        var search = NSRange(location: 0, length: text.length)
+        for token in DownloadSource.tokens(in: string).prefix(ResourceLimits.batchCount) {
+            let range = text.range(of: token, options: [], range: search)
+            guard range.location != NSNotFound else { continue }
+            search = NSRange(location: NSMaxRange(range), length: text.length - NSMaxRange(range))
+            if (try? DownloadSource.parse(token)) != nil {
+                storage.addAttribute(.foregroundColor, value: accentColor, range: range)
                 if underlineRecognized {
-                    storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: match.range)
+                    storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
                 }
             }
-            if count >= ResourceLimits.batchCount { stop.pointee = true }
         }
         storage.endEditing()
         var attributes = typingAttributes
@@ -412,7 +420,7 @@ final class LinkTextView: NSTextView {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 8
         let text = NSMutableAttributedString(string: Self.example + "\n", attributes: [.font: font, .foregroundColor: placeholderColor, .paragraphStyle: paragraph])
-        text.append(NSAttributedString(string: "链接或编号，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
+        text.append(NSAttributedString(string: "arXiv 或 PDF 链接，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
         placeholderStorage.setAttributedString(text)
         placeholderContainer.containerSize = textContainer.containerSize
         placeholderContainer.lineFragmentPadding = textContainer.lineFragmentPadding
@@ -679,6 +687,8 @@ struct DownloadRow: View {
                 HStack(spacing: 8) {
                     if let metadata = item.metadata {
                         Text(metadata.reference.identifier).font(.system(size: 11, design: .monospaced))
+                    } else if let host = item.directURL?.host {
+                        Text(host).lineLimit(1).truncationMode(.middle)
                     }
                     Text(item.state.label).foregroundStyle(item.state.color(palette))
                 }.font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
@@ -711,14 +721,14 @@ struct DownloadRow: View {
                             NSPasteboard.general.setString(url.lastPathComponent, forType: .string)
                         }
                         Divider()
-                        Button("查看 arXiv 页面") { model.openSource(item) }
+                        Button(item.directURL == nil ? "查看 arXiv 页面" : "查看来源链接") { model.openSource(item) }
                     } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 20)
                     .help("\(url.path)\(item.pages.map { "\n\($0) 页" } ?? "")")
                     .accessibilityLabel("\(item.title)的更多操作")
                 } else if item.canRetry {
                     Button("重试") { model.retry(item.id) }.controlSize(.small).frame(width: 44).disabled(model.busy)
-                } else if item.reference == nil {
+                } else if item.source == nil {
                     Button("修改") { model.edit(item) }.controlSize(.small).frame(width: 44).disabled(model.busy)
                 }
             }.frame(width: 72, alignment: .leading)
@@ -760,8 +770,8 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.namingExample).font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(ThemePalette.color(palette.secondary)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    Text(model.naming == .dateTitle ? "年月取首次提交日期。" : "")
-                        .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(height: 14)
+                    Text(model.naming == .dateTitle ? "arXiv 年月取首次提交日期；通用 PDF 使用标题或原文件名。" : "arXiv 使用所选命名；通用 PDF 使用标题或原文件名。")
+                        .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).fixedSize(horizontal: false, vertical: true)
                 }.padding(.leading, 80).frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()

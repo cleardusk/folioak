@@ -71,7 +71,9 @@ struct CLIOptions {
           --version               显示版本
 
         默认读取 UI 的保存目录和命名方式；命令参数仅影响本次执行。
-        支持摘要、PDF、HTML 链接及编号，每批最多 200 条，自动去重。
+        支持 arXiv 摘要/PDF/HTML 链接、编号及通用 HTTPS PDF 直链。
+        通用 PDF 使用文档标题或原文件名；--naming 仅影响 arXiv。
+        每批最多 200 条，自动去重。
         终端显示简短彩色结果；NO_COLOR=1 关闭颜色。
         重定向 stdout 时仅输出文件路径；--json 始终为无颜色 JSON。
         退出码：0 成功；1 有失败或暂停；2 参数/目录错误；130 SIGINT；143 SIGTERM。
@@ -129,6 +131,7 @@ final class CLIConsole: @unchecked Sendable {
         case .coordinating: message = "等待其他下载任务"
         case .metadata: message = "获取信息"
         case .resolved(let paper): identifier = paper.reference.identifier; message = "准备下载"
+        case .document: message = "保存完成"
         case .checkingLocal: message = "检查本地文件"
         case .validating: message = "保存中"
         case .waiting(let date): message = "等待至 \(Self.time(date))"
@@ -142,7 +145,9 @@ final class CLIConsole: @unchecked Sendable {
             if let fraction = progress.fraction { message = "下载 \(Int(fraction * 100))%" }
             else { message = String(format: "下载 %.1f MB", Double(progress.received) / 1_048_576) }
         }
-        let line = "\(identifier)  \(message)"
+        let label = CLIRunner.terminalText(identifier)
+        let compact = label.count > 48 ? String(label.prefix(48)) + "…" : label
+        let line = "\(compact)  \(message)"
         guard line != lastLine else { return }
         lastLine = line
         if interactive {
@@ -166,7 +171,7 @@ final class CLIConsole: @unchecked Sendable {
         case "paused": symbol = "◷"; status = "等待重试" + (result.retryAfter.map { " · \(Self.time($0)) 后" } ?? ""); tint = 33
         default: symbol = "✕"; status = "失败" + (result.error.map { " · \(CLIRunner.terminalText($0))" } ?? ""); tint = 31
         }
-        let reference = CLIRunner.terminalText(result.identifier ?? result.input)
+        let reference = CLIRunner.terminalText(result.identifier ?? (identifier.isEmpty ? result.input : identifier))
         let compact = reference.count > 48 ? String(reference.prefix(48)) + "…" : reference
         write((activeLine ? "\r\u{1b}[2K" : "") + styled(symbol, tint) + " " + compact + "  " + styled(status, tint) + "\n")
         activeLine = false
@@ -190,7 +195,7 @@ enum CLIRunner {
             let directory = options.output.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL } ?? defaults.directory
             let naming = options.naming ?? defaults.naming
             let batch = try BatchInput(options.input)
-            if batch.entries.contains(where: { $0.reference != nil }) {
+            if batch.entries.contains(where: { $0.source != nil }) {
                 var isDirectory: ObjCBool = false
                 if !FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), options.output != nil {
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -201,29 +206,30 @@ enum CLIRunner {
                 }
             }
             var results: [CLIResult] = []
-            var pause: Date?
+            var pauses: [String: Date] = [:]
             let human = interactive && !options.json
             for entry in batch.entries {
                 var result = CLIResult(input: entry.original, identifier: entry.reference?.identifier, status: "failed", error: entry.error)
-                let console = CLIConsole(identifier: entry.reference?.identifier ?? "", interactive: human, color: color, cursor: cursor, write: stderr)
+                let console = CLIConsole(identifier: entry.source?.label ?? "", interactive: human, color: color, cursor: cursor, write: stderr)
                 defer { console.finish(result) }
-                guard let reference = entry.reference else { results.append(result); continue }
+                guard let source = entry.source else { results.append(result); continue }
                 if Task.isCancelled { result.status = "cancelled"; results.append(result); continue }
-                if let pause { result.status = "paused"; result.retryAfter = pause; results.append(result); continue }
+                if let pause = pauses[source.rateLimitKey] { result.status = "paused"; result.retryAfter = pause; results.append(result); continue }
                 do {
-                    let paper = try await engine.download(reference, to: directory, naming: naming) { event in
+                    let paper = try await engine.download(source, to: directory, naming: naming) { event in
                         console.receive(event)
                     }
-                    result.identifier = paper.metadata.reference.identifier
+                    result.identifier = paper.metadata?.reference.identifier
                     result.status = paper.alreadyExisted ? "existing" : "saved"
                     result.path = paper.url.path
                     result.pages = paper.pages
                     if !options.json && !human { stdout(terminalText(paper.url.path) + "\n") }
                 } catch is CancellationError { result.status = "cancelled" }
                 catch DownloadError.cooldown(let seconds) {
-                    pause = Date().addingTimeInterval(seconds)
+                    let pause = Date().addingTimeInterval(seconds)
+                    pauses[source.rateLimitKey] = pause
                     result.status = "paused"; result.retryAfter = pause
-                    result.error = "arXiv 要求暂停请求，可在 \(pause!.formatted(date: .abbreviated, time: .standard)) 后重试。"
+                    result.error = "下载站点要求暂停请求，可在 \(pause.formatted(date: .abbreviated, time: .standard)) 后重试。"
                 } catch { result.error = error.localizedDescription }
                 results.append(result)
             }

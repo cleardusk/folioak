@@ -102,6 +102,7 @@ struct CoreTests {
             try await processTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)
             try await transportTests(root: root, pdf: pdf)
+            try await genericPDFTests(root: root, pdf: pdf)
             try await existingFileTests(root: root, pdf: pdf)
             try await queueTests(root: root, pdf: pdf)
             try await completedInputTests(root: root, pdf: pdf)
@@ -744,7 +745,7 @@ struct CoreTests {
                 let palette = theme.palette(dark: dark)
                 editor.styleReferences(textColor: ThemePalette.nativeColor(palette.text), accentColor: ThemePalette.nativeColor(palette.accent), underlineRecognized: theme == .graphite)
                 let storage = editor.textStorage!
-                for (token, valid) in [("https://arxiv.org/html/2501.12345v2", true), ("2501.12345", true), ("https://example.com/paper", false), ("bad-link", false)] {
+                for (token, valid) in [("https://arxiv.org/html/2501.12345v2", true), ("2501.12345", true), ("https://example.com/paper", true), ("bad-link", false)] {
                     let range = DownloaderView.inputRange(of: token, in: editor.string)!
                     let attributes = storage.attributes(at: range.location, effectiveRange: nil)
                     try expect((attributes[.foregroundColor] as? NSColor) == ThemePalette.nativeColor(valid ? palette.accent : palette.text), "recognized input uses semantic theme color")
@@ -908,6 +909,17 @@ struct CoreTests {
                 app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
                 try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 584, height: 570, name: "recognized-\(theme.rawValue)-\(scheme == .light ? "light" : "dark")", title: "arXiv下载器")
             }
+        }
+        model.input = "https://mirros.ai/report/agent-garten.pdf\nhttps://example.com/download?key=a,b;c\n1706.03762v1"
+        model.items = [
+            DownloadItem(original: "https://mirros.ai/report/agent-garten.pdf", reference: nil, directURL: URL(string: "https://mirros.ai/report/agent-garten.pdf"), state: .saved, savedURL: model.directory.appendingPathComponent("Agent Garten.pdf"), pages: 32, documentTitle: "Agent Garten"),
+            DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"), state: .queued)
+        ]
+        model.theme = .lagoon
+        for scheme in [ColorScheme.light, .dark] {
+            app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+            try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 584, height: 570, name: "generic-pdf-\(scheme == .light ? "light" : "dark")")
+            try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "generic-settings-\(scheme == .light ? "light" : "dark")", title: "设置")
         }
         print("UI snapshots: \(output.path)")
     }

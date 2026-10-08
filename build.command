@@ -14,7 +14,7 @@ mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 \
   -framework AppKit -framework SwiftUI -framework PDFKit \
-  Sources/Core.swift Sources/Shared.swift Sources/Theme.swift Sources/App.swift \
+  Sources/Core.swift Sources/PDF.swift Sources/Shared.swift Sources/Theme.swift Sources/App.swift \
   -o "$staged_app/Contents/MacOS/ArxivDownloader"
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 if [[ -f Resources/AppIcon.icns ]]; then
@@ -22,7 +22,7 @@ if [[ -f Resources/AppIcon.icns ]]; then
 fi
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 -framework PDFKit \
-  Sources/Core.swift Sources/Shared.swift Sources/CLI.swift "$staging_dir/Version.swift" \
+  Sources/Core.swift Sources/PDF.swift Sources/Shared.swift Sources/CLI.swift "$staging_dir/Version.swift" \
   -o "$staging_dir/arxiv-download"
 codesign --force --options runtime --timestamp=none --sign - "$staging_dir/arxiv-download"
 codesign --verify --strict "$staging_dir/arxiv-download"

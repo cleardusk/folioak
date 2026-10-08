@@ -17,10 +17,12 @@ final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         var error: URLError.Code?
         var sendHeaders = true
         var finish = true
+        var finalURL: URL?
     }
     private static let lock = NSLock()
     private static var replies: [String: [Reply]] = [:]
     private static var requests: [String] = []
+    private static var fullRequests: [URLRequest] = []
     private static var stoppedCount = 0
     private let instanceLock = NSLock()
     private var stopped = false
@@ -29,7 +31,10 @@ final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; replies[path] = sequence
     }
     static func reset() {
-        lock.lock(); defer { lock.unlock() }; replies = [:]; requests = []; stoppedCount = 0
+        lock.lock(); defer { lock.unlock() }; replies = [:]; requests = []; fullRequests = []; stoppedCount = 0
+    }
+    static func lastRequest(_ path: String) -> URLRequest? {
+        lock.lock(); defer { lock.unlock() }; return fullRequests.last { $0.url?.path == path }
     }
     static func count(_ path: String? = nil) -> Int {
         lock.lock(); defer { lock.unlock() }
@@ -44,10 +49,11 @@ final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         let reply = Self.replies[path]?.first
         if let count = Self.replies[path]?.count, count > 1 { Self.replies[path]?.removeFirst() }
         Self.requests.append(path)
+        Self.fullRequests.append(request)
         Self.lock.unlock()
         guard let reply else { client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL)); return }
         if reply.sendHeaders {
-            let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
+            let response = HTTPURLResponse(url: reply.finalURL ?? request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         }
         for offset in stride(from: 0, to: reply.body.count, by: 4096) {

@@ -23,25 +23,26 @@ struct DownloadPreferences {
 struct BatchInput {
     struct Entry {
         let original: String
-        let reference: ArxivReference?
+        let source: DownloadSource?
+        var reference: ArxivReference? { source?.reference }
         let error: String?
     }
     let entries: [Entry]
     let duplicates: Int
     init(_ text: String) throws {
         guard text.utf8.count <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批下载。") }
-        let tokens = ArxivReference.tokens(in: text)
-        guard !tokens.isEmpty else { throw DownloadError.limit("请提供至少一个 arXiv 链接或编号。") }
+        let tokens = DownloadSource.tokens(in: text)
+        guard !tokens.isEmpty else { throw DownloadError.limit("请提供至少一个链接或 arXiv 编号。") }
         guard tokens.count <= ResourceLimits.batchCount else { throw DownloadError.limit("每批最多 200 条输入，请分批下载。") }
-        var seen = Set<ArxivReference>()
+        var seen = Set<DownloadSource>()
         var entries: [Entry] = []
         var duplicates = 0
         for token in tokens {
             do {
-                let reference = try ArxivReference.parse(token)
-                if !seen.insert(reference).inserted { duplicates += 1; continue }
-                entries.append(Entry(original: token, reference: reference, error: nil))
-            } catch { entries.append(Entry(original: token, reference: nil, error: error.localizedDescription)) }
+                let source = try DownloadSource.parse(token)
+                if !seen.insert(source).inserted { duplicates += 1; continue }
+                entries.append(Entry(original: token, source: source, error: nil))
+            } catch { entries.append(Entry(original: token, source: nil, error: error.localizedDescription)) }
         }
         self.entries = entries; self.duplicates = duplicates
     }
@@ -59,8 +60,7 @@ struct RequestCoordinator: Sendable {
     init(directory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/arXivDownloader", isDirectory: true)) {
         self.directory = directory
     }
-    func acquire(waiting: @escaping @Sendable () -> Void = {}) async throws -> RequestLease {
-        try Task.checkCancellation()
+    func prepareDirectory() throws -> Int32 {
         do { try FileManager.default.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true) }
         catch { throw DownloadError.coordination("无法创建共享下载状态目录：\(error.localizedDescription)") }
         // mkdir is atomic when both entry points start for the first time.
@@ -69,13 +69,20 @@ struct RequestCoordinator: Sendable {
         }
         let folder = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard folder >= 0 else { throw DownloadError.coordination("无法安全打开共享下载状态目录。") }
+        var info = stat()
+        guard fstat(folder, &info) == 0, info.st_uid == getuid(), info.st_mode & 0o077 == 0 else {
+            Darwin.close(folder)
+            throw DownloadError.coordination("共享下载状态目录必须由当前用户独占访问。")
+        }
+        return folder
+    }
+    func acquire(waiting: @escaping @Sendable () -> Void = {}) async throws -> RequestLease {
+        try Task.checkCancellation()
+        let folder = try prepareDirectory()
         var handedOff = false
         var descriptor: Int32 = -1
         defer { if !handedOff { if descriptor >= 0 { Darwin.close(descriptor) }; Darwin.close(folder) } }
         var info = stat()
-        guard fstat(folder, &info) == 0, info.st_uid == getuid(), info.st_mode & 0o077 == 0 else {
-            throw DownloadError.coordination("共享下载状态目录必须由当前用户独占访问。")
-        }
         for _ in 0..<4 {
             descriptor = openat(folder, "request.lock", O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
             if descriptor >= 0 { break }

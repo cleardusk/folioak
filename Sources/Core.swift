@@ -26,19 +26,19 @@ enum DownloadError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidLink: return "无法识别：请输入 arXiv 摘要页、PDF 链接或论文编号。"
+        case .invalidLink: return "无法识别：请输入 arXiv 链接／编号，或 HTTPS PDF 直链。"
         case .metadata(let message): return message
         case .http(let code, _):
-            if code == 404 { return "arXiv 未找到这篇论文或指定版本（404）。" }
-            if code == 429 { return "arXiv 暂时限流（429），请稍后重试。" }
-            return "arXiv 返回 HTTP \(code)，请稍后重试。"
+            if code == 404 { return "下载站点未找到文件或指定版本（404）。" }
+            if code == 429 { return "下载站点暂时限流（429），请稍后重试。" }
+            return "下载站点返回 HTTP \(code)，请稍后重试。"
         case .cooldown(let seconds):
             guard seconds.isFinite, seconds >= 0, seconds <= ResourceLimits.retryAfterSeconds else { return "arXiv 要求暂停请求，请稍后重试。" }
             return "arXiv 要求暂停请求，请约 \(String(format: "%.0f", max(1, ceil(seconds / 60)))) 分钟后重试。"
         case .invalidPDF: return "收到的文件不是完整、可读的 PDF，未保存。"
         case .storage(let message): return "保存失败：\(message)"
         case .limit(let message): return message
-        case .unsafeResponse: return "连接或重定向超出允许的 arXiv HTTPS 地址，已停止请求。"
+        case .unsafeResponse: return "连接或重定向不符合安全 HTTPS 要求，已停止请求。"
         case .coordination(let message): return message
         }
     }
@@ -119,7 +119,11 @@ struct PaperMetadata: Sendable {
         case .titleOnly: prefix = ""
         }
         let ending = (style == .titleOnly ? "" : "]") + suffix + ".pdf"
-        var title = Self.cleanTitle(self.title)
+        return Self.filename(title: self.title, prefix: prefix, ending: ending)
+    }
+
+    static func filename(title raw: String, prefix: String = "", ending: String = ".pdf") -> String {
+        var title = Self.cleanTitle(raw)
         if (prefix + title + ending).utf8.count > 250 {
             let budget = max(0, 250 - prefix.utf8.count - ending.utf8.count - "…".utf8.count)
             var clipped = ""
@@ -221,6 +225,7 @@ enum DownloadEvent: Sendable {
     case coordinating
     case metadata
     case resolved(PaperMetadata)
+    case document(String)
     case checkingLocal
     case progress(DownloadProgress)
     case retry(Int)
@@ -237,12 +242,23 @@ struct HTTPResponseFailure: Error {
     let response: HTTPURLResponse
 }
 
-enum NetworkPolicy {
-    static func allows(_ url: URL?) -> Bool {
+enum NetworkPolicy: Sendable {
+    case arxiv, externalPDF
+    static func allows(_ url: URL?) -> Bool { arxiv.allows(url) }
+    func allows(_ url: URL?) -> Bool {
+        if self == .externalPDF { return PublicHTTPS.allows(url) }
         guard let url, let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
         return parts.scheme?.lowercased() == "https"
             && ["arxiv.org", "www.arxiv.org", "export.arxiv.org"].contains(parts.host?.lowercased() ?? "")
             && parts.user == nil && parts.password == nil && (parts.port == nil || parts.port == 443)
+    }
+    func validate(_ url: URL?, resolver: @escaping @Sendable (String) async throws -> [String]) async throws {
+        guard allows(url), let host = url?.host else { throw DownloadError.unsafeResponse }
+        if self == .externalPDF {
+            let addresses = try await resolver(host)
+            guard !addresses.isEmpty, addresses.allSatisfy(PublicHTTPS.isPublicAddress) else { throw DownloadError.unsafeResponse }
+        }
+        try Task.checkCancellation()
     }
 }
 
@@ -253,19 +269,46 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
     private var rejectedResponse: HTTPURLResponse?
     private var lastProgress: ContinuousClock.Instant?
     private let limit: Int64
-    init(limit: Int64 = ResourceLimits.pdfBytes, _ progress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }) {
-        self.limit = limit; self.progress = progress
+    private let policy: NetworkPolicy
+    private let resolver: @Sendable (String) async throws -> [String]
+    private var allowNotModified: Bool
+    private var redirects = 0
+    private var redirectTask: Task<Void, Never>?
+    private var stopped = false
+    init(limit: Int64 = ResourceLimits.pdfBytes, policy: NetworkPolicy = .arxiv, allowNotModified: Bool = false,
+         resolver: @escaping @Sendable (String) async throws -> [String] = { try await DNSValidation.resolve($0) },
+         _ progress: @escaping @Sendable (DownloadProgress) -> Void = { _ in }) {
+        self.limit = limit; self.progress = progress; self.policy = policy
+        self.allowNotModified = allowNotModified; self.resolver = resolver
     }
     var failure: DownloadError? { lock.lock(); defer { lock.unlock() }; return error }
     var httpFailure: HTTPURLResponse? { lock.lock(); defer { lock.unlock() }; return rejectedResponse }
+    var acceptsNotModified: Bool { lock.lock(); defer { lock.unlock() }; return allowNotModified }
     private func reject(_ failure: DownloadError) { lock.lock(); defer { lock.unlock() }; if error == nil { error = failure } }
+    func stop() {
+        lock.lock(); stopped = true; let task = redirectTask; redirectTask = nil; lock.unlock()
+        task?.cancel()
+    }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        if NetworkPolicy.allows(request.url) { completionHandler(request) }
-        else { reject(.unsafeResponse); completionHandler(nil) }
+        lock.lock(); redirects += 1; let allowed = redirects <= 5 && !stopped
+        if policy == .externalPDF { allowNotModified = false }
+        lock.unlock()
+        guard allowed, policy.allows(request.url) else { reject(.unsafeResponse); completionHandler(nil); return }
+        var redirected = request
+        if policy == .externalPDF {
+            redirected.setValue(nil, forHTTPHeaderField: "If-None-Match")
+            redirected.setValue(nil, forHTTPHeaderField: "If-Modified-Since")
+        }
+        let task = Task {
+            do { try await policy.validate(redirected.url, resolver: resolver); try Task.checkCancellation(); completionHandler(redirected) }
+            catch { if !(error is CancellationError) { reject(.unsafeResponse) }; completionHandler(nil) }
+        }
+        lock.lock(); let cancel = stopped; if !cancel { redirectTask = task }; lock.unlock()
+        if cancel { task.cancel() }
     }
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        if let response = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
+        if let response = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(response.statusCode), !(acceptsNotModified && response.statusCode == 304) {
             lock.lock(); rejectedResponse = response; lock.unlock()
             downloadTask.cancel(); return
         }
@@ -284,29 +327,40 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
 
 final class URLSessionTransport: HTTPTransport {
     private let session: URLSession
+    private let policy: NetworkPolicy
+    private let resolver: @Sendable (String) async throws -> [String]
     #if TESTING
-    init(testConfiguration: URLSessionConfiguration) {
+    init(testConfiguration: URLSessionConfiguration, policy: NetworkPolicy = .arxiv,
+         resolver: @escaping @Sendable (String) async throws -> [String] = { _ in ["93.184.216.34"] }) {
+        self.policy = policy; self.resolver = resolver
         session = URLSession(configuration: testConfiguration)
     }
     #endif
-    init() {
+    init(policy: NetworkPolicy = .arxiv) {
+        self.policy = policy; resolver = { try await DNSValidation.resolve($0) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 300
         configuration.httpMaximumConnectionsPerHost = 1
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpAdditionalHeaders = ["User-Agent": "ArxivPaperDownloader/1.0 (macOS personal-use client)"]
+        if policy == .externalPDF {
+            configuration.httpShouldSetCookies = false
+            configuration.httpCookieStorage = nil
+            configuration.urlCredentialStorage = nil
+        }
         session = URLSession(configuration: configuration)
     }
     deinit { session.invalidateAndCancel() }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        guard NetworkPolicy.allows(request.url) else { throw DownloadError.unsafeResponse }
-        let observer = ProgressObserver()
+        try await policy.validate(request.url, resolver: resolver)
+        let observer = ProgressObserver(policy: policy, resolver: resolver)
+        defer { observer.stop() }
         do {
             let (bytes, response) = try await session.bytes(for: request, delegate: observer)
             defer { bytes.task.cancel() }
             if let failure = observer.failure { throw failure }
-            guard let http = response as? HTTPURLResponse, NetworkPolicy.allows(response.url) else { throw DownloadError.unsafeResponse }
+            guard let http = response as? HTTPURLResponse, policy.allows(response.url) else { throw DownloadError.unsafeResponse }
             // HTTP status and Retry-After matter before the size or contents of
             // an error page; do not wait for its body to finish streaming.
             guard (200..<300).contains(http.statusCode) else { return (Data(), http) }
@@ -326,14 +380,17 @@ final class URLSessionTransport: HTTPTransport {
         }
     }
     func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
-        guard NetworkPolicy.allows(request.url) else { throw DownloadError.unsafeResponse }
-        let observer = ProgressObserver(progress)
+        try await policy.validate(request.url, resolver: resolver)
+        let conditional = policy == .externalPDF && (request.value(forHTTPHeaderField: "If-None-Match") != nil || request.value(forHTTPHeaderField: "If-Modified-Since") != nil)
+        let observer = ProgressObserver(policy: policy, allowNotModified: conditional, resolver: resolver, progress)
+        defer { observer.stop() }
         do {
             let (url, response) = try await session.download(for: request, delegate: observer)
             do {
                 if let failure = observer.failure { throw failure }
                 if let response = observer.httpFailure { throw HTTPResponseFailure(response: response) }
-                guard let http = response as? HTTPURLResponse, NetworkPolicy.allows(response.url) else { throw DownloadError.unsafeResponse }
+                guard let http = response as? HTTPURLResponse, policy.allows(response.url) else { throw DownloadError.unsafeResponse }
+                if http.statusCode == 304 && !observer.acceptsNotModified { throw HTTPResponseFailure(response: http) }
                 return (url, http)
             } catch { try? FileManager.default.removeItem(at: url); throw error }
         } catch {
@@ -416,7 +473,7 @@ enum PaperStorage {
         catch { return nil }
     }
 
-    private static func boundedRegularFile(at url: URL) throws -> FileHandle {
+    static func boundedRegularFile(at url: URL) throws -> FileHandle {
         let descriptor = url.path.withCString { Darwin.open($0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) }
         guard descriptor >= 0 else { throw DownloadError.storage(String(cString: strerror(errno))) }
         var info = stat()
@@ -469,6 +526,15 @@ enum PaperStorage {
     }
 
     static func save(downloaded: URL, metadata: PaperMetadata, directory: URL, naming: NamingStyle = .dateTitle) throws -> SavedPaper {
+        let tag = metadata.reference.identifier.replacingOccurrences(of: "/", with: "-")
+        let saved = try publish(downloaded: downloaded, directory: directory, tag: tag,
+            filename: { metadata.filename(style: naming, suffix: $0) },
+            record: { recordSource(at: $0, metadata: metadata, hash: $1) })
+        return SavedPaper(metadata: metadata, url: saved.url, alreadyExisted: saved.existing, pages: saved.pages)
+    }
+
+    static func publish(downloaded: URL, directory: URL, tag: String, filename: (String) -> String,
+                        record: (URL, SHA256.Digest) -> Void) throws -> (url: URL, existing: Bool, pages: Int) {
         try Task.checkCancellation()
         let pages = try validatePDF(at: downloaded)
         let hash = try hash(at: downloaded)
@@ -483,24 +549,23 @@ enum PaperStorage {
         catch let error as CocoaError where error.code == .fileWriteOutOfSpace {
             throw DownloadError.storage("磁盘空间不足，请释放空间或选择其他目录。")
         }
-        recordSource(at: staged, metadata: metadata, hash: hash)
-        let tag = metadata.reference.identifier.replacingOccurrences(of: "/", with: "-")
+        record(staged, hash)
         for index in 0..<1000 {
             try Task.checkCancellation()
             let suffix = index == 0 ? "" : (index == 1 ? "[\(tag)]" : "[\(tag)-\(index)]")
-            let target = directory.appendingPathComponent(metadata.filename(style: naming, suffix: suffix))
+            let target = directory.appendingPathComponent(filename(suffix))
             // Both paths are on the destination volume. Exclusive rename publishes
             // a complete file atomically without overwriting a concurrent writer.
             let code = staged.path.withCString { source in target.path.withCString { destination in
                 Darwin.renamex_np(source, destination, UInt32(RENAME_EXCL))
             } }
-            if code == 0 { return SavedPaper(metadata: metadata, url: target, alreadyExisted: false, pages: pages) }
+            if code == 0 { return (target, false, pages) }
             let failure = errno
             guard failure == EEXIST else { throw DownloadError.storage(String(cString: strerror(failure))) }
             // Equal SHA-256 content has already passed validation at downloaded.
             if let oldHash = try? self.hash(at: target), oldHash == hash {
-                recordSource(at: target, metadata: metadata, hash: hash)
-                return SavedPaper(metadata: metadata, url: target.resolvingSymlinksInPath(), alreadyExisted: true, pages: pages)
+                record(target, hash)
+                return (target.resolvingSymlinksInPath(), true, pages)
             }
         }
         throw DownloadError.storage("同名文件过多，请换一个目录。")
@@ -509,6 +574,7 @@ enum PaperStorage {
 
 actor DownloadEngine {
     private let transport: HTTPTransport
+    private var pdfTransport: HTTPTransport?
     private let requestInterval: Double
     private let retryDelay: Double
     private let rateLimitDelay: Double
@@ -520,8 +586,9 @@ actor DownloadEngine {
     private var rateLimitStrikes = 0
     private static let cooldownKey = "requestCooldownUntil"
 
-    init(transport: HTTPTransport = URLSessionTransport(), requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil) {
+    init(transport: HTTPTransport = URLSessionTransport(), pdfTransport: HTTPTransport? = nil, requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil) {
         self.transport = transport
+        self.pdfTransport = pdfTransport
         self.requestInterval = requestInterval
         self.retryDelay = retryDelay
         self.rateLimitDelay = rateLimitDelay
@@ -656,8 +723,7 @@ actor DownloadEngine {
         fatalError("Unreachable retry state")
     }
 
-    func download(_ reference: ArxivReference, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedPaper {
-        defer { lease = nil }
+    private func acquire(event: @escaping @Sendable (DownloadEvent) -> Void) async throws {
         if let coordinator {
             let acquired = try await coordinator.acquire { event(.coordinating) }
             let state = try acquired.load()
@@ -677,6 +743,11 @@ actor DownloadEngine {
             // report a paused batch without making a request.
             if cooldownUntil != nil { try persistRequestState() }
         }
+    }
+
+    func download(_ reference: ArxivReference, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedPaper {
+        defer { lease = nil }
+        try await acquire(event: event)
         event(.metadata)
         var components = URLComponents(string: "https://export.arxiv.org/api/query")!
         components.queryItems = [URLQueryItem(name: "id_list", value: reference.identifier), URLQueryItem(name: "max_results", value: "1")]
@@ -708,5 +779,59 @@ actor DownloadEngine {
         try Task.checkCancellation()
         event(.validating)
         return try PaperStorage.save(downloaded: local, metadata: metadata, directory: directory, naming: naming)
+    }
+
+    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
+        switch source {
+        case .arxiv(let reference):
+            let paper = try await download(reference, to: directory, naming: naming, event: event)
+            return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
+        case .pdf(let url):
+            guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
+            var shared: RequestCoordinator?
+            if let coordinator {
+                // Establish a private parent before creating per-origin state.
+                let parent = try coordinator.prepareDirectory()
+                Darwin.close(parent)
+                shared = RequestCoordinator(directory: coordinator.directory.appendingPathComponent("pdf-" + PDFStorage.key(url.host!.lowercased())))
+            }
+            if pdfTransport == nil { pdfTransport = URLSessionTransport(policy: .externalPDF) }
+            let client = DownloadEngine(transport: pdfTransport!, requestInterval: coordinator == nil ? min(1, requestInterval) : 1,
+                retryDelay: retryDelay, rateLimitDelay: rateLimitDelay, coordinator: shared)
+            return try await client.downloadPDF(url, to: directory, event: event)
+        }
+    }
+
+    private func downloadPDF(_ url: URL, to directory: URL, event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
+        defer { lease = nil }
+        try await acquire(event: event)
+        event(.checkingLocal)
+        var cached = try PDFStorage.existing(source: url, directory: directory)
+        return try await retried(event: event) {
+            var request = URLRequest(url: url)
+            request.setValue("application/pdf, application/octet-stream;q=0.9", forHTTPHeaderField: "Accept")
+            if let cached {
+                request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match")
+                if cached.etag == nil { request.setValue(cached.modified, forHTTPHeaderField: "If-Modified-Since") }
+            }
+            let (file, response) = try await transport.download(for: request) { event(.progress($0)) }
+            defer { try? FileManager.default.removeItem(at: file) }
+            if response.statusCode == 304 {
+                guard response.url == url, let previous = cached, (previous.etag != nil || previous.modified != nil),
+                      let verified = try PDFStorage.existing(source: url, directory: directory), verified.hash == previous.hash else {
+                    cached = nil; throw DownloadError.invalidPDF
+                }
+                try check(HTTPURLResponse(url: response.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!)
+                event(.document(verified.saved.title))
+                return verified.saved
+            }
+            try check(response)
+            guard response.statusCode == 200 else { throw DownloadError.http(response.statusCode, retryAfter: nil) }
+            try Task.checkCancellation()
+            event(.validating)
+            let saved = try PDFStorage.save(downloaded: file, source: url, response: response, directory: directory)
+            event(.document(saved.title))
+            return saved
+        }
     }
 }
