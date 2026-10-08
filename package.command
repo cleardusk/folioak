@@ -1,5 +1,10 @@
 #!/bin/zsh
 set -euo pipefail
+TRAPZERR() {
+  local failure=$?
+  print -u2 -- "打包检查失败（退出码 $failure）：${funcfiletrace[1]}"
+  return "$failure"
+}
 project_dir="${0:A:h}"
 cd "$project_dir"
 if (( $# != 0 )); then
