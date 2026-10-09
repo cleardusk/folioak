@@ -190,53 +190,6 @@ struct FilterTabs<Selection: Hashable>: View {
     }
 }
 
-struct ComposerActivityOutline: NSViewRepresentable {
-    let color: Color
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    func makeNSView(context: Context) -> ActivityOutlineView { ActivityOutlineView() }
-    func updateNSView(_ view: ActivityOutlineView, context: Context) {
-        view.update(color: NSColor(color), animate: !reduceMotion)
-    }
-    static func dismantleNSView(_ view: ActivityOutlineView, coordinator: ()) { view.stopAnimating() }
-}
-
-final class ActivityOutlineView: NSView {
-    private let outline = CAShapeLayer()
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer?.addSublayer(outline)
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        outline.frame = bounds
-        outline.path = CGPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 23.5, cornerHeight: 23.5, transform: nil)
-        CATransaction.commit()
-    }
-
-    func update(color: NSColor, animate: Bool) {
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        outline.strokeColor = color.cgColor
-        outline.fillColor = nil
-        outline.lineWidth = 1
-        outline.opacity = animate ? 0.2 : 0.5
-        CATransaction.commit()
-        if animate && outline.animation(forKey: "breathing") == nil {
-            // Core Animation interpolates opacity without redrawing SwiftUI every frame.
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 0.2; pulse.toValue = 0.65
-            pulse.duration = 1.5; pulse.autoreverses = true; pulse.repeatCount = .infinity
-            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            outline.add(pulse, forKey: "breathing")
-        } else if !animate { outline.removeAnimation(forKey: "breathing") }
-    }
-    func stopAnimating() { outline.removeAllAnimations() }
-}
-
 struct SidebarButtonStyle: ButtonStyle {
     let palette: ThemePalette
     var selected = false

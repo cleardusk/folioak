@@ -70,12 +70,6 @@ extension CoreTests {
         probe.selection = 2
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         try sample("tab change during parent motion")
-        let outline = ActivityOutlineView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
-        outline.update(color: .red, animate: true)
-        try expect(outline.layer?.sublayers?.first?.animation(forKey: "breathing") != nil, "active border uses a system layer animation")
-        try expect(outline.hitTest(NSPoint(x: 1, y: 50)) == nil, "breathing border must not intercept input")
-        outline.update(color: .red, animate: false)
-        try expect(outline.layer?.sublayers?.first?.animationKeys()?.isEmpty != false, "reduced motion removes the running layer animation")
         print("PASS rendered filter motion: intermediate frames and rapid parent reversal stay aligned")
     }
 }

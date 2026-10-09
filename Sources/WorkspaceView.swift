@@ -72,9 +72,6 @@ struct DownloaderView: View {
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
-    private var transferring: Bool {
-        model.busy && !model.cancelling && model.items.contains { [.metadata, .checkingLocal, .downloading, .validating].contains($0.state) }
-    }
     private var visibleItems: [DownloadItem] {
         let source = page == .library ? model.library : model.items
         return source.filter { item in
@@ -134,7 +131,7 @@ struct DownloaderView: View {
                         }
                         .foregroundStyle(ThemePalette.color(palette.secondary))
                         .frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
-                        .frame(width: collapsed ? 50 : 166, alignment: .leading).compositingGroup().clipped()
+                        .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped()
                         .contentShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .buttonStyle(SidebarButtonStyle(palette: palette, selected: destination == page))
@@ -161,7 +158,7 @@ struct DownloaderView: View {
                         .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     Spacer(minLength: 0)
                 }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
-                    .frame(width: collapsed ? 50 : 166, alignment: .leading).compositingGroup().clipped().contentShape(Rectangle())
+                    .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
             }.buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary).help("设置（⌘,）").accessibilityLabel("设置")
         }.padding(.horizontal, 12).padding(.bottom, 16).frame(width: collapsed ? 74 : 190)
             .background(ThemePalette.color(palette.sidebar))
@@ -224,9 +221,6 @@ struct DownloaderView: View {
         .background(ThemePalette.color(palette.surface))
         .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).stroke(inputFocused && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
-        .overlay {
-            if transferring { ComposerActivityOutline(color: accent).allowsHitTesting(false).accessibilityHidden(true) }
-        }
     }
 
     private var searchField: some View {
