@@ -2,6 +2,65 @@ import Foundation
 import PDFKit
 
 extension CoreTests {
+    @MainActor static func huggingFaceTests(root: URL, pdf: URL) async throws {
+        let link = "https://huggingface.co/papers/2608.15763"
+        for (url, id) in [
+            (link, "2608.15763"),
+            ("<HTTPS://HUGGINGFACE.CO:443/papers/2608.15763/?utm_source=a,b;c#discussion>", "2608.15763"),
+            ("https://www.huggingface.co/papers/2608.15763v2", "2608.15763v2"),
+            ("https://hf.co/papers/2608.15763", "2608.15763"),
+            ("https://huggingface.co/papers/hep-th/9901001v1", "hep-th/9901001v1")
+        ] {
+            let source = try DownloadSource.parse(url)
+            try expect(source.reference?.identifier == id && source.directURL == nil && source.rateLimitKey == "arxiv", "HF paper uses arxiv metadata, PDF and pacing: \(url)")
+        }
+        for url in ["https://huggingface.co/papers", link + "/discussion", link + ".pdf", link + "v0",
+                    "https://huggingface.co/papers/2613.15763", "https://huggingface.co/papers/https://arxiv.org/abs/2608.15763",
+                    "https://huggingface.co.evil.example/papers/2608.15763", "https://example.com/papers/2608.15763",
+                    "https://huggingface.co/org/model/resolve/main/report.pdf?key=a,b;c"] {
+            try expect(try DownloadSource.parse(url).reference == nil, "only exact HF paper routes are normalized")
+        }
+        for url in ["http://huggingface.co/papers/2608.15763", "https://user@huggingface.co/papers/2608.15763", "https://huggingface.co:444/papers/2608.15763"] {
+            try rejects({ _ = try DownloadSource.parse(url) }, "HF URLs retain HTTPS, credential and port checks")
+        }
+        let shared = link + "?utm_source=a,b;c#discussion"
+        let batch = try BatchInput(shared + "\n2608.15763 https://arxiv.org/abs/2608.15763\n" + link + "v2")
+        try expect(batch.entries.count == 2 && batch.duplicates == 2 && batch.entries[1].reference?.version == 2, "HF shares deduplication with arxiv while preserving requested versions and query punctuation")
+
+        let suite = "arxiv-hf-test-\(UUID().uuidString)"
+        let prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        let folder = root.appendingPathComponent("hf-papers")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        prefs.set(folder.path, forKey: "saveDirectory")
+        let transport = MockTransport(sourcePDF: pdf, latestVersion: 1)
+        let generic = MockTransport(sourcePDF: pdf, pdf: [.failure(.invalidPDF)])
+        let engine = DownloadEngine(transport: transport, pdfTransport: generic, requestInterval: 0, retryDelay: 0)
+        let model = DownloadModel(engine: engine, preferences: prefs)
+        model.input = shared + "\n2608.15763\nbad-link"
+        model.start()
+        try await waitForQueue(model)
+        try expect(model.successes == 1 && model.duplicateCount == 1 && model.input == "bad-link", "UI downloads HF and clears equivalent completed inputs")
+        try expect(model.items[0].metadata?.reference.identifier == "2608.15763v1" && model.items[0].directURL == nil, "HF UI task retains arxiv metadata")
+        try expect(await transport.pdfURLs == [URL(string: "https://arxiv.org/pdf/2608.15763v1")!], "HF download requests the arxiv PDF directly")
+        try expect(await generic.pdfCalls == 0, "HF page is never fetched as a generic PDF")
+
+        let state = root.appendingPathComponent("hf-legacy.json")
+        let legacy = DownloadItem(original: link, reference: nil, directURL: URL(string: link), state: .failed)
+        let other = DownloadItem(original: link + "/discussion", reference: nil, directURL: URL(string: link + "/discussion"), state: .failed)
+        try WorkspaceStore.write(WorkspaceSnapshot(input: link, items: [legacy, other], history: [legacy], logs: []), to: state)
+        let restored = DownloadModel(engine: engine, preferences: prefs, stateURL: state)
+        try expect(restored.persistenceNotice == nil && restored.items.count == 2 && restored.items[0].id == legacy.id, "old HF failures do not invalidate the workspace")
+        try expect(restored.items[0].reference?.identifier == "2608.15763" && restored.items[0].directURL == nil && restored.history[0].reference != nil, "old queue and history HF sources migrate to arxiv")
+        try expect(restored.items[1].directURL == other.directURL, "unrecognized older HF pages remain readable")
+        restored.retry(legacy.id)
+        try await waitForQueue(restored)
+        try expect(restored.items[0].state == .existing && restored.input.isEmpty, "old HF retry reuses the trusted arxiv PDF and clears its input")
+        let calls = await (transport.pdfCalls, generic.pdfCalls)
+        try expect(calls == (1, 0), "old HF retry does not duplicate the PDF transfer")
+        print("PASS HF papers: canonicalization, aliases, shared deduplication, UI arxiv routing, input clearing and legacy retry")
+    }
+
     @MainActor static func genericPDFTests(root: URL, pdf: URL) async throws {
         let source = try DownloadSource.parse("https://MIRROS.ai:443/report/agent-garten.pdf#page=2")
         try expect(source.directURL?.absoluteString == "https://mirros.ai/report/agent-garten.pdf", "generic canonical URL and fragment removal")

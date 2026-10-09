@@ -26,7 +26,7 @@ enum DownloadError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidLink: return "无法识别：请输入 arXiv 链接／编号，或 HTTPS PDF 直链。"
+        case .invalidLink: return "无法识别：请输入 arXiv / HF 论文链接、编号或 HTTPS PDF 直链。"
         case .metadata(let message), .limit(let message), .coordination(let message): return message
         case .http(let code, _):
             if code == 404 { return "下载站点未找到文件或指定版本（404）。" }

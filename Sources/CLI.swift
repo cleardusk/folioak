@@ -72,7 +72,7 @@ struct CLIOptions {
           \(accent("-h, --help"))           显示帮助
           \(accent("--version"))            显示版本
 
-        支持 arXiv 编号／链接和 HTTPS PDF，最多 200 条，自动去重。
+        支持 arXiv 编号／链接、HF 论文页和 HTTPS PDF，最多 200 条，自动去重。
         默认沿用 UI 的目录与命名；选项仅影响本次运行。
         重定向输出文件路径；NO_COLOR=1 关闭颜色。
         """ + "\n"

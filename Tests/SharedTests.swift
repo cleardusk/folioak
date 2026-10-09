@@ -22,14 +22,15 @@ extension CoreTests {
         prefs.set("iris", forKey: "theme")
         let before = prefs.dictionaryRepresentation()
         let override = root.appendingPathComponent("cli-override 👩‍💻")
-        let options = try CLIOptions.parse(["2501.12345v2", "https://arxiv.org/html/2501.12345v2", "--output=\(override.path)", "--naming", "id-title", "--json"])
+        let options = try CLIOptions.parse(["https://huggingface.co/papers/2501.12345v2", "2501.12345v2", "https://arxiv.org/html/2501.12345v2", "--output=\(override.path)", "--naming", "id-title", "--json"])
         let transport = MockTransport(sourcePDF: pdf)
         let engine = DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0)
         let console = CapturedConsole()
         let result = await CLIRunner.run(options, version: "test", engine: engine, preferences: prefs, stdout: { console.stdout($0) }, stderr: { console.stderr($0) })
         let report = try JSONSerialization.jsonObject(with: Data(console.output.utf8)) as! [String: Any]
         let rows = report["results"] as! [[String: Any]]
-        try expect(result == 0 && rows.count == 1 && report["deduplicated"] as? Int == 1, "CLI JSON and equivalent-link deduplication")
+        try expect(result == 0 && rows.count == 1 && report["deduplicated"] as? Int == 2, "CLI JSON and HF/arxiv equivalent-link deduplication")
+        try expect(rows[0]["input"] as? String == "https://huggingface.co/papers/2501.12345v2", "CLI JSON preserves the original HF input")
         try expect((rows[0]["path"] as? String)?.contains("[2501.12345v2]") == true && rows[0]["status"] as? String == "saved", "CLI naming and directory override")
         let human = CapturedConsole()
         let humanOptions = try CLIOptions.parse(["2501.12345v2", "-o", override.path, "--naming", "id-title"])

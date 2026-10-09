@@ -50,8 +50,8 @@ struct ActivityEntry: Identifiable, Codable {
 struct WorkspaceSnapshot: Codable {
     var schema = 1
     let input: String
-    let items: [DownloadItem]
-    let history: [DownloadItem]
+    var items: [DownloadItem]
+    var history: [DownloadItem]
     let logs: [ActivityEntry]
 }
 
@@ -69,15 +69,27 @@ enum WorkspaceStore {
         defer { try? file.close() }
         let data = try file.read(upToCount: byteLimit + 1) ?? Data()
         guard data.count <= byteLimit else { throw DownloadError.limit("历史记录过大") }
-        let snapshot = try JSONDecoder().decode(WorkspaceSnapshot.self, from: data)
+        var snapshot = try JSONDecoder().decode(WorkspaceSnapshot.self, from: data)
         guard snapshot.schema == 1, snapshot.input.utf8.count <= ResourceLimits.inputBytes,
               snapshot.items.count <= ResourceLimits.batchCount, snapshot.history.count <= historyLimit,
               snapshot.logs.count <= logLimit,
               Set(snapshot.items.map(\.id)).count == snapshot.items.count,
               Set(snapshot.history.map(\.id)).count == snapshot.history.count,
-              Set(snapshot.logs.map(\.id)).count == snapshot.logs.count,
-              (snapshot.items + snapshot.history).allSatisfy(validItem) else { throw DownloadError.storage("历史记录格式无效") }
+              Set(snapshot.logs.map(\.id)).count == snapshot.logs.count else { throw DownloadError.storage("历史记录格式无效") }
+        // Older versions treated HF paper pages as generic PDF URLs. Upgrade them
+        // before item validation so existing queues stay readable and retry via arXiv.
+        snapshot.items = snapshot.items.map(normalizedSource)
+        snapshot.history = snapshot.history.map(normalizedSource)
+        guard (snapshot.items + snapshot.history).allSatisfy(validItem) else { throw DownloadError.storage("历史记录格式无效") }
         return snapshot
+    }
+    private static func normalizedSource(_ item: DownloadItem) -> DownloadItem {
+        guard item.reference == nil, let url = item.directURL,
+              let reference = (try? DownloadSource.parse(url.absoluteString))?.reference else { return item }
+        var result = item
+        result.reference = reference
+        result.directURL = nil
+        return result
     }
     private static func validItem(_ item: DownloadItem) -> Bool {
         let references = [item.reference, item.restoreReference, item.metadata?.reference].compactMap { $0 }

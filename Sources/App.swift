@@ -74,7 +74,7 @@ enum ItemState: Equatable, Codable {
 struct DownloadItem: Identifiable, Codable {
     var id = UUID()
     let original: String
-    let reference: ArxivReference?
+    var reference: ArxivReference?
     var directURL: URL? = nil
     var restoreReference: ArxivReference?
     var metadata: PaperMetadata?
@@ -635,7 +635,7 @@ final class LinkTextView: NSTextView {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 8
         let text = NSMutableAttributedString(string: Self.example + "\n", attributes: [.font: font, .foregroundColor: placeholderColor, .paragraphStyle: paragraph])
-        text.append(NSAttributedString(string: "arXiv 编号或 PDF 直链，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
+        text.append(NSAttributedString(string: "arXiv / HF 链接或 PDF，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
         placeholderStorage.setAttributedString(text)
         placeholderContainer.containerSize = textContainer.containerSize
         placeholderContainer.lineFragmentPadding = textContainer.lineFragmentPadding
@@ -707,7 +707,7 @@ struct LinkInput: NSViewRepresentable {
         editor.isAutomaticTextCompletionEnabled = false
         editor.isAutomaticTextReplacementEnabled = false
         editor.isAutomaticLinkDetectionEnabled = false
-        editor.setAccessibilityLabel("arXiv 链接，每行一个")
+        editor.setAccessibilityLabel("论文链接，每行一个")
         editor.delegate = context.coordinator
         editor.focusChanged = { [weak coordinator = context.coordinator] value in
             DispatchQueue.main.async { coordinator?.parent.focused = value }

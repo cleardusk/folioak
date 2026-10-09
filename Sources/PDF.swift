@@ -24,6 +24,13 @@ enum DownloadSource: Hashable, Sendable {
               PublicHTTPS.allows(url), !["arxiv.org", "www.arxiv.org", "export.arxiv.org"].contains(parts.host?.lowercased() ?? "") else {
             throw DownloadError.invalidLink(input)
         }
+        if ["huggingface.co", "www.huggingface.co", "hf.co"].contains(parts.host?.lowercased() ?? ""), parts.path.hasPrefix("/papers/") {
+            var identifier = String(parts.path.dropFirst("/papers/".count))
+            if identifier.hasSuffix("/") { identifier.removeLast() }
+            if let reference = try? ArxivReference.parse(identifier), reference.identifier == identifier {
+                return .arxiv(reference)
+            }
+        }
         parts.fragment = nil; parts.scheme = "https"; parts.host = parts.host?.lowercased()
         if parts.port == 443 { parts.port = nil }
         guard let canonical = parts.url else { throw DownloadError.invalidLink(input) }
