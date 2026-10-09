@@ -2,6 +2,70 @@ import Foundation
 import PDFKit
 
 extension CoreTests {
+    @MainActor static func githubPDFTests(root: URL, pdf: URL) async throws {
+        let link = "https://github.com/openai/math/blob/main/overview.pdf"
+        let raw = "https://raw.githubusercontent.com/openai/math/main/overview.pdf"
+        for (input, expected) in [
+            (link, raw),
+            ("<HTTPS://WWW.GITHUB.COM:443/openai/math/blob/main/overview.pdf?raw=true&utm_source=a,b;c#page=2>", raw),
+            ("https://github.com/Org/Repo/blob/v1.0/docs/Report.PDF", "https://raw.githubusercontent.com/Org/Repo/v1.0/docs/Report.PDF"),
+            ("https://github.com/org/repo/blob/abc123/docs/a%20b%23c%25.pdf", "https://raw.githubusercontent.com/org/repo/abc123/docs/a%20b%23c%25.pdf"),
+            ("https://github.com/org/repo/blob/feature%2Fpapers/report.pdf", "https://raw.githubusercontent.com/org/repo/feature%2Fpapers/report.pdf"),
+            (raw + "?token=a%2Fb", raw + "?token=a%2Fb")
+        ] {
+            let source = try DownloadSource.parse(input)
+            try expect(source.directURL?.absoluteString == expected && source.reference == nil, "GitHub PDF canonicalization preserves encoded paths: \(input)")
+            try expect(try DownloadSource.parse(source.directURL!.absoluteString) == source, "GitHub normalization is idempotent")
+        }
+        for input in ["https://github.com.evil.example/openai/math/blob/main/overview.pdf",
+                      "https://example.com/openai/math/blob/main/overview.pdf", "https://github.com/openai/math/tree/main/overview.pdf",
+                      "https://github.com/openai/math/blob/main/README.md", "https://github.com/openai/math/blob/overview.pdf",
+                      "https://github.com/openai/math/blob//overview.pdf", "https://github.com/openai/math/blob/main/overview.pdf/", "https://github.com/openai/math/blob/main/overview.pdf.exe"] {
+            try expect(try DownloadSource.parse(input).directURL?.absoluteString == input, "unrelated or malformed preview routes stay unchanged")
+        }
+        for input in ["http://github.com/openai/math/blob/main/overview.pdf", "https://user@github.com/openai/math/blob/main/overview.pdf", "https://github.com:444/openai/math/blob/main/overview.pdf"] {
+            try rejects({ _ = try DownloadSource.parse(input) }, "GitHub conversion retains URL safety checks")
+        }
+        let shared = link + "?raw=true&utm_source=a,b;c#page=2"
+        let batch = try BatchInput(shared + "\n" + raw + "\n" + link)
+        try expect(batch.entries.count == 1 && batch.duplicates == 2, "GitHub preview and raw links share one download identity")
+
+        FixtureProtocol.reset(); defer { FixtureProtocol.reset() }
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FixtureProtocol.self]
+        let engine = DownloadEngine(pdfTransport: URLSessionTransport(testConfiguration: config, policy: .externalPDF), requestInterval: 0, retryDelay: 0)
+        let folder = root.appendingPathComponent("github-pdfs")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let suite = "arxiv-github-tests-\(UUID().uuidString)"; let prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        prefs.set(folder.path, forKey: "saveDirectory")
+        let path = "/openai/math/main/overview.pdf"
+        FixtureProtocol.install(.init(headers: ["Content-Type": "application/octet-stream", "ETag": "\"github-1\""], body: try Data(contentsOf: pdf)), path: path)
+        let model = DownloadModel(engine: engine, preferences: prefs)
+        model.input = shared + "\n" + raw
+        model.start(); try await waitForQueue(model)
+        try expect(model.successes == 1 && model.duplicateCount == 1 && model.input.isEmpty, "UI downloads GitHub PDF and clears equivalent inputs")
+        try expect(FixtureProtocol.count() == 1 && FixtureProtocol.lastRequest(path)?.url?.absoluteString == raw, "UI requests raw PDF without fetching the preview")
+
+        FixtureProtocol.install(.init(status: 304), path: path)
+        let console = CapturedConsole()
+        let options = try CLIOptions.parse([link, raw, "--json"])
+        let code = await CLIRunner.run(options, version: "test", engine: engine, preferences: prefs, stdout: { console.stdout($0) }, stderr: { console.stderr($0) })
+        let report = try JSONSerialization.jsonObject(with: Data(console.output.utf8)) as! [String: Any]
+        let rows = report["results"] as! [[String: Any]]
+        try expect(code == 0 && rows.count == 1 && rows[0]["input"] as? String == link && rows[0]["status"] as? String == "existing", "CLI preserves original link and reuses the UI download")
+        try expect(FixtureProtocol.lastRequest(path)?.value(forHTTPHeaderField: "If-None-Match") == "\"github-1\"", "GitHub conversion retains conditional PDF caching")
+
+        let state = root.appendingPathComponent("github-legacy.json")
+        let legacy = DownloadItem(original: shared, reference: nil, directURL: URL(string: link + "?raw=true"), state: .failed)
+        let log = ActivityEntry(level: .error, message: "旧下载失败", subject: nil, itemID: legacy.id)
+        try WorkspaceStore.write(WorkspaceSnapshot(input: shared, items: [legacy], history: [legacy], logs: [log]), to: state)
+        let restored = DownloadModel(engine: engine, preferences: prefs, stateURL: state)
+        try expect(restored.persistenceNotice == nil && restored.items.first?.id == legacy.id && restored.history.first?.directURL?.absoluteString == raw && restored.logs.first?.id == log.id, "old GitHub sources migrate without losing queue, history or logs")
+        restored.retry(legacy.id); try await waitForQueue(restored)
+        try expect(restored.items[0].state == .existing && restored.input.isEmpty && FixtureProtocol.count("/openai/math/blob/main/overview.pdf") == 0, "legacy GitHub retry uses raw PDF cache")
+        print("PASS GitHub PDF: encoded paths, strict host matching, shared deduplication, UI/CLI raw routing, cache reuse and legacy retry")
+    }
+
     @MainActor static func huggingFaceTests(root: URL, pdf: URL) async throws {
         let link = "https://huggingface.co/papers/2608.15763"
         for (url, id) in [

@@ -76,8 +76,8 @@ enum WorkspaceStore {
               Set(snapshot.items.map(\.id)).count == snapshot.items.count,
               Set(snapshot.history.map(\.id)).count == snapshot.history.count,
               Set(snapshot.logs.map(\.id)).count == snapshot.logs.count else { throw DownloadError.storage("历史记录格式无效") }
-        // Older versions treated HF paper pages as generic PDF URLs. Upgrade them
-        // before item validation so existing queues stay readable and retry via arXiv.
+        // Normalize newly supported preview links before validation so older
+        // queues stay readable and retry through the current download route.
         snapshot.items = snapshot.items.map(normalizedSource)
         snapshot.history = snapshot.history.map(normalizedSource)
         guard (snapshot.items + snapshot.history).allSatisfy(validItem) else { throw DownloadError.storage("历史记录格式无效") }
@@ -85,10 +85,10 @@ enum WorkspaceStore {
     }
     private static func normalizedSource(_ item: DownloadItem) -> DownloadItem {
         guard item.reference == nil, let url = item.directURL,
-              let reference = (try? DownloadSource.parse(url.absoluteString))?.reference else { return item }
+              let source = try? DownloadSource.parse(url.absoluteString) else { return item }
         var result = item
-        result.reference = reference
-        result.directURL = nil
+        result.reference = source.reference
+        result.directURL = source.directURL
         return result
     }
     private static func validItem(_ item: DownloadItem) -> Bool {

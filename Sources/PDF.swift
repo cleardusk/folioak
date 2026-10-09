@@ -31,6 +31,17 @@ enum DownloadSource: Hashable, Sendable {
                 return .arxiv(reference)
             }
         }
+        // Keep encoded branch/file names intact; preview query parameters do not
+        // belong to the raw resource or its cache identity.
+        var path = parts.percentEncodedPath.components(separatedBy: "/")
+        if ["github.com", "www.github.com"].contains(parts.host?.lowercased() ?? ""),
+           path.count >= 6, path[3] == "blob", path.dropFirst().allSatisfy({ !$0.isEmpty }),
+           url.pathExtension.lowercased() == "pdf" {
+            path.remove(at: 3)
+            parts.host = "raw.githubusercontent.com"
+            parts.percentEncodedPath = path.joined(separator: "/")
+            parts.query = nil
+        }
         parts.fragment = nil; parts.scheme = "https"; parts.host = parts.host?.lowercased()
         if parts.port == 443 { parts.port = nil }
         guard let canonical = parts.url else { throw DownloadError.invalidLink(input) }

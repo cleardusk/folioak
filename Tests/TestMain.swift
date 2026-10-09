@@ -103,6 +103,7 @@ struct CoreTests {
             try createPDF(at: pdf)
             try parseTests()
             try await huggingFaceTests(root: root, pdf: pdf)
+            try await githubPDFTests(root: root, pdf: pdf)
             try metadataTests()
             try securityTests(root: root)
             try storageTests(root: root, pdf: pdf)

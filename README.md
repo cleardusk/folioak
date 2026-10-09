@@ -1,6 +1,6 @@
 # arXiv下载器
 
-原生 macOS 论文下载工具：粘贴 arXiv 链接／编号、Hugging Face 论文页或通用 HTTPS PDF 直链，自动命名并保存。
+原生 macOS 论文下载工具：粘贴 arXiv 链接／编号、Hugging Face 论文页、GitHub PDF 或通用 HTTPS PDF 直链，自动命名并保存。
 
 ## 安装
 
@@ -18,6 +18,8 @@
 arXiv 默认命名为 `[arXiv年份.月份][论文标题].pdf`；通用 PDF 使用文档标题或原文件名。支持混合输入、链接去重、失败重试和取消，不覆盖已有文件；每批最多 200 条。
 
 HF 论文页（如 `https://huggingface.co/papers/2608.15763`）自动转为 arXiv 下载，与相同编号或 arXiv 链接去重；支持版本号、分享参数及 `hf.co` 短域名，无需访问 HF 网页。
+
+GitHub 公开仓库的 PDF 预览链接（如 `https://github.com/openai/math/blob/main/overview.pdf`）自动转为原始文件下载，与对应 raw 链接去重；保留分支／标签／提交和文件路径，无需访问预览页。不支持需要登录的私有仓库。
 
 每篇保存成功后移除对应输入，下载结果保留在列表；失败或取消的链接保留。
 
