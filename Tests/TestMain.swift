@@ -93,6 +93,7 @@ struct CoreTests {
                 try inputLayoutTests()
                 try windowChromeTests()
                 try filterRenderingTests()
+                try logGroupingTests()
                 try await settingsLayoutTests()
                 try await listFocusTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
@@ -129,6 +130,7 @@ struct CoreTests {
             try inputLayoutTests()
             try windowChromeTests()
             try filterRenderingTests()
+            try logGroupingTests()
             try await settingsLayoutTests()
             try await listFocusTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
@@ -969,6 +971,22 @@ struct CoreTests {
             }
             model.items = completedItems
             try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 820, height: 600, name: "workspace-minimum-\(scheme == .light ? "light" : "dark")")
+        }
+        let logStart = Calendar.current.startOfDay(for: Date()).addingTimeInterval(-30)
+        model.logs = (0..<12).map { index -> ActivityEntry in
+            let date = logStart.addingTimeInterval(Double(index * 15))
+            let level: ActivityLevel = index == 10 ? .error : .info
+            return ActivityEntry(date: date, level: level,
+                          message: index == 10 ? String(repeating: "连接超时，请检查网络后重试。", count: 12) : "校验并保存",
+                          subject: index < 4 ? "同名论文" : paper.title, itemID: completedItems[index < 4 ? 1 : 0].id)
+        }
+        model.theme = .graphite
+        for scheme in [ColorScheme.light, .dark] {
+            app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+            for width in [820, 960] {
+                try capture(DownloaderView(model: model, page: .logs).environment(\.colorScheme, scheme), width: width, height: 600,
+                            name: "logs-compact-\(scheme == .light ? "light" : "dark")-\(width)")
+            }
         }
         print("UI snapshots: \(output.path)")
     }

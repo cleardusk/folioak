@@ -57,6 +57,8 @@ struct DownloaderView: View {
         let lastID: UUID?
         let count: Int
         let following: Bool
+        let query: String
+        let level: ActivityLevel?
     }
     @ObservedObject var model: DownloadModel
     @WorkspaceViewState var page: WorkspacePage = .downloads
@@ -398,6 +400,7 @@ struct DownloaderView: View {
 
     private var logContent: some View {
         let entries = visibleLogs
+        let headers = Dictionary(uniqueKeysWithValues: LogGroup.grouped(entries).map { ($0.id, $0) })
         return VStack(spacing: 16) {
             if !model.logs.isEmpty {
             HStack(spacing: 4) {
@@ -414,15 +417,32 @@ struct DownloaderView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(entries) { entry in
-                                LogRow(entry: entry, palette: palette).id(entry.id)
-                                if entry.id != entries.last?.id { Rectangle().fill(ThemePalette.color(palette.border).opacity(0.45)).frame(height: 1).padding(.horizontal, 20) }
+                                VStack(alignment: .leading, spacing: 0) {
+                                    if let group = headers[entry.id], group.subject != nil || group.showsDate {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            if group.showsDate {
+                                                Text(group.date.formatted(date: .abbreviated, time: .omitted))
+                                                    .font(.system(size: 11)).foregroundStyle(secondary)
+                                            }
+                                            if let subject = group.subject {
+                                                Text(subject).font(.system(size: 12, weight: .medium))
+                                                    .lineLimit(1).help(subject).textSelection(.enabled)
+                                                    .padding(.leading, LogRow.messageInset)
+                                            }
+                                        }.frame(maxWidth: .infinity, alignment: .leading)
+                                            .padding(.horizontal, 20)
+                                            .padding(.vertical, 8)
+                                    }
+                                    LogRow(entry: entry, palette: palette)
+                                }.id(entry.id)
                             }
-                        }.background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
+                            Color.clear.frame(height: 1).id("log-end")
+                        }
                     }
-                    .task(id: LogScrollTarget(lastID: entries.last?.id, count: entries.count, following: followLogs)) {
+                    .task(id: LogScrollTarget(lastID: entries.last?.id, count: entries.count, following: followLogs, query: query, level: logLevel)) {
                         // Let the lazy rows register their scroll targets on first entry.
                         await Task.yield()
-                        if !Task.isCancelled, followLogs, let last = entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                        if !Task.isCancelled, followLogs { proxy.scrollTo("log-end", anchor: .bottom) }
                     }
                 }
             }
@@ -462,25 +482,49 @@ struct DownloaderView: View {
     }
 }
 
+struct LogGroup: Identifiable {
+    var entries: [ActivityEntry]
+    let showsDate: Bool
+    var id: UUID { entries[0].id }
+    var date: Date { entries[0].date }
+    var subject: String? { entries.last(where: { $0.subject?.isEmpty == false })?.subject }
+
+    // Group only adjacent events for a known task, after filtering; never reorder the timeline.
+    static func grouped(_ entries: [ActivityEntry], calendar: Calendar = .current) -> [LogGroup] {
+        var groups: [LogGroup] = []
+        for entry in entries {
+            let sameDay = groups.last.map { calendar.isDate($0.date, inSameDayAs: entry.date) } ?? false
+            if sameDay, let itemID = entry.itemID, groups.last?.entries.first?.itemID == itemID {
+                groups[groups.count - 1].entries.append(entry)
+            } else {
+                groups.append(LogGroup(entries: [entry], showsDate: !sameDay))
+            }
+        }
+        return groups
+    }
+}
+
 struct LogRow: View {
+    static let messageInset: CGFloat = 64 + 12 + 16 + 12
     let entry: ActivityEntry
     let palette: ThemePalette
     private var color: Color {
         switch entry.level { case .error: return UIColors.error; case .success: return UIColors.success; case .warning: return ThemePalette.color(palette.accent); default: return ThemePalette.color(palette.secondary) }
     }
     var body: some View {
-        HStack(alignment: .top, spacing: 13) {
-            Image(systemName: entry.level.symbol).font(.system(size: 14)).foregroundStyle(color).frame(width: 18, height: 18)
-                .accessibilityLabel(entry.level.label)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(entry.message).font(.system(size: 13)).foregroundStyle(entry.level == .error ? color : ThemePalette.color(palette.text))
-                    .fixedSize(horizontal: false, vertical: true)
-                if let subject = entry.subject { Text(subject).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).lineLimit(1).help(subject) }
-            }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-            Text(entry.date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits))).font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(ThemePalette.color(palette.secondary)).padding(.top, 2)
+        HStack(alignment: .top, spacing: 12) {
+            Text(entry.date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits)))
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(ThemePalette.color(palette.secondary))
+                .frame(width: 64, height: 16, alignment: .leading)
                 .help(entry.date.formatted(date: .complete, time: .standard))
-        }.padding(.vertical, 16).padding(.horizontal, 20)
+            Image(systemName: entry.level.symbol).font(.system(size: 12)).foregroundStyle(color).frame(width: 16, height: 16)
+                .accessibilityLabel(entry.level.label)
+            Text(entry.message).font(.system(size: 12)).foregroundStyle(entry.level == .error ? color : ThemePalette.color(palette.text))
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading).textSelection(.enabled)
+        }.padding(.vertical, 8).padding(.horizontal, 20)
+            .contentShape(Rectangle()).help(entry.subject ?? entry.message)
+            .accessibilityElement(children: .ignore).accessibilityLabel(entry.line)
             .contextMenu {
                 Button("复制日志") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.line, forType: .string) }
             }

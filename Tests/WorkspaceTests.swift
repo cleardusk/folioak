@@ -2,6 +2,30 @@ import Foundation
 import AppKit
 
 extension CoreTests {
+    static func logGroupingTests() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = ISO8601DateFormatter().date(from: "2026-10-09T23:59:58Z")!
+        let first = UUID(), second = UUID()
+        func entry(_ offset: TimeInterval, _ id: UUID?, _ subject: String?, _ level: ActivityLevel = .info) -> ActivityEntry {
+            ActivityEntry(date: start.addingTimeInterval(offset), level: level, message: "事件 \(offset)", subject: subject, itemID: id)
+        }
+        let entries = [entry(0, first, "1706.03762"), entry(1, first, "同名论文", .success),
+                       entry(3, first, "同名论文"), entry(4, second, "同名论文"), entry(5, first, "同名论文"),
+                       entry(6, nil, "旧记录"), entry(7, nil, "旧记录"), entry(8, nil, nil)]
+        let groups = LogGroup.grouped(entries, calendar: calendar)
+        try expect(groups.map { $0.entries.count } == [2, 1, 1, 1, 1, 1, 1], "logs preserve task identity, interleaving, midnight boundaries and unidentified events")
+        try expect(groups[0].subject == "同名论文", "a group's resolved title replaces its initial identifier")
+        try expect(groups.map(\.showsDate) == [true, true, false, false, false, false, false], "each visible day has one date heading")
+        try expect(groups.flatMap(\.entries).map(\.id) == entries.map(\.id), "grouping never reorders or drops log entries")
+        let filtered = LogGroup.grouped(entries.filter { $0.level == .success }, calendar: calendar)
+        try expect(filtered.first?.subject == "同名论文" && filtered.first?.showsDate == true, "filtered results supply their own title and date context")
+        let many = (0..<1501).map { entry(Double($0), first, "论文") }
+        let trimmed = LogGroup.grouped(Array(many.suffix(1500)), calendar: calendar)
+        try expect(trimmed.first?.subject == "论文" && trimmed.first?.showsDate == true && trimmed.flatMap(\.entries).count == 1500, "trimmed logs retain the new first entry's context")
+        print("PASS log grouping: identity, resolved titles, interleaving, dates, filtering and retention")
+    }
+
     @MainActor static func workspaceBenchmark(root: URL) throws {
         let ref = try ArxivReference.parse("1706.03762v1")
         let metadata = PaperMetadata(reference: ref, title: "Attention Is All You Need — performance fixture", year: 2017, month: 6)
