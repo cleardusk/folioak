@@ -28,15 +28,44 @@ with tempfile.TemporaryDirectory(prefix='media-tools-', dir=ROOT / 'build') as t
     folder = Path(temporary)
     # Exercise relocation, spaces in paths and private library loading without Homebrew.
     tools = folder / 'relocated tools'
-    shutil.copytree(SOURCE, tools)
+    shutil.copytree(SOURCE, tools, symlinks=True)
     ffmpeg, ffprobe = tools / 'ffmpeg', tools / 'ffprobe'
-    for binary in [ffmpeg, ffprobe, *tools.glob('*.dylib')]:
+    for binary in tools.rglob('*'):
+        if binary.is_symlink():
+            assert binary.resolve().is_relative_to(tools) and binary.exists(), binary
+            continue
+        if not binary.is_file():
+            continue
+        with binary.open('rb') as handle:
+            if handle.read(4) not in [bytes.fromhex(m) for m in ['cffaedfe', 'cefaedfe', 'cafebabe', 'cafebabf']]:
+                continue
+        assert run(['xcrun', 'lipo', '-archs', binary]).strip() == 'arm64', binary
         run(['codesign', '--verify', '--strict', binary])
         for line in run(['otool', '-L', binary]).splitlines()[1:]:
             dependency = line.strip().split(' (')[0]
-            assert dependency.startswith(('/usr/lib/', '/System/Library/', '@loader_path/')), dependency
+            assert dependency.startswith(('/usr/lib/', '/System/Library/', '@loader_path/', '@rpath/')), dependency
             if dependency.startswith('@loader_path/'):
-                assert (tools / dependency.split('/', 1)[1]).is_file(), dependency
+                assert (binary.parent / dependency.split('/', 1)[1]).is_file(), dependency
+
+    assert not (tools / 'deno').exists(), 'Stale JS runtime bundled'
+    qjs = tools / 'qjs'
+    script = folder / 'host.js'
+    script.write_text('''
+        if (["std", "os", "fetch", "process", "require", "loadScript"].some(k => k in globalThis))
+            throw Error("Unexpected host capability");
+        Promise.all(["qjs:std", "qjs:os", "file:///etc/passwd"].map(name => import(name)
+            .then(() => { throw Error("Module loading allowed"); }, () => "denied")))
+            .then(results => console.log(JSON.stringify(results)));
+    ''')
+    assert json.loads(run([qjs, '--script', script])) == ['denied'] * 3
+    script.write_text('throw new Error("fixture failure")')
+    failed = subprocess.run([str(qjs), '--script', str(script)], capture_output=True, text=True)
+    assert failed.returncode != 0 and 'fixture failure' in failed.stderr and not failed.stdout
+    result = run([tools / 'yt-dlp', '--ignore-config', '--no-plugin-dirs', '--plugin-dirs',
+                  ROOT / 'Tests/Fixtures/EJS', '--no-remote-components', '--no-update', '--no-cache-dir',
+                  '--no-js-runtimes', '--js-runtimes', f'quickjs:{qjs}', '--skip-download',
+                  '--print', 'title', 'leafpick-ejs:fixture'])
+    assert result.strip() == 'EJS provider passed', result
 
     def probe(path):
         return json.loads(run([ffprobe, '-v', 'error', '-show_streams', '-of', 'json', path]))['streams']

@@ -168,3 +168,10 @@ UI 与 CLI 共用 DownloadSource 解析。通用链接要求 HTTPS、无 URL 凭
 - DMG 校验、解压后应用深层签名、arm64 架构、UI／CLI 版本与 JSON、独立／内置 CLI 一致性通过。仍为 ad-hoc 签名，未公证；未在所有 macOS 13+ 系统上实机测试。
 
 本版不自动删除可恢复的媒体下载片段，可能随失败链接累积；组件安全更新需随应用重新打包。站点认证／地区限制和内容失效不是本地下载成功的保证。
+
+
+## 2.3.2 媒体组件精简补充
+
+Deno 被 QuickJS-NG 0.17.0 引擎及 `Tools/QuickJSHost.c` 替代。host 仅为 EJS 提供标准 JavaScript 和 console.log，不注册模块加载器、文件、网络、进程或 FFI；引擎保留原版源码。执行受 512 MiB 内存、4 MiB 栈及 90 秒单调时钟限制，无 JIT entitlement。yt-dlp 保持禁止运行时更新、远程组件、用户配置、插件及浏览器凭据；测试 fixture 插件仅在 Tests 目录，未打包。
+
+yt-dlp 使用同版本官方目录版，只移除 Intel Mach-O 切片并恢复重复 Python.framework 文件的相对符号链接。整棵运行时逐文件哈希及签名，构建缓存验证还包含 host 源码与配置。FFmpeg 精简仅移除未使用输出能力，保留输入解码器和解析器。

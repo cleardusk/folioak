@@ -44,6 +44,10 @@ for media_dir in "$staging_dir/unpacked/Leafpick.app/Contents/Resources/media-to
   done
   "$media_dir/ffmpeg" -version > /dev/null
   "$media_dir/ffprobe" -v error -show_entries stream=codec_name -of json Tests/Fixtures/Media/tone.m4a > /dev/null
+  codesign --verify --strict "$media_dir/qjs"
+  "$media_dir/yt-dlp" --ignore-config --no-plugin-dirs --plugin-dirs "$project_dir/Tests/Fixtures/EJS" \
+    --no-remote-components --no-update --no-cache-dir --no-js-runtimes --js-runtimes "quickjs:$media_dir/qjs" \
+    --skip-download --print title leafpick-ejs:fixture | /usr/bin/grep -qx 'EJS provider passed'
 done
 xcrun lipo "$staging_dir/unpacked/Leafpick.app/Contents/MacOS/LeafpickApp" -verify_arch arm64
 bundled_cli="$staging_dir/unpacked/Leafpick.app/Contents/MacOS/arxiv-download"

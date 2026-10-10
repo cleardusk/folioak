@@ -22,15 +22,8 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 cp -R Resources/en.lproj Resources/zh-Hans.lproj "$staged_app/Contents/Resources/"
 cp -R build/media-tools "$staged_app/Contents/Resources/media-tools"
-for library in "$staged_app/Contents/Resources/media-tools/"*.dylib; do
-  codesign --force --options runtime --timestamp=none --sign - "$library"
-done
-for tool in ffmpeg ffprobe; do
-  codesign --force --options runtime --entitlements Resources/Downloader.entitlements --timestamp=none --sign - "$staged_app/Contents/Resources/media-tools/$tool"
-done
-codesign --force --options runtime --entitlements Resources/Downloader.entitlements --timestamp=none --sign - "$staged_app/Contents/Resources/media-tools/yt-dlp"
-codesign --force --options runtime --entitlements Resources/Deno.entitlements --timestamp=none --sign - "$staged_app/Contents/Resources/media-tools/deno"
-"$staged_app/Contents/Resources/media-tools/deno" eval 'console.log("JS runtime ready")'
+# Prepared tools, nested Python framework and shared libraries are already signed.
+"$staged_app/Contents/Resources/media-tools/qjs" --version
 "$staged_app/Contents/Resources/media-tools/yt-dlp" --ignore-config --version
 "$staged_app/Contents/Resources/media-tools/ffmpeg" -version > /dev/null
 "$staged_app/Contents/Resources/media-tools/ffprobe" -version > /dev/null
@@ -59,6 +52,7 @@ cmp "$staging_dir/arxiv-download" "$staged_app/Contents/MacOS/arxiv-download"
 rm -rf "$app_dir"
 mv "$staged_app" "$app_dir"
 mv -f "$staging_dir/arxiv-download" "$project_dir/dist/leafpick"
+rm -rf "$project_dir/dist/media-tools"
 cp -R build/media-tools "$project_dir/dist/"
 cp "$project_dir/dist/leafpick" "$project_dir/dist/arxiv-download"
 print "已构建：$app_dir"

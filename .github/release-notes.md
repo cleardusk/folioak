@@ -1,6 +1,7 @@
 拾取 · Leafpick 2.3.2
 
 - 精简 FFmpeg / ffprobe，共用私有媒体库，移除未使用的编码器和特效；保留原有输入格式、音视频合并、M4A 提取与媒体校验。
+- yt-dlp 改用完整的 arm64 目录版，移除 Intel 架构及重复运行时文件；以受限 QuickJS-NG 替换 Deno，保留 YouTube JS 解题能力。
 - DMG 改用 LZMA 压缩，减少安装包体积；仍支持 Apple Silicon 和 macOS 13 及以上。
 - 增加真实媒体组件回归：常见音视频格式、无损合并、HLS 修复、组件搬移与签名检查。
 

@@ -80,7 +80,7 @@ final class MediaProcess: @unchecked Sendable {
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
         let environment = ["PATH=/usr/bin:/bin", "HOME=\(FileManager.default.homeDirectoryForCurrentUser.path)",
-                           "TMPDIR=\(NSTemporaryDirectory())", "LANG=en_US.UTF-8", "PYTHONUNBUFFERED=1", "DENO_NO_UPDATE_CHECK=1"]
+                           "TMPDIR=\(NSTemporaryDirectory())", "LANG=en_US.UTF-8", "PYTHONUNBUFFERED=1"]
         let argv = ([executable.path] + arguments).map { strdup($0) } + [nil]
         let envp = environment.map { strdup($0) } + [nil]
         defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
@@ -267,7 +267,7 @@ enum MediaDownloader {
         var args = ["--ignore-config", "--no-plugin-dirs", "--no-remote-components", "--no-update", "--no-cache-dir",
                     "--no-playlist", "--max-downloads", "20", "--no-overwrites", "--continue", "--newline", "--no-colors",
                     "--socket-timeout", "30", "--retries", "3", "--fragment-retries", "3", "--abort-on-unavailable-fragments", "--max-filesize", "16G",
-                    "--ffmpeg-location", tools.directory.path, "--no-js-runtimes", "--js-runtimes", "deno:" + (try tools.executable("deno")).path,
+                    "--ffmpeg-location", tools.directory.path, "--no-js-runtimes", "--js-runtimes", "quickjs:" + (try tools.executable("qjs")).path,
                     "--windows-filenames", "--trim-filenames", "180", "--paths", folder.path,
                     "--output", "%(title).140B [%(id)s].%(ext)s",
                     "--print", "before_dl:APP_TITLE:%(title)j", "--print", "after_move:APP_FILE:%(filepath)j",
@@ -282,7 +282,7 @@ enum MediaDownloader {
                          event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
         let tools = try MediaTools.installed()
-        for name in ["yt-dlp", "ffmpeg", "ffprobe", "deno"] { _ = try tools.executable(name) }
+        for name in ["yt-dlp", "ffmpeg", "ffprobe", "qjs"] { _ = try tools.executable(name) }
         let key = PDFStorage.key(url.absoluteString + "|" + format.rawValue + "|" + directory.standardizedFileURL.path)
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(DownloadPreferences.domain).appendingPathComponent("MediaDownloads")
