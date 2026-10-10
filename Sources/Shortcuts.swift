@@ -81,10 +81,11 @@ struct ShortcutRecorder: NSViewRepresentable {
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
         override var acceptsFirstResponder: Bool { true }
         @objc private func beginRecording() {
-            window?.makeFirstResponder(self); recording = true; title = "请按组合键…"; report?(nil)
+            window?.makeFirstResponder(self); recording = true; title = "请按组合键…"; setAccessibilityValue(title); report?(nil)
             if monitor == nil {
-                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
                     guard let self, self.recording, self.window === NSApp.keyWindow else { return event }
+                    guard event.type == .keyDown else { self.stop(); return event }
                     if event.keyCode == 53 { self.stop(); return nil }
                     if event.keyCode == 48 { self.stop(); return event }
                     let shortcut = AppShortcut(key: event.characters(byApplyingModifiers: [])?.lowercased() ?? "", modifiers: event.modifierFlags.intersection([.command, .shift, .option, .control]).rawValue)
@@ -96,6 +97,7 @@ struct ShortcutRecorder: NSViewRepresentable {
             }
         }
         private func stop() {
+            if recording { report?(nil) }
             recording = false; title = shortcut.label; setAccessibilityValue(shortcut.label)
             if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
             if let observer { NotificationCenter.default.removeObserver(observer); self.observer = nil }
@@ -108,22 +110,48 @@ struct ShortcutRecorder: NSViewRepresentable {
 
 struct ShortcutSettingsView: View {
     @ObservedObject var shortcuts: ShortcutSettings
+    let palette: ThemePalette
     @ShortcutViewState private var error: String?
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            ForEach(ShortcutAction.allCases, id: \.self) { action in
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(spacing: 0) {
                 HStack {
-                    Text(action.title); Spacer()
-                    ShortcutRecorder(shortcut: shortcuts[action], changed: { shortcuts.set($0, for: action) }, report: { error = $0 })
-                        .frame(width: 140, height: 28).accessibilityLabel("\(action.title)快捷键")
+                    Text("操作"); Spacer()
+                    Text("快捷键").frame(width: 126)
+                }.font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(ThemePalette.color(palette.secondary))
+                    .frame(height: 28)
+                ForEach(ShortcutAction.allCases, id: \.self) { action in
+                    row(action.title) {
+                        ShortcutRecorder(shortcut: shortcuts[action], changed: { shortcuts.set($0, for: action) }, report: { error = $0 })
+                            .frame(width: 126, height: 26).accessibilityLabel("\(action.title)快捷键")
+                            .help("点击修改，按 Esc 取消")
+                    }
                 }
+                Divider().padding(.vertical, 8)
+                fixedRow("选择论文", key: "↑  ↓")
+                fixedRow("快速预览", key: "空格")
+                fixedRow("打开论文", key: "↩")
+                fixedRow("关闭窗口", key: "⌘W")
+                fixedRow("打开设置", key: "⌘,")
             }
-            Text(error ?? "").foregroundStyle(UIColors.error).font(.system(size: 11)).frame(height: 28, alignment: .topLeading)
-            Divider()
-            HStack { Text("列表操作"); Spacer(); Text("↑ ↓ 选择   空格预览   ↩ 打开").foregroundStyle(.secondary) }
-            HStack { Text("窗口操作"); Spacer(); Text("⌘W 关闭   ⌘, 设置").foregroundStyle(.secondary) }
-            Spacer()
-            HStack { Spacer(); Button("恢复默认") { shortcuts.reset(); error = nil }.controlSize(.small) }
+            HStack(spacing: 12) {
+                Text(error ?? "").foregroundStyle(UIColors.error).font(.system(size: 11))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("恢复默认") {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    shortcuts.reset(); error = nil
+                }.controlSize(.small)
+            }.frame(height: 28)
         }.font(.system(size: 12))
+    }
+    private func row<Keys: View>(_ title: String, @ViewBuilder keys: () -> Keys) -> some View {
+        HStack {
+            Text(title); Spacer()
+            keys().frame(width: 126)
+        }.frame(height: 32)
+    }
+    private func fixedRow(_ title: String, key: String) -> some View {
+        row(title) { Text(key).foregroundStyle(ThemePalette.color(palette.secondary)).help("固定快捷键") }
     }
 }

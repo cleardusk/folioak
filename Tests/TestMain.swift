@@ -93,6 +93,7 @@ struct CoreTests {
                 try inputLayoutTests()
                 try windowChromeTests()
                 try filterRenderingTests()
+                try await settingsLayoutTests()
                 try await listFocusTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
@@ -128,6 +129,7 @@ struct CoreTests {
             try inputLayoutTests()
             try windowChromeTests()
             try filterRenderingTests()
+            try await settingsLayoutTests()
             try await listFocusTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
             if CommandLine.arguments.contains("--stress") {
@@ -916,6 +918,7 @@ struct CoreTests {
                     }
                 }
                 try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)", title: "设置")
+                try capture(SettingsView(model: model, tab: "快捷键").environment(\.colorScheme, scheme), width: 470, name: "shortcuts-\(suffix)", title: "设置")
             }
         }
         model.theme = .midnight

@@ -20,6 +20,45 @@ private struct MovingFilterProbe: View {
 }
 
 extension CoreTests {
+    @MainActor static func settingsLayoutTests() async throws {
+        _ = NSApplication.shared
+        let suite = "arxiv-settings-layout-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        let view = NSHostingView(rootView: SettingsView(model: model).id("通用"))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 456), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { window.orderOut(nil) }
+        func header(_ tab: String) async throws -> [Bool] {
+            view.rootView = SettingsView(model: model, tab: tab).id(tab)
+            view.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            view.layoutSubtreeIfNeeded()
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("settings bitmap") }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let scale = CGFloat(bitmap.pixelsWide) / 470
+            let background = bitmap.colorAt(x: 0, y: 0)!
+            // Selection changes the fill, but never the control's occupied rows.
+            return (0..<Int(50 * scale)).map { y in
+                (0..<bitmap.pixelsWide).contains { x in
+                    bitmap.colorAt(x: x, y: y)! != background
+                }
+            }
+        }
+        let general = try await header("通用")
+        let shortcuts = try await header("快捷键")
+        try expect(general.contains(true) && general == shortcuts, "settings category control must not move when switching pages")
+        func recorders(_ root: NSView) -> [NSView] {
+            if root is ShortcutRecorder.Recorder { return [root] }
+            return root.subviews.flatMap(recorders)
+        }
+        let frames = recorders(view).map { $0.convert($0.bounds, to: view) }
+        try expect(frames.count == 4 && frames.allSatisfy { abs($0.minX - frames[0].minX) < 1 && abs($0.width - frames[0].width) < 1 && view.bounds.contains($0) }, "shortcut recorders share one column and remain inside the window")
+        try expect(try await header("通用") == general, "returning to general preserves header position")
+        print("PASS settings layout: stable category header and aligned shortcut column")
+    }
+
     @MainActor static func listFocusTests() async throws {
         _ = NSApplication.shared
         let suite = "arxiv-list-focus-\(UUID().uuidString)"

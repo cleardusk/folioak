@@ -139,3 +139,13 @@ Refero 在线查询返回 NO_SUBSCRIPTION，采用技能内附规范及上述用
 来源转换遵循 [OpenReview PDF 接口](https://docs.openreview.net/how-to-guides/data/how-to-get-pdfs-from-submissions)、[ACL Anthology](https://aclanthology.org/2023.emnlp-main.1/) 及 [CVF 论文页](https://openaccess.thecvf.com/content/CVPR2024/html/Yang_Depth_Anything_Unleashing_the_Power_of_Large-Scale_Unlabeled_Data_CVPR_2024_paper.html) 的公开链接结构。不同输入来源最多三个并行、每来源一个任务；arXiv 策略不降低，外部文件保留 ETag／Last-Modified 复用、重定向验证、限流及 PDF 校验。
 
 实际操作发现并修复：下载与资料库的同 UUID 行被复用后保留旧菜单；已移除视图导入后结果不可见；菜单与详情快捷键对应到不同任务。回归覆盖独立迁移、600 条记录、只读损坏保护、超长作者、版本下载保留草稿／旧文件、部分版本检查失败以及来源并发上限。
+
+## 2.2.1：设置对齐与快捷键
+
+设置页签固定为 28pt 高，内容区固定为 380pt，两页切换不受内部最小高度影响。顶部内边距收至 8pt，页签与内容间距 16pt，内容总高缩至 456pt。通用页标签统一左对齐，标签列 48pt、列距 16pt，组距收至 16pt，保留长路径截断和命名预览。快捷键使用 32pt 等高行、126pt 按键列；四个可编辑动作和五个固定快捷键共用列中心线，错误提示与恢复默认共享固定页脚。
+
+页签使用单个滑动选中块，交互弹簧 response 0.28、damping 0.9，快速反向点击延续当前动画位置；页面内容直接切换，避免整页滑移。系统减少动态效果时取消位移动画，保留普通按钮的键盘激活与选中语义，不引入常驻计时器。
+
+依照用户反馈去掉表格外框、表头底色及逐行分隔，仅以一条细线区分可编辑和固定项。参照 [Apple Lists and tables](https://developer.apple.com/design/human-interface-guidelines/lists-and-tables) 关于简短行文本、明确列标题及样式适合内容和平台的建议，保留两列结构，避免额外容器层级；这是针对九行设置的取舍，不是所有表格的通用样式。
+
+原生窗口体验覆盖深浅外观、录制冲突、Escape／Tab 取消、点击空白处退出、录制中切页、恢复默认和 ⌘W。取消时清除错误，停止录制时移除监听；增加渲染回归确保页签纵向位置不变、录制按钮同列且不越界，并补齐六主题深浅色快捷键快照。

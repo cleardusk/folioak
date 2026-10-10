@@ -900,22 +900,68 @@ final class LinkScrollView: NSScrollView {
     }
 }
 
+private struct SettingsTabs: View {
+    @Binding var selection: String
+    let palette: ThemePalette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var focusedTab: String?
+
+    private var selectionShape: some View {
+        RoundedRectangle(cornerRadius: 7).frame(width: 80, height: 24)
+            .offset(x: selection == "通用" ? 2 : 82)
+            .animation(reduceMotion ? nil : .interactiveSpring(response: 0.28, dampingFraction: 0.9, blendDuration: 0.08), value: selection)
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            selectionShape.foregroundStyle(ThemePalette.color(palette.action)).allowsHitTesting(false)
+            HStack(spacing: 0) {
+                ForEach(["通用", "快捷键"], id: \.self) { tab in
+                    Button { selection = tab } label: {
+                        Text(tab).font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(ThemePalette.color(palette.secondary))
+                            .frame(width: 80, height: 28).contentShape(Rectangle())
+                    }.buttonStyle(.plain).focused($focusedTab, equals: tab)
+                        .accessibilityAddTraits(selection == tab ? .isSelected : [])
+                }
+            }.padding(.horizontal, 2)
+            // Keep text contrast tied to the moving thumb, including interrupted reversals.
+            HStack(spacing: 0) {
+                ForEach(["通用", "快捷键"], id: \.self) { tab in
+                    Text(tab).font(.system(size: 12, weight: .medium)).frame(width: 80, height: 28)
+                }
+            }.padding(.horizontal, 2).foregroundStyle(ThemePalette.color(palette.onAction))
+                .mask(alignment: .leading) { selectionShape }
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }.frame(width: 164, height: 28)
+            .background(ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: 9))
+            .accessibilityElement(children: .contain).accessibilityLabel("设置分类")
+            .onMoveCommand { direction in
+                if direction == .left { selection = "通用"; focusedTab = selection }
+                if direction == .right { selection = "快捷键"; focusedTab = selection }
+            }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: DownloadModel
     @Environment(\.colorScheme) private var scheme
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
-    @ViewState private var tab = "通用"
+    @ViewState var tab = "通用"
 
     var body: some View {
-        VStack(spacing: 24) {
-            Picker("设置分类", selection: $tab) { Text("通用").tag("通用"); Text("快捷键").tag("快捷键") }.pickerStyle(.segmented).labelsHidden().frame(width: 210)
-            if tab == "通用" { general } else { ShortcutSettingsView(shortcuts: model.shortcuts) }
-        }.padding(24).frame(width: 470, height: 480)
+        VStack(spacing: 16) {
+            SettingsTabs(selection: $tab, palette: palette)
+            Group {
+                if tab == "通用" { general } else { ShortcutSettingsView(shortcuts: model.shortcuts, palette: palette) }
+            }.frame(width: 422, height: 380, alignment: .top)
+        }.padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 24)
+            .frame(width: 470, height: 456, alignment: .top)
             .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))
             .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
     }
     private var general: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 16) {
                 settingLabel("保存目录")
                 HStack(spacing: 12) {
@@ -938,7 +984,7 @@ struct SettingsView: View {
                         .foregroundStyle(ThemePalette.color(palette.secondary)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     Text(model.naming == .dateTitle ? "arXiv 年月取首次提交日期；通用 PDF 使用标题或原文件名。" : "arXiv 使用所选命名；通用 PDF 使用标题或原文件名。")
                         .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).fixedSize(horizontal: false, vertical: true)
-                }.padding(.leading, 80).frame(maxWidth: .infinity, alignment: .leading)
+                }.padding(.leading, 64).frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()
             HStack(spacing: 16) {
@@ -956,13 +1002,13 @@ struct SettingsView: View {
                 }.frame(maxWidth: .infinity)
             }
             Text(model.busy ? "下载结束后可更改目录和命名。" : "")
-                .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(height: 14).padding(.leading, 80)
+                .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(height: 14).padding(.leading, 64)
         }
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private func settingLabel(_ text: String) -> some View {
-        Text(text).font(.system(size: 12, weight: .medium)).frame(width: 64, alignment: .trailing)
+        Text(text).font(.system(size: 12, weight: .medium)).frame(width: 48, alignment: .leading)
     }
 }
 
