@@ -336,13 +336,23 @@ extension CoreTests {
         let container = NSTextContainer(containerSize: NSSize(width: 500, height: 120))
         storage.addLayoutManager(layout); layout.addTextContainer(container)
         let editor = LinkTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 120), textContainer: container)
+        let window = NSWindow(contentRect: editor.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = editor
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
         editor.string = "https://arxiv.org/abs/1706.03762 test"
         editor.setSelectedRange(NSRange(location: 2, length: 5))
         editor.updateColors(text: .white, accent: .white, placeholder: .white, underline: true, animated: false)
         editor.updateColors(text: .black, accent: .black, placeholder: .black, underline: true, animated: true)
-        try await Task.sleep(nanoseconds: 90_000_000)
-        let halfway = editor.placeholderColor.usingColorSpace(.sRGB)!.redComponent
-        try expect(halfway > 0.05 && halfway < 0.95, "native placeholder interpolates instead of flashing")
+        // Sample rendered frames, rather than requiring a particular frame at 90 ms.
+        // Older AppKit versions schedule the first frame differently under CI load.
+        var halfway: CGFloat = 1
+        let deadline = Date().addingTimeInterval(0.5)
+        repeat {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            halfway = editor.placeholderColor.usingColorSpace(.sRGB)!.redComponent
+        } while (halfway <= 0.05 || halfway >= 0.95) && Date() < deadline
+        try expect(halfway > 0.05 && halfway < 0.95, "native placeholder interpolates instead of flashing; value=\(halfway)")
         try expect(abs(editor.insertionPointColor.usingColorSpace(.sRGB)!.redComponent - halfway) < 0.01, "caret and placeholder share transition progress")
         editor.updateColors(text: .white, accent: .white, placeholder: .white, underline: true, animated: true)
         let reversed = editor.placeholderColor.usingColorSpace(.sRGB)!.redComponent
