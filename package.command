@@ -23,22 +23,22 @@ fi
 ./build.command
 staging_dir=$(mktemp -d "$project_dir/build/package.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT
-app_dir="$project_dir/dist/Leafpick.app"
-asset_name="Leafpick-v$version-macos-arm64"
-cli_asset="leafpick-cli-v$version-macos-arm64"
-mkdir -p "$staging_dir/cli/leafpick"
-cp "$project_dir/dist/arxiv-download" "$staging_dir/cli/leafpick/leafpick"
-cp -R build/media-tools "$staging_dir/cli/leafpick/media-tools"
-cp CLI-README.md "$staging_dir/cli/leafpick/README.md"
-ditto -c -k --norsrc --noextattr --keepParent "$staging_dir/cli/leafpick" "$staging_dir/$cli_asset.zip"
+app_dir="$project_dir/dist/Leafpeak.app"
+asset_name="Leafpeak-v$version-macos-arm64"
+cli_asset="leafpeak-cli-v$version-macos-arm64"
+mkdir -p "$staging_dir/cli/leafpeak"
+cp "$project_dir/dist/arxiv-download" "$staging_dir/cli/leafpeak/leafpeak"
+cp -R build/media-tools "$staging_dir/cli/leafpeak/media-tools"
+cp CLI-README.md "$staging_dir/cli/leafpeak/README.md"
+ditto -c -k --norsrc --noextattr --keepParent "$staging_dir/cli/leafpeak" "$staging_dir/$cli_asset.zip"
 ditto -x -k "$staging_dir/$cli_asset.zip" "$staging_dir/cli-unpacked"
-codesign --verify --strict "$staging_dir/cli-unpacked/leafpick/leafpick"
-xcrun lipo "$staging_dir/cli-unpacked/leafpick/leafpick" -verify_arch arm64
-test "$("$staging_dir/cli-unpacked/leafpick/leafpick" --version)" = "$version"
+codesign --verify --strict "$staging_dir/cli-unpacked/leafpeak/leafpeak"
+xcrun lipo "$staging_dir/cli-unpacked/leafpeak/leafpeak" -verify_arch arm64
+test "$("$staging_dir/cli-unpacked/leafpeak/leafpeak" --version)" = "$version"
 ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$staging_dir/$asset_name.zip"
 ditto -x -k "$staging_dir/$asset_name.zip" "$staging_dir/unpacked"
-codesign --verify --deep --strict "$staging_dir/unpacked/Leafpick.app"
-for media_dir in "$staging_dir/unpacked/Leafpick.app/Contents/Resources/media-tools" "$staging_dir/cli-unpacked/leafpick/media-tools"; do
+codesign --verify --deep --strict "$staging_dir/unpacked/Leafpeak.app"
+for media_dir in "$staging_dir/unpacked/Leafpeak.app/Contents/Resources/media-tools" "$staging_dir/cli-unpacked/leafpeak/media-tools"; do
   for binary in "$media_dir/ffmpeg" "$media_dir/ffprobe" "$media_dir/"*.dylib; do
     codesign --verify --strict "$binary"
   done
@@ -49,13 +49,13 @@ for media_dir in "$staging_dir/unpacked/Leafpick.app/Contents/Resources/media-to
     --no-remote-components --no-update --no-cache-dir --no-js-runtimes --js-runtimes "quickjs:$media_dir/qjs" \
     --skip-download --print title leafpick-ejs:fixture | /usr/bin/grep -qx 'EJS provider passed'
 done
-xcrun lipo "$staging_dir/unpacked/Leafpick.app/Contents/MacOS/LeafpickApp" -verify_arch arm64
-bundled_cli="$staging_dir/unpacked/Leafpick.app/Contents/MacOS/arxiv-download"
+xcrun lipo "$staging_dir/unpacked/Leafpeak.app/Contents/MacOS/LeafpeakApp" -verify_arch arm64
+bundled_cli="$staging_dir/unpacked/Leafpeak.app/Contents/MacOS/arxiv-download"
 codesign --verify --strict "$bundled_cli"
 xcrun lipo "$bundled_cli" -verify_arch arm64
 test "$("$bundled_cli" --version)" = "$version"
 "$bundled_cli" --help > /dev/null
-cmp "$bundled_cli" "$staging_dir/cli-unpacked/leafpick/leafpick"
+cmp "$bundled_cli" "$staging_dir/cli-unpacked/leafpeak/leafpeak"
 invalid_status=0
 "$bundled_cli" not-an-arxiv-link --json > "$staging_dir/invalid.json" 2> "$staging_dir/invalid.stderr" || invalid_status=$?
 if [[ "$invalid_status" != 1 ]]; then
@@ -68,10 +68,10 @@ let report = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURL
 let rows = report["results"] as! [[String: Any]]
 precondition(report["schema"] as? Int == 1 && rows.count == 1 && rows[0]["status"] as? String == "failed")' "$staging_dir/invalid.json"
 mkdir -p "$staging_dir/dmg"
-ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/Leafpick.app"
+ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/Leafpeak.app"
 ln -s /Applications "$staging_dir/dmg/Applications"
-# LZMA disk images are supported since macOS 10.15; Leafpick requires macOS 13.
-hdiutil create -volname 'Leafpick 拾取' -srcfolder "$staging_dir/dmg" -format ULMO "$staging_dir/$asset_name.dmg"
+# LZMA disk images are supported since macOS 10.15; Leafpeak requires macOS 13.
+hdiutil create -volname 'Leafpeak' -srcfolder "$staging_dir/dmg" -format ULMO "$staging_dir/$asset_name.dmg"
 hdiutil verify "$staging_dir/$asset_name.dmg"
 mv -f "$staging_dir/$asset_name.zip" "$project_dir/dist/$asset_name.zip"
 mv -f "$staging_dir/$asset_name.dmg" "$project_dir/dist/$asset_name.dmg"

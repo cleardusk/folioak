@@ -18,7 +18,7 @@ python3 Tools/prepare-media.py # 首次准备；后续校验并复用缓存
 ./package.command
 ```
 
-`package.command` 构建含 CLI 和媒体组件的 arm64 `Leafpick.app`，先签名内置组件、CLI，再签名完整应用；验证解压后的签名、架构、CLI 版本及 JSON，并确认内置和独立 CLI 相同。生成 `Leafpick-v版本-macos-arm64.dmg` / `.zip`、`leafpick-cli-v版本-macos-arm64.zip` 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
+`package.command` 构建含 CLI 和媒体组件的 arm64 `Leafpeak.app`，先签名内置组件、CLI，再签名完整应用；验证解压后的签名、架构、CLI 版本及 JSON，并确认内置和独立 CLI 相同。生成 `Leafpeak-v版本-macos-arm64.dmg` / `.zip`、`leafpeak-cli-v版本-macos-arm64.zip` 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
 
 yt-dlp、QuickJS-NG、FFmpeg 的版本、源码和校验值在 `Tools/prepare-media.py`，许可说明在 `Resources/MediaComponents.md`。QuickJS-NG 使用不暴露文件、网络、进程或模块加载接口的最小 JS host，无 JIT entitlement；PyInstaller yt-dlp 和 FFmpeg / ffprobe 仅有加载各自私有库所需的 library-validation entitlement（ad-hoc 签名没有 Team ID）。应用主程序不继承这些例外。组件更新必须修改固定版本／校验值并重新验证，不在用户运行时自更新。
 
@@ -39,7 +39,7 @@ FFmpeg / ffprobe 共用安装包内的动态库，保留原有输入解码能力
 3. 创建与应用版本一致的 tag 并推送：
 
 ```sh
-git tag -a v1.2.0 -m 'Leafpick 1.2.0'
+git tag -a v1.2.0 -m 'Leafpeak 1.2.0'
 git push origin v1.2.0
 ```
 

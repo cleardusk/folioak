@@ -1,4 +1,4 @@
-# 拾取 · Leafpick
+# Leafpeak
 
 原生 macOS 下载器。粘贴链接，保存论文、视频、图片或音频。
 
@@ -13,12 +13,12 @@
 
 ## 安装与使用
 
-支持 Apple Silicon（M 系列芯片），最低 macOS 13。从 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases) 下载 DMG，将 Leafpick 拖入 Applications；也可使用应用 ZIP。私有仓库需要有访问权限的 GitHub 账号。
+支持 Apple Silicon（M 系列芯片），最低 macOS 13。从 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases) 下载 DMG，将 Leafpeak 拖入 Applications；也可使用应用 ZIP。私有仓库需要有访问权限的 GitHub 账号。
 
 当前未做 Apple 公证，首次打开可能需要在系统「隐私与安全性」中允许打开。
 
 1. 粘贴或拖入链接；支持多行、Markdown 和含链接的段落。
-2. 选择一个保存位置，默认 `~/Downloads/Leafpick`；自动归入 `Papers`、`Videos`、`Audio`、`Images`。点击目录可更改位置或在访达中打开。
+2. 选择一个保存位置，默认 `~/Downloads/Leafpeak`；自动归入 `Papers`、`Videos`、`Audio`、`Images`。点击目录可更改位置或在访达中打开。
 3. 点击「下载」或按 `⌘ Return`。成功后可打开文件、快速预览或在 Finder 中查看。
 
 子文件夹在首次下载对应类型时创建。升级后新下载使用统一根目录；已有文件和库内路径保留原位置，重试使用当前根目录。
@@ -42,8 +42,8 @@ arXiv 默认命名为 `[年份.月份][论文标题].pdf`，精确版本且内�
 应用内置 CLI，无需启动界面：
 
 ```sh
-"/Applications/Leafpick.app/Contents/MacOS/leafpick" --help
-"/Applications/Leafpick.app/Contents/MacOS/leafpick" 1706.03762 -o ~/Downloads/Papers
+"/Applications/Leafpeak.app/Contents/MacOS/leafpeak" --help
+"/Applications/Leafpeak.app/Contents/MacOS/leafpeak" 1706.03762 -o ~/Downloads/Papers
 ```
 
 另外提供带完整媒体组件的独立 CLI ZIP。`arxiv-download` 保留为应用内兼容别名。[CLI 用法](CLI-README.md)。

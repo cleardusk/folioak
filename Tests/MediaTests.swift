@@ -182,13 +182,24 @@ extension CoreTests {
         let legacyFolder = root.appendingPathComponent("legacy-papers")
         preferences.set(legacyFolder.path, forKey: "saveDirectory")
         preferences.set(root.appendingPathComponent("legacy-media").path, forKey: "mediaSaveDirectory")
-        let defaults = DownloadPreferences(preferences)
-        try expect(defaults.directory.path.hasSuffix("/Downloads/Leafpick") && preferences.string(forKey: "saveDirectory") == legacyFolder.path,
+        let home = root.appendingPathComponent("test-home", isDirectory: true)
+        let defaults = DownloadPreferences(preferences, home: home)
+        try expect(defaults.directory.path.hasSuffix("/Downloads/Leafpeak") && preferences.string(forKey: "saveDirectory") == legacyFolder.path,
                    "one new default root does not reinterpret or overwrite legacy paths")
+        let oldDefault = home.appendingPathComponent("Downloads/Leafpick", isDirectory: true)
+        try FileManager.default.createDirectory(at: oldDefault, withIntermediateDirectories: true)
+        try expect(DownloadPreferences(preferences, home: home).directory == oldDefault,
+                   "an existing old default without a preference survives renaming")
+        preferences.set(legacyFolder.path, forKey: "downloadRootDirectory")
+        try expect(DownloadPreferences(preferences, home: home).directory.path == legacyFolder.path,
+                   "an explicit root takes precedence over the old default")
+        preferences.removeObject(forKey: "downloadRootDirectory")
         let folder = root.appendingPathComponent("organized", isDirectory: true), next = root.appendingPathComponent("next-organized", isDirectory: true)
         let pdf = root.appendingPathComponent("category.pdf"); try createPDF(at: pdf)
         let engine = DownloadEngine(transport: MockTransport(sourcePDF: pdf), pdfTransport: MockTransport(sourcePDF: image), requestInterval: 0, retryDelay: 0)
         let model = DownloadModel(engine: engine, preferences: preferences, stateURL: root.appendingPathComponent("category-workspace.json"))
+        try expect(preferences.string(forKey: "downloadRootDirectory") == model.directory.path,
+                   "app freezes its initial root instead of changing defaults on later launches")
         model.directory = folder
         try expect(!FileManager.default.fileExists(atPath: folder.path), "choosing root does not eagerly create folders")
         model.input = "bad-link"; model.start()
@@ -330,7 +341,7 @@ extension CoreTests {
         let suite = "leafpick-preview-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
-        model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Leafpick")
+        model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Leafpeak")
         let video = URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc")!
         model.input = video.absoluteString
         model.items = [
@@ -356,11 +367,11 @@ extension CoreTests {
                     model.items[0] = model.busy ? activeVideo : savedVideo
                     model.input = scene == "idle" || scene == "long-path" ? "" : video.absoluteString
                     model.mediaFormat = scene == "audio" ? .audio : .automatic
-                    model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/" + (scene == "long-path" ? String(repeating: "Long Download Folder ", count: 6) : "Leafpick"))
+                    model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/" + (scene == "long-path" ? String(repeating: "Long Download Folder ", count: 6) : "Leafpeak"))
                     app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
                     let view = NSHostingView(rootView: DownloaderView(model: model, page: page).environment(\.colorScheme, scheme).environment(\.controlActiveState, .key))
                     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: width == 780 ? 540 : 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-                    let chrome = WindowChrome(window: window, model: model, title: "拾取 · Leafpick", workspace: true)
+                    let chrome = WindowChrome(window: window, model: model, title: "Leafpeak", workspace: true)
                     window.contentView = view
                     let rendered = view.superview ?? view
                     rendered.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.15)); window.displayIfNeeded()
@@ -371,6 +382,6 @@ extension CoreTests {
                 }
             }
         }
-        print("Leafpick previews: \(output.path)")
+        print("Leafpeak previews: \(output.path)")
     }
 }

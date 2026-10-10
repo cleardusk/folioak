@@ -67,12 +67,14 @@ struct DownloadPreferences {
     }
     let directory: URL
     let naming: NamingStyle
-    init(_ preferences: UserDefaults) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+    init(_ preferences: UserDefaults, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        let oldDefault = home.appendingPathComponent("Downloads/Leafpick", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        let usedOldDefault = FileManager.default.fileExists(atPath: oldDefault.path, isDirectory: &isDirectory) && isDirectory.boolValue
         // Keep legacy folder preferences and existing file URLs intact. Their
         // meanings differ from the new root and cannot be safely inferred.
         directory = preferences.string(forKey: "downloadRootDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? home.appendingPathComponent("Downloads/Leafpick", isDirectory: true)
+            ?? (usedOldDefault ? oldDefault : home.appendingPathComponent("Downloads/Leafpeak", isDirectory: true))
         naming = NamingStyle(rawValue: preferences.string(forKey: "namingStyle") ?? "") ?? .dateTitle
     }
 }

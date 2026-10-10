@@ -275,7 +275,7 @@ struct DownloaderView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 9) {
+            HStack(spacing: 8) {
                 Text("添加链接").font(.system(size: 14, weight: .medium))
                 Spacer()
                 if model.hasMediaInput && model.mediaFormat == .audio {
@@ -286,7 +286,7 @@ struct DownloaderView: View {
                 Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
                     .help("追加剪贴板中的链接").accessibilityLabel("粘贴链接").disabled(model.busy)
                 downloadActions
-            }.buttonStyle(.plain).padding(.horizontal, 20).padding(.top, 12)
+            }.buttonStyle(.plain).padding(.leading, 20).padding(.trailing, 24).padding(.top, 12)
             LinkInput(model: model, focused: $inputFocused, palette: palette)
                 .frame(height: 104).padding(.horizontal, 8).padding(.top, 8)
             HStack(spacing: 12) {
@@ -411,7 +411,7 @@ struct DownloaderView: View {
             switch libraryFilter { case .all: return "暂无文档"; case .favorites: return "暂无收藏"; case .unread: return "暂无未读文档"; case .removed: return "暂无已移除文档" }
         }
         if !model.downloads.isEmpty { return "暂无\(filter.rawValue)任务" }
-        return "粘贴链接，开始拾取"
+        return "粘贴链接，开始下载"
     }
 
     private func empty(icon: String, text: String) -> some View {
@@ -715,7 +715,7 @@ struct DirectoryMenu: View {
         } label: {
             Label(model.directory.lastPathComponent.isEmpty ? "/" : model.directory.lastPathComponent, systemImage: "folder")
                 .font(.system(size: 12)).lineLimit(1).truncationMode(.middle).foregroundStyle(ThemePalette.color(palette.secondary))
-        }.menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, showsChevron: true)).menuIndicator(.hidden)
+        }.menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: model.directoryLabel)).menuIndicator(.hidden)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 300, alignment: .leading)
             .padding(.leading, -12)
@@ -726,18 +726,17 @@ struct DirectoryMenu: View {
 
 struct MenuTriggerStyle: ButtonStyle {
     let palette: ThemePalette
-    var showsChevron = false
+    var menuTitle: String?
+    private var showsChevron: Bool { menuTitle != nil }
     @WorkspaceViewState private var hovered = false
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 6) {
             configuration.label
-            if showsChevron {
-                Image(systemName: "chevron.down").font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(ThemePalette.color(palette.secondary))
-                    .rotationEffect(.degrees(configuration.isPressed ? 180 : 0))
-                    // Native menu tracking suspends SwiftUI interpolation; show its state immediately.
-                    .transaction { $0.animation = nil }
+            if let menuTitle {
+                MenuChevron(menuTitle: menuTitle, color: ThemePalette.nativeColor(palette.secondary), animated: !reduceMotion)
+                    .frame(width: 10, height: 10)
                     .accessibilityHidden(true)
             }
         }.padding(.horizontal, showsChevron ? 12 : 0)

@@ -182,6 +182,9 @@ final class DownloadModel: ObservableObject {
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
         directory = downloadPreferences.directory
+        if preferences.string(forKey: "downloadRootDirectory") == nil {
+            preferences.set(directory.path, forKey: "downloadRootDirectory")
+        }
         restoreWorkspace()
         restoreLibrary()
         restoreMediaLibrary()
@@ -1231,9 +1234,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         makeMenu()
         shortcutObservation = model.shortcuts.$bindings.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { self?.makeMenu() } }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "拾取"
+        window.title = "Leafpeak"
         window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow")
-        windowChrome = WindowChrome(window: window, model: model, title: "拾取 · Leafpick", workspace: true)
+        windowChrome = WindowChrome(window: window, model: model, title: "Leafpeak", workspace: true)
         window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }))
         window.minSize = NSSize(width: 820, height: 600)
         if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
@@ -1292,7 +1295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let view = NSHostingView(rootView: SettingsView(model: model))
             let contentSize = view.fittingSize
             let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            panel.title = "拾取设置"
+            panel.title = "Leafpeak 设置"
             settingsChrome = WindowChrome(window: panel, model: model, title: "设置", workspace: true)
             panel.contentView = view
             panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
@@ -1315,10 +1318,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return submenu
         }
         let app = add("", [
-            ("关于 拾取", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""), ("", nil, ""),
+            ("关于 Leafpeak", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""), ("", nil, ""),
             ("设置…", #selector(showSettings), ","), ("", nil, ""),
-            ("隐藏 拾取", #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
-            ("退出 拾取", #selector(NSApplication.terminate(_:)), "q")
+            ("隐藏 Leafpeak", #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
+            ("退出 Leafpeak", #selector(NSApplication.terminate(_:)), "q")
         ])
         app.item(withTitle: "设置…")?.target = self
         let edit = add("编辑", [

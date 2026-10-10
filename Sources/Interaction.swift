@@ -1,6 +1,93 @@
 import AppKit
 import SwiftUI
 
+// Core Animation keeps running while NSMenu owns the event-tracking run loop.
+struct MenuChevron: NSViewRepresentable {
+    let menuTitle: String
+    let color: NSColor
+    let animated: Bool
+    func makeNSView(context: Context) -> ChevronView { ChevronView() }
+    func updateNSView(_ view: ChevronView, context: Context) {
+        view.configure(menuTitle: menuTitle, color: color, animated: animated)
+    }
+    final class ChevronView: NSView {
+        let mark = CAShapeLayer()
+        private var angle: CGFloat?
+        private var menuTitle = ""
+        private var color = NSColor.secondaryLabelColor
+        private var animated = true
+        private weak var trackedMenu: NSMenu?
+        private var observers: [NSObjectProtocol] = []
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            mark.bounds = CGRect(x: 0, y: 0, width: 10, height: 10)
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: 1.5, y: 6.5))
+            path.addLine(to: CGPoint(x: 5, y: 3.5))
+            path.addLine(to: CGPoint(x: 8.5, y: 6.5))
+            mark.path = path; mark.fillColor = nil; mark.lineWidth = 1.4
+            mark.lineCap = .round; mark.lineJoin = .round
+            layer?.addSublayer(mark)
+            setAccessibilityElement(false)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver); observers = []
+            trackedMenu = nil
+            guard window != nil else { update(expanded: false, color: color, animated: false); return }
+            // SwiftUI defers representable updates during tracking. The directory's
+            // existing full-path heading identifies this menu without replacing it.
+            observers.append(NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { [weak self] event in
+                guard let self, let menu = event.object as? NSMenu,
+                      menu.items.first?.title == self.menuTitle else { return }
+                self.trackedMenu = menu
+                self.update(expanded: true, color: self.color, animated: self.animated)
+            })
+            observers.append(NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: nil) { [weak self] event in
+                guard let self, let menu = event.object as? NSMenu, menu === self.trackedMenu else { return }
+                self.trackedMenu = nil
+                self.update(expanded: false, color: self.color, animated: self.animated)
+            })
+        }
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+        func configure(menuTitle: String, color: NSColor, animated: Bool) {
+            self.menuTitle = menuTitle; self.color = color; self.animated = animated
+            update(expanded: trackedMenu != nil, color: color, animated: animated)
+        }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func layout() {
+            super.layout()
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            mark.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            mark.contentsScale = window?.backingScaleFactor ?? 2
+            CATransaction.commit()
+        }
+        func update(expanded: Bool, color: NSColor, animated: Bool) {
+            let target: CGFloat = expanded ? .pi : 0
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            mark.strokeColor = color.cgColor
+            CATransaction.commit()
+            guard angle != target || !animated else { return }
+            let previous = angle
+            let transform = mark.presentation()?.transform ?? mark.transform
+            let start = atan2(transform.m12, transform.m11)
+            angle = target
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            mark.transform = CATransform3DMakeRotation(target, 0, 0, 1)
+            if animated, previous != nil, window != nil {
+                let turn = CABasicAnimation(keyPath: "transform.rotation.z")
+                turn.fromValue = start; turn.toValue = target; turn.duration = 0.2
+                turn.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                mark.add(turn, forKey: "turn")
+            } else { mark.removeAnimation(forKey: "turn") }
+            CATransaction.commit()
+            CATransaction.flush()
+        }
+    }
+}
+
 struct PaperListKeyboard: NSViewRepresentable {
     enum Action { case up, down, preview, open, diagnostics }
     let request: UUID?

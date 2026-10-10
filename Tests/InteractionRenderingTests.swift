@@ -20,6 +20,44 @@ private struct MovingFilterProbe: View {
 }
 
 extension CoreTests {
+    @MainActor static func menuChevronTests() throws {
+        _ = NSApplication.shared
+        let view = MenuChevron.ChevronView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 80, height: 80), styleMask: [.borderless], backing: .buffered, defer: false)
+        let content = NSView(frame: window.contentLayoutRect)
+        content.addSubview(view); window.contentView = content; window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        view.configure(menuTitle: "/test/Leafpeak", color: .white, animated: true)
+        view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        let menu = NSMenu(), other = NSMenu()
+        menu.addItem(withTitle: "/test/Leafpeak", action: nil, keyEquivalent: "")
+        other.addItem(withTitle: "Other menu", action: nil, keyEquivalent: "")
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: other)
+        try expect(view.mark.animation(forKey: "turn") == nil, "unrelated menus leave the directory arrow alone")
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        var middle: CGFloat = 0
+        let deadline = Date().addingTimeInterval(0.4)
+        repeat {
+            RunLoop.current.run(mode: .eventTracking, before: Date().addingTimeInterval(0.01))
+            CATransaction.flush()
+            if let frame = view.mark.presentation()?.transform { middle = atan2(frame.m12, frame.m11) }
+        } while (middle <= 0.05 || middle >= .pi - 0.05) && Date() < deadline
+        try expect(middle > 0.05 && middle < .pi - 0.05, "chevron renders intermediate angles during native menu tracking")
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: other)
+        try expect(view.mark.transform.m11 < -0.999, "unrelated menu closing cannot reset the directory arrow")
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
+        let reversed = (view.mark.animation(forKey: "turn") as? CABasicAnimation)?.fromValue as? CGFloat
+        try expect(reversed.map { abs($0 - middle) < 0.2 } == true, "rapid menu close reverses from the displayed angle")
+        view.configure(menuTitle: "/test/Leafpeak", color: .white, animated: false)
+        try expect(view.mark.animation(forKey: "turn") == nil && abs(view.mark.transform.m12) < 0.001 && view.mark.transform.m11 > 0.999,
+                   "reduced motion settles an in-flight turn without leaving an animation")
+        try expect(view.hitTest(.zero) == nil, "decorative chevron cannot steal menu clicks")
+        view.removeFromSuperview()
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        try expect(view.mark.animation(forKey: "turn") == nil && view.mark.transform.m11 > 0.999, "detached arrows stop observing menus")
+        print("PASS menu chevron: tracking interpolation, reversal, reduced motion, menu isolation and observer cleanup")
+    }
+
     @MainActor static func inputFocusRaceTests() async throws {
         let suite = "arxiv-input-focus-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!

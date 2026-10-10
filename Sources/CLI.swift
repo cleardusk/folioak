@@ -112,9 +112,9 @@ struct CLIOptions {
     static func help(version: String, color: Bool = false) -> String {
         func accent(_ value: String) -> String { color ? "\u{1b}[36m\(value)\u{1b}[0m" : value }
         return """
-        \(accent("leafpick")) \(version)
-        用法  leafpick [LINK_OR_ID...] [选项]
-        示例  leafpick 1706.03762 -o ~/Downloads/Papers
+        \(accent("leafpeak")) \(version)
+        用法  leafpeak [LINK_OR_ID...] [选项]
+        示例  leafpeak 1706.03762 -o ~/Downloads/Papers
 
           \(accent("-o, --output DIR"))     保存目录，不存在时创建
           \(accent("-i, --input FILE"))     从文本文件读取，- 表示标准输入
