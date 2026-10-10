@@ -8,14 +8,16 @@ struct CLIOptions {
     var output: String?
     var naming: NamingStyle?
     var json = false
+    var verbose = false
+    var inputFiles: [String] = []
 
-    static func parse(_ arguments: [String]) throws -> Self {
+    static func parse(_ arguments: [String], pipedInput: Bool = false) throws -> Self {
         var options = Self()
         var inputs: [String] = []
         var index = 0
-        func value(_ option: String) throws -> String {
+        func value(_ option: String, allowDash: Bool = false) throws -> String {
             index += 1
-            guard index < arguments.count, !arguments[index].isEmpty, !arguments[index].hasPrefix("-") else {
+            guard index < arguments.count, !arguments[index].isEmpty, (!arguments[index].hasPrefix("-") || (allowDash && arguments[index] == "-")) else {
                 throw DownloadError.limit("\(option) 缺少参数。")
             }
             return arguments[index]
@@ -41,8 +43,15 @@ struct CLIOptions {
                 guard options.naming == nil else { throw DownloadError.limit("命名方式只能指定一次。") }
                 options.naming = try naming(value(argument))
             case "--json": options.json = true
+            case "--verbose": options.verbose = true
+            case "-i", "--input": options.inputFiles.append(try value(argument, allowDash: true))
+            case "-": options.inputFiles.append("-")
             default:
-                if argument.hasPrefix("--output=") {
+                if argument.hasPrefix("--input=") {
+                    let path = String(argument.dropFirst("--input=".count))
+                    guard !path.isEmpty else { throw DownloadError.limit("输入文件不能为空。") }
+                    options.inputFiles.append(path)
+                } else if argument.hasPrefix("--output=") {
                     guard options.output == nil, argument.count > "--output=".count else { throw DownloadError.limit("保存目录为空或重复。") }
                     options.output = String(argument.dropFirst("--output=".count))
                 } else if argument.hasPrefix("--naming=") {
@@ -55,24 +64,67 @@ struct CLIOptions {
         }
         guard inputs.reduce(0, { $0 + $1.utf8.count + 1 }) <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批下载。") }
         options.input = inputs.joined(separator: "\n")
-        _ = try BatchInput(options.input)
+        if inputs.isEmpty && options.inputFiles.isEmpty && pipedInput { options.inputFiles = ["-"] }
+        guard options.inputFiles.count <= ResourceLimits.batchCount, options.inputFiles.filter({ $0 == "-" }).count <= 1 else { throw DownloadError.limit("输入文件过多或重复读取标准输入。") }
+        if options.inputFiles.isEmpty { _ = try BatchInput(options.input) }
         return options
+    }
+
+    func resolvedInput() async throws -> String {
+        var pieces = input.isEmpty ? [] : [input]
+        var bytes = input.utf8.count
+        for path in inputFiles {
+            try Task.checkCancellation()
+            let data: Data
+            if path == "-" { data = try await Self.readStandardInput() }
+            else {
+                let file = try PaperStorage.boundedRegularFile(at: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+                defer { try? file.close() }
+                data = try file.read(upToCount: ResourceLimits.inputBytes + 1) ?? Data()
+            }
+            bytes += data.count + (pieces.isEmpty ? 0 : 1)
+            guard bytes <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批导入。") }
+            pieces.append(try PaperInput.decode(data))
+        }
+        return pieces.joined(separator: "\n")
+    }
+    static func readStandardInput(descriptor: Int32 = STDIN_FILENO) async throws -> Data {
+        guard isatty(descriptor) == 0 else { throw DownloadError.limit("请通过管道或重定向提供输入。") }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            try Task.checkCancellation()
+            var pollFD = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&pollFD, 1, 0)
+            if ready < 0 && errno == EINTR { continue }
+            guard ready >= 0, pollFD.revents & Int16(POLLNVAL) == 0 else { throw DownloadError.storage("无法读取标准输入。") }
+            if ready == 0 { try await Task.sleep(nanoseconds: 25_000_000); continue }
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count < 0 && errno == EINTR { continue }
+            guard count >= 0 else { throw DownloadError.storage("无法读取标准输入。") }
+            if count == 0 { return data }
+            guard data.count + count <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批导入。") }
+            data.append(contentsOf: buffer.prefix(count))
+        }
     }
 
     static func help(version: String, color: Bool = false) -> String {
         func accent(_ value: String) -> String { color ? "\u{1b}[36m\(value)\u{1b}[0m" : value }
         return """
         \(accent("arxiv-download")) \(version)
-        用法  arxiv-download LINK_OR_ID... [选项]
+        用法  arxiv-download [LINK_OR_ID...] [选项]
         示例  arxiv-download 1706.03762 -o ~/Downloads/Papers
 
           \(accent("-o, --output DIR"))     保存目录，不存在时创建
+          \(accent("-i, --input FILE"))     从文本文件读取，- 表示标准输入
+          \(accent("--verbose"))            显示阶段与耗时
           \(accent("--naming STYLE"))       date-title / id-title / title
           \(accent("--json"))               输出 JSON
           \(accent("-h, --help"))           显示帮助
           \(accent("--version"))            显示版本
 
         支持 arXiv、HF 论文页、GitHub PDF 和 HTTPS PDF，最多 200 条，自动去重。
+        无链接参数时自动读取管道；支持 Markdown 与混合文本。
         默认沿用 UI 的目录与命名；选项仅影响本次运行。
         重定向输出文件路径；NO_COLOR=1 关闭颜色。
         """ + "\n"
@@ -108,9 +160,12 @@ final class CLIConsole: @unchecked Sendable {
     private var lastRetry = 0
     private var activeLine = false
     private var finished = false
+    private let verbose: Bool
+    private var diagnostics = TaskDiagnostics()
 
     init(identifier: String, interactive: Bool, color: Bool, cursor: Bool,
-         columns: @escaping @Sendable () -> Int = { CLIConsole.terminalColumns() }, write: @escaping @Sendable (String) -> Void) {
+         columns: @escaping @Sendable () -> Int = { CLIConsole.terminalColumns() }, verbose: Bool = false, write: @escaping @Sendable (String) -> Void) {
+        self.verbose = verbose
         self.identifier = identifier; self.interactive = interactive
         self.color = color && interactive; self.cursor = cursor && interactive; self.columns = columns; self.write = write
     }
@@ -161,11 +216,13 @@ final class CLIConsole: @unchecked Sendable {
     func receive(_ event: DownloadEvent) {
         lock.lock(); defer { lock.unlock() }
         guard !finished else { return }
+        let previousPhase = diagnostics.phase
+        diagnostics.receive(event)
         let message: String
         switch event {
         case .coordinating: message = "等待其他下载任务"
-        case .metadata: message = "获取信息"
-        case .resolved(let paper): identifier = paper.reference.identifier; message = "准备下载"
+        case .metadata: lastRetry = 0; message = "获取信息"
+        case .resolved(let paper): lastRetry = 0; identifier = paper.reference.identifier; message = "准备下载"
         case .document: message = "保存完成"
         case .checkingLocal: message = "检查本地文件"
         case .validating: message = "保存中"
@@ -174,11 +231,16 @@ final class CLIConsole: @unchecked Sendable {
             guard attempt != lastRetry else { return }
             lastRetry = attempt; message = "重试 \(attempt)/3"
         case .progress(let progress):
+            lastRetry = 0
             let now = ProcessInfo.processInfo.systemUptime
             guard now - lastProgress >= 0.2 else { return }
             lastProgress = now
             if let fraction = progress.fraction { message = "下载 \(Int(fraction * 100))%" }
             else { message = String(format: "下载 %.1f MB", Double(progress.received) / 1_048_576) }
+        }
+        if verbose && (previousPhase != diagnostics.phase || { if case .retry = event { return true }; return false }()) {
+            if activeLine { write("\r\u{1b}[2K"); activeLine = false }
+            write(styled(CLIRunner.terminalText(identifier), 2) + "  " + message + "\n")
         }
         let label = CLIRunner.terminalText(identifier)
         let width = max(1, columns() - 1)
@@ -194,7 +256,7 @@ final class CLIConsole: @unchecked Sendable {
             if activeLine { write("\r\u{1b}[2K"); activeLine = false }
             switch event {
             case .coordinating, .waiting, .retry:
-                write((interactive ? Self.clipped(message, columns: width) : label + "  " + message) + "\n")
+                if !verbose { write((interactive ? Self.clipped(message, columns: width) : label + "  " + message) + "\n") }
             default: break
             }
         }
@@ -202,6 +264,13 @@ final class CLIConsole: @unchecked Sendable {
     func finish(_ result: CLIResult) {
         lock.lock(); defer { lock.unlock() }
         finished = true
+        diagnostics.finish()
+        if verbose {
+            if activeLine { write("\r\u{1b}[2K"); activeLine = false }
+            write("耗时 " + TaskDiagnostics.time(diagnostics.elapsed()) + " · 重试 \(diagnostics.retries) 次\n")
+            let phases = TaskDiagnostics.Phase.allCases.filter { diagnostics.duration($0) >= 0.05 }
+            if !phases.isEmpty { write("  " + phases.map { "\($0.label) \(TaskDiagnostics.time(diagnostics.duration($0)))" }.joined(separator: " · ") + "\n") }
+        }
         guard interactive else { return }
         let symbol: String; let status: String; let tint: Int; var detail: String?
         switch result.status {
@@ -238,7 +307,8 @@ enum CLIRunner {
             let defaults = DownloadPreferences(preferences)
             let directory = options.output.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL } ?? defaults.directory
             let naming = options.naming ?? defaults.naming
-            let batch = try BatchInput(options.input)
+            if options.verbose && options.inputFiles.contains("-") { stderr("读取标准输入\n") }
+            let batch = try BatchInput(try await options.resolvedInput())
             if batch.entries.contains(where: { $0.source != nil }) {
                 var isDirectory: ObjCBool = false
                 if !FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), options.output != nil {
@@ -254,7 +324,7 @@ enum CLIRunner {
             let human = interactive && !options.json
             for entry in batch.entries {
                 var result = CLIResult(input: entry.original, identifier: entry.reference?.identifier, status: "failed", error: entry.error)
-                let console = CLIConsole(identifier: entry.source?.label ?? "", interactive: human, color: color, cursor: cursor, write: stderr)
+                let console = CLIConsole(identifier: entry.source?.label ?? "", interactive: human, color: color, cursor: cursor, verbose: options.verbose, write: stderr)
                 defer { console.finish(result) }
                 guard let source = entry.source else { results.append(result); continue }
                 if Task.isCancelled { result.status = "cancelled"; results.append(result); continue }
@@ -289,6 +359,7 @@ enum CLIRunner {
             }
             if results.contains(where: { $0.status == "cancelled" }) { return 130 }
             return results.allSatisfy { $0.status == "saved" || $0.status == "existing" } ? 0 : 1
+        } catch is CancellationError { return 130
         } catch {
             stderr(terminalText(error.localizedDescription) + "\n")
             return 2
@@ -340,7 +411,7 @@ private final class TerminalOutput: @unchecked Sendable {
 @main struct ArxivCLI {
     static func main() async {
         do {
-            let options = try CLIOptions.parse(Array(CommandLine.arguments.dropFirst()))
+            let options = try CLIOptions.parse(Array(CommandLine.arguments.dropFirst()), pipedInput: isatty(STDIN_FILENO) == 0)
             let output = TerminalOutput()
             let environment = ProcessInfo.processInfo.environment
             if options.action == .help || options.action == .version {

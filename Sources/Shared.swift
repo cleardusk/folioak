@@ -20,6 +20,102 @@ struct DownloadPreferences {
     }
 }
 
+// Used at capture boundaries, so prose never becomes a queue of failed words.
+// Direct entry parsing still retains invalid tokens for correction.
+enum PaperInput {
+    private static let markdownLabels = try! NSRegularExpression(pattern: #"\[[^\]\r\n]*\]\((?=https?://)"#, options: .caseInsensitive)
+    private static let candidates = try! NSRegularExpression(
+        pattern: #"https?://[^\s<>\"“”]+|(?<![\w./])(?:\d{4}\.\d{4,5}|[A-Za-z][A-Za-z.-]*(?:\.[A-Za-z]{2})?/\d{7})(?:v\d+)?(?![\w.])"#,
+        options: .caseInsensitive)
+    static func captured(_ text: String) throws -> String {
+        guard text.utf8.count <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批导入。") }
+        let direct = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !direct.contains(where: { $0.isWhitespace }), (try? DownloadSource.parse(direct)) != nil { return direct }
+        // Strip link labels first: a URL used as its own Markdown label must
+        // not swallow the destination or create a duplicate paper.
+        let prepared = markdownLabels.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "(")
+        let raw = prepared as NSString
+        let matches = candidates.matches(in: prepared, range: NSRange(location: 0, length: raw.length))
+        guard matches.count <= ResourceLimits.batchCount else { throw DownloadError.limit("每批最多 200 条输入，请分批下载。") }
+        guard !matches.isEmpty else { return text.trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}")) }
+        return matches.map {
+            var token = raw.substring(with: $0.range)
+            // Remove a Markdown/prose wrapper, retaining balanced URL path parentheses.
+            if $0.range.location > 0, raw.substring(with: NSRange(location: $0.range.location - 1, length: 1)) == "(", token.last == ")" { token.removeLast() }
+            if !token.contains("?") { token = token.trimmingCharacters(in: CharacterSet(charactersIn: "，。；;,.!！")) }
+            return token
+        }.joined(separator: "\n")
+    }
+    static func decode(_ data: Data) throws -> String {
+        guard data.count <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批导入。") }
+        guard let text = String(data: data, encoding: .utf8) else { throw DownloadError.limit("请选择 UTF-8 编码的文本文件。") }
+        return try captured(text)
+    }
+}
+
+struct TaskDiagnostics: Codable {
+    enum Phase: String, Codable, CaseIterable {
+        case coordination, metadata, local, transfer, waiting, validation
+        var label: String {
+            switch self {
+            case .coordination: return "任务协调"
+            case .metadata: return "获取信息"
+            case .local: return "检查本地"
+            case .transfer: return "传输文件"
+            case .waiting: return "等待与退避"
+            case .validation: return "校验与保存"
+            }
+        }
+    }
+    let startedAt: Date
+    private(set) var finishedAt: Date?
+    private(set) var phase: Phase?
+    private(set) var enteredAt: Date
+    private(set) var recordedAt: Date
+    private(set) var seconds: [String: Double] = [:]
+    private(set) var retries = 0
+    private var lastRetry: Int?
+    init(now: Date = Date()) { startedAt = now; enteredAt = now; recordedAt = now }
+    mutating func receive(_ event: DownloadEvent, now: Date = Date()) {
+        guard finishedAt == nil else { return }
+        recordedAt = now
+        let next: Phase
+        switch event {
+        case .coordinating: next = .coordination
+        case .metadata: next = .metadata; lastRetry = nil
+        case .resolved: next = .transfer; lastRetry = nil
+        case .checkingLocal: next = .local
+        case .progress: next = .transfer; lastRetry = nil
+        case .waiting: next = .waiting
+        case .retry(let attempt):
+            if lastRetry != attempt { retries += 1; lastRetry = attempt }
+            next = .waiting
+        case .validating: next = .validation
+        case .document: return
+        }
+        guard next != phase else { return }
+        accrue(now); phase = next
+    }
+    private mutating func accrue(_ now: Date) {
+        if let phase { seconds[phase.rawValue, default: 0] += max(0, now.timeIntervalSince(enteredAt)) }
+        enteredAt = now
+    }
+    mutating func finish(now: Date = Date()) {
+        guard finishedAt == nil else { return }
+        accrue(now); recordedAt = now; finishedAt = now; phase = nil
+    }
+    func duration(_ phase: Phase, now: Date = Date()) -> Double {
+        seconds[phase.rawValue, default: 0] + (self.phase == phase ? max(0, now.timeIntervalSince(enteredAt)) : 0)
+    }
+    func elapsed(now: Date = Date()) -> Double { max(0, (finishedAt ?? now).timeIntervalSince(startedAt)) }
+    var valid: Bool {
+        seconds.count <= Phase.allCases.count && seconds.allSatisfy { Phase(rawValue: $0.key) != nil && $0.value.isFinite && $0.value >= 0 } &&
+        (0...100).contains(retries) && startedAt.timeIntervalSince1970.isFinite && enteredAt.timeIntervalSince1970.isFinite && recordedAt.timeIntervalSince1970.isFinite &&
+        (finishedAt?.timeIntervalSince1970.isFinite ?? true)
+    }
+    static func time(_ seconds: Double) -> String { seconds < 0.1 ? "<0.1 秒" : seconds < 60 ? String(format: "%.1f 秒", seconds) : String(format: "%.0f 分 %.0f 秒", floor(seconds / 60), seconds.truncatingRemainder(dividingBy: 60)) }
+}
+
 struct BatchInput {
     struct Entry {
         let original: String

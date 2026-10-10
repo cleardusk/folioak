@@ -24,6 +24,17 @@ arxiv-download https://arxiv.org/html/2605.18678
 ./arxiv-download 1706.03762v1 2609.22978v1 --naming id-title --json
 ```
 
+文件与管道输入：
+
+```sh
+arxiv-download -i papers.md -o ~/Downloads/Papers
+cat papers.txt | arxiv-download --json
+arxiv-download 1706.03762 -i extra.txt -i - < more.txt
+arxiv-download -i papers.md --verbose
+```
+
+`-i` 可指定多个 UTF-8 文件，`-i -` 或独立的 `-` 表示标准输入；无链接和文件参数且 stdin 非终端时自动读取。文件／管道中的 Markdown、段落自动提取链接和编号，纯链接输入保持原样；合计最多 64 KiB，最多 200 条（去重前）。读取结束后才开始下载，等待管道时仍可 Ctrl+C 取消。`--verbose` 在 stderr 显示阶段、耗时和重试次数，不改变 stdout 路径或 JSON。
+
 默认使用 UI 中的保存目录与命名方式。`-o` 和 `--naming` 仅影响本次执行，不修改设置；显式 `-o` 的目录不存在时会创建。arXiv 命名可选 `date-title`、`id-title`、`title`；通用 PDF 使用文档标题或原文件名。自动化脚本建议显式指定目录和命名方式。
 
 支持 arXiv 摘要、PDF、HTML 链接或编号、Hugging Face 论文页、GitHub PDF 预览页，以及通用 HTTPS PDF 直链，可混合输入。HF 论文页自动转为 arXiv 下载；公开 GitHub 仓库的 PDF 预览页自动转为原始文件链接，与对应 raw 链接去重。最多 200 条/批，自动去重。终端中进度原位更新，每篇只保留简短结果，状态使用颜色；设置 `NO_COLOR=1` 可关闭颜色。重定向 stdout 时输出成功文件的绝对路径；`--json` 始终输出无颜色的 schema 1 批次对象。进度与错误写入 stderr。Ctrl+C 取消并清理临时文件，完成的 PDF 保留。

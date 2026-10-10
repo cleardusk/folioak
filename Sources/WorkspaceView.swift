@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import QuickLook
+import UniformTypeIdentifiers
 
 typealias WorkspaceViewState<Value> = SwiftUI.State<Value>
 
@@ -67,6 +69,9 @@ struct DownloaderView: View {
     @WorkspaceViewState private var filter: QueueFilter = .all
     @WorkspaceViewState private var logLevel: ActivityLevel? = nil
     @WorkspaceViewState private var followLogs = true
+    @WorkspaceViewState private var dropTargeted = false
+    @WorkspaceViewState private var selectedID: UUID?
+    @WorkspaceViewState private var listFocus = UUID()
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
@@ -102,8 +107,17 @@ struct DownloaderView: View {
         .tint(accent)
         .background(ThemePalette.color(palette.canvas))
         .ignoresSafeArea(.container, edges: .top)
+        .onReceive(model.$listRequest.dropFirst()) { _ in
+            if page == .logs { page = .library }
+            if selectedID == nil { selectedID = visibleItems.first?.id }
+            inputFocused = false; listFocus = UUID()
+        }
         .onReceive(model.$editRequest.dropFirst()) { _ in page = .downloads; inputFocused = true }
-        .onChange(of: page) { _ in query = "" }
+        .onChange(of: page) { _ in query = ""; selectedID = nil }
+        .onChange(of: visibleItems.map(\.id)) { ids in if let selectedID, !ids.contains(selectedID) { self.selectedID = nil } }
+        .quickLookPreview($model.previewURL)
+        .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item) }
+        .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
         .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all }
     }
 
@@ -220,7 +234,8 @@ struct DownloaderView: View {
         }
         .background(ThemePalette.color(palette.surface))
         .clipShape(RoundedRectangle(cornerRadius: 24))
-        .overlay(RoundedRectangle(cornerRadius: 24).stroke(inputFocused && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke((inputFocused || dropTargeted) && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
+        .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
     }
 
     private var searchField: some View {
@@ -263,13 +278,32 @@ struct DownloaderView: View {
             if rows.isEmpty {
                 empty(icon: query.isEmpty && filter == .all ? "tray" : "magnifyingglass", text: emptyMessage)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(rows) { item in
-                            DownloadRow(item: item, model: model, inLibrary: page == .library)
+                ScrollViewReader { scroll in
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(rows) { item in
+                                DownloadRow(item: item, model: model, inLibrary: page == .library, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                    .contentShape(RoundedRectangle(cornerRadius: 20))
+                                    .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
+                                    .id(item.id)
+                            }
+                        }.padding(1)
+                    }
+                    .background(PaperListKeyboard(request: listFocus) { action in
+                        guard !rows.isEmpty else { return }
+                        if action == .up || action == .down {
+                            let index = selectedID.flatMap { id in rows.firstIndex { $0.id == id } }
+                            let next = index.map { min(rows.count - 1, max(0, $0 + (action == .down ? 1 : -1))) } ?? 0
+                            selectedID = rows[next].id
+                            scroll.scrollTo(rows[next].id)
+                        } else if let item = rows.first(where: { $0.id == selectedID }) {
+                            if action == .preview { model.preview(item) }
+                            else if action == .open { model.openFile(item) }
+                            else if action == .diagnostics { model.diagnosticItem = item }
                         }
-                    }.padding(.bottom, 2)
+                    })
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
+
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -382,10 +416,12 @@ struct DownloadRow: View {
     let inLibrary: Bool
     let busy: Bool
     let theme: AppTheme
+    let selected: Bool
+    let select: () -> Void
 
-    init(item: DownloadItem, model: DownloadModel, inLibrary: Bool = false) {
+    init(item: DownloadItem, model: DownloadModel, inLibrary: Bool = false, selected: Bool = false, select: @escaping () -> Void = {}) {
         self.item = item; self.model = model; self.inLibrary = inLibrary
-        busy = model.busy; theme = model.theme
+        busy = model.busy; theme = model.theme; self.selected = selected; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
     private var palette: ThemePalette { theme.palette(dark: scheme == .dark) }
@@ -399,7 +435,7 @@ struct DownloadRow: View {
                 .accessibilityLabel(item.state.label)
             VStack(alignment: .leading, spacing: 9) {
                 Text(item.title).font(.system(size: 14, weight: .medium)).lineSpacing(3)
-                    .lineLimit(2).textSelection(.enabled).help(item.title)
+                    .lineLimit(2).help(item.title)
                 HStack(spacing: 10) {
                     if let metadata = item.metadata { Text(metadata.reference.identifier).font(.system(size: 11, design: .monospaced)) }
                     else if let host = item.directURL?.host, item.documentTitle != nil { Text(host).lineLimit(1) }
@@ -431,31 +467,35 @@ struct DownloadRow: View {
                 } else if item.source == nil {
                     Button("修改") { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
                 }
-                if item.source != nil || item.savedURL != nil {
-                Menu {
-                    if item.savedURL != nil {
-                        Button("在 Finder 中显示") { model.openFile(item, reveal: true) }
-                        Button("文件信息…") { model.fileInfo(item) }
-                        Divider()
-                    }
-                    if let source = item.source {
-                        Button("打开来源页面") { model.openSource(item) }
-                        Button("复制来源链接") {
-                            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.webURL.absoluteString, forType: .string)
-                        }
-                    }
-                    if let url = item.savedURL {
-                        Button("复制文件名") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
-                    }
-                } label: { Image(systemName: "ellipsis").frame(width: 20, height: 32) }
+                Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 20, height: 32) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22)
                     .accessibilityLabel("\(item.title)的更多操作")
-                }
             }.padding(.top, 5)
         }.padding(20).background(ThemePalette.color(palette.surface))
             .clipShape(RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(selected ? ThemePalette.color(palette.accent).opacity(0.65) : ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))
+            .contextMenu { actions }
+            .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder private var actions: some View {
+        if item.savedURL != nil {
+            Button("快速预览") { select(); model.preview(item) }.help("选中论文后按空格")
+            Button("在 Finder 中显示") { model.openFile(item, reveal: true) }
+            Button("文件信息…") { model.fileInfo(item) }
+            Divider()
+        }
+        Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中论文后按 ⌘I")
+        if let source = item.source {
+            Button("打开来源页面") { model.openSource(item) }
+            Button("复制来源链接") {
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.webURL.absoluteString, forType: .string)
+            }
+        }
+        if let url = item.savedURL {
+            Button("复制文件名") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
+        }
     }
 
     private func progressText(_ progress: DownloadProgress) -> String {

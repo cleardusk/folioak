@@ -88,6 +88,7 @@ struct DownloadItem: Identifiable, Codable {
     var finishedAt: Date?
     var bytesPerSecond: Double?
     var transferSample: TransferSample?
+    var diagnostics: TaskDiagnostics?
     var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.map(DownloadSource.pdf) }
     var title: String { metadata?.title ?? documentTitle ?? source?.label ?? original }
     var canRetry: Bool { source != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
@@ -127,6 +128,9 @@ final class DownloadModel: ObservableObject {
     @Published var directoryNotice: String?
     @Published var duplicateCount = 0
     @Published var editRequest = UUID()
+    @Published var listRequest = UUID()
+    @Published var previewURL: URL?
+    @Published var diagnosticItem: DownloadItem?
     private(set) var editTarget = ""
     private let engine: DownloadEngine
     private let preferences: UserDefaults
@@ -155,8 +159,10 @@ final class DownloadModel: ObservableObject {
 
     var library: [DownloadItem] { history.sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) } }
 
-    func appendInput(_ text: String) {
+    func appendInput(_ capturedText: String) {
         guard !busy else { return }
+        let text: String
+        do { text = try PaperInput.captured(capturedText) } catch { notice = error.localizedDescription; return }
         let joined = input.isEmpty ? text : input + (input.hasSuffix("\n") ? "" : "\n") + text
         guard joined.utf8.count <= ResourceLimits.inputBytes else { notice = "输入超过 64 KB，请分批导入。"; return }
         input = joined
@@ -286,6 +292,9 @@ final class DownloadModel: ObservableObject {
             var interrupted = 0
             for i in items.indices {
                 if !items[i].state.terminal {
+                    let lastEvent = items[i].diagnostics?.recordedAt ?? items[i].createdAt
+                    items[i].diagnostics?.finish(now: lastEvent)
+                    items[i].finishedAt = lastEvent
                     items[i].state = .cancelled
                     items[i].error = "上次下载中断，可重试。"
                     interrupted += 1
@@ -327,9 +336,34 @@ final class DownloadModel: ObservableObject {
 
     func paste() {
         guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
-        guard input.utf8.count + text.utf8.count + 1 <= ResourceLimits.inputBytes else { notice = "输入超过 64 KB，请分批粘贴。"; return }
-        if !input.isEmpty && !input.hasSuffix("\n") { input += "\n" }
-        input += text
+        appendInput(text)
+    }
+
+    func acceptDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard !busy, !providers.isEmpty, providers.count <= ResourceLimits.batchCount else { return false }
+        Task { [weak self] in
+            var texts: [String] = []
+            var bytes = 0
+            for provider in providers {
+                let type = provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) ? UTType.url.identifier : UTType.plainText.identifier
+                let text: String? = await withCheckedContinuation { continuation in
+                    provider.loadItem(forTypeIdentifier: type, options: nil) { item, _ in
+                        let text: String?
+                        if let url = item as? URL { text = url.isFileURL ? nil : url.absoluteString }
+                        else if let value = item as? String { text = value }
+                        else if let data = item as? Data, data.count <= ResourceLimits.inputBytes { text = String(data: data, encoding: .utf8) }
+                        else { text = nil }
+                        continuation.resume(returning: text)
+                    }
+                }
+                guard let text else { self?.notice = "请拖入论文链接或文本。"; return }
+                bytes += text.utf8.count + 1
+                guard bytes <= ResourceLimits.inputBytes else { self?.notice = "输入超过 64 KB，请分批导入。"; return }
+                texts.append(text)
+            }
+            self?.appendInput(texts.joined(separator: "\n"))
+        }
+        return true
     }
 
     func chooseDirectory() {
@@ -370,7 +404,7 @@ final class DownloadModel: ObservableObject {
         let ids = items.filter { $0.canRetry && (single == nil || $0.id == single) }.map(\.id)
         guard !ids.isEmpty else { return }
         record(.info, "重试 \(ids.count) 项")
-        for id in ids { update(id) { $0.state = .queued; $0.error = nil; $0.progress = nil; $0.finishedAt = nil; $0.bytesPerSecond = nil; $0.transferSample = nil } }
+        for id in ids { update(id) { $0.state = .queued; $0.error = nil; $0.progress = nil; $0.finishedAt = nil; $0.diagnostics = nil; $0.bytesPerSecond = nil; $0.transferSample = nil } }
         execute(ids)
     }
 
@@ -387,6 +421,8 @@ final class DownloadModel: ObservableObject {
         await task?.value
     }
 
+    func focusInput() { editTarget = ""; editRequest = UUID() }
+
     func edit(_ item: DownloadItem) {
         if !DownloadSource.tokens(in: input).contains(item.original) { appendInput(item.original) }
         editTarget = item.original
@@ -402,8 +438,8 @@ final class DownloadModel: ObservableObject {
         else { directoryNotice = nil }
     }
 
-    func openFile(_ item: DownloadItem, reveal: Bool = false) {
-        guard let url = item.savedURL else { return }
+    private func localFile(_ item: DownloadItem) -> URL? {
+        guard let url = item.savedURL else { return nil }
         guard FileManager.default.fileExists(atPath: url.path) else {
             update(item.id) {
                 $0.state = .missing; $0.savedURL = nil
@@ -417,8 +453,17 @@ final class DownloadModel: ObservableObject {
             record(.warning, "本地文件不存在", item: item)
             archiveResults()
             persistWorkspace()
-            return
+            return nil
         }
+        return url
+    }
+
+    func preview(_ item: DownloadItem) {
+        previewURL = localFile(item)
+    }
+
+    func openFile(_ item: DownloadItem, reveal: Bool = false) {
+        guard let url = localFile(item) else { return }
         if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         else if !opener(url) { notice = "无法打开 PDF，请检查默认 PDF 阅读器。文件仍保存在原位置。" }
         else { notice = nil }
@@ -448,6 +493,7 @@ final class DownloadModel: ObservableObject {
         guard run == runID else { return }
         guard let before = items.first(where: { $0.id == id }), !before.state.terminal else { return }
         update(id) { item in
+            item.diagnostics?.receive(event)
             switch event {
             case .coordinating: item.state = .coordinating
             case .metadata: item.state = .metadata
@@ -508,8 +554,8 @@ final class DownloadModel: ObservableObject {
                     persistWorkspace()
                     continue
                 }
-                update(id) { $0.state = .metadata }
-                record(.info, "获取论文信息", item: item)
+                update(id) { $0.state = source.reference == nil ? .checkingLocal : .metadata; $0.diagnostics = TaskDiagnostics() }
+                record(.info, source.reference == nil ? "准备下载" : "获取论文信息", item: item)
                 var continuation: AsyncStream<DownloadEvent>.Continuation!
                 let events = AsyncStream<DownloadEvent>(bufferingPolicy: .bufferingNewest(128)) { continuation = $0 }
                 let sink = continuation!
@@ -527,7 +573,7 @@ final class DownloadModel: ObservableObject {
                         $0.pages = saved.pages
                         $0.state = saved.alreadyExisted ? .existing : .saved
                         $0.progress = nil
-                        $0.finishedAt = Date()
+                        $0.finishedAt = Date(); $0.diagnostics?.finish()
                     }
                     if let result = items.first(where: { $0.id == id }) { record(.success, result.state.label, item: result) }
                     input = DownloadSource.tokens(in: input)
@@ -537,7 +583,7 @@ final class DownloadModel: ObservableObject {
                     sink.finish()
                     await listener.value
                     record(.warning, "已取消", item: item)
-                    update(id) { $0.state = .cancelled; $0.progress = nil }
+                    update(id) { $0.state = .cancelled; $0.progress = nil; $0.finishedAt = Date(); $0.diagnostics?.finish() }
                     break
                 } catch {
                     sink.finish()
@@ -547,6 +593,7 @@ final class DownloadModel: ObservableObject {
                         cooldown = Date().addingTimeInterval(seconds)
                     } else { cooldown = nil }
                     update(id) {
+                        $0.finishedAt = Date(); $0.diagnostics?.finish()
                         $0.state = cooldown == nil ? .failed : .paused
                         $0.progress = nil
                         if let cooldown {
@@ -566,7 +613,7 @@ final class DownloadModel: ObservableObject {
                 persistWorkspace()
             }
             for id in ids {
-                update(id) { if !$0.state.terminal { $0.state = .cancelled; $0.progress = nil } }
+                update(id) { if !$0.state.terminal { $0.state = .cancelled; $0.progress = nil; $0.finishedAt = Date(); $0.diagnostics?.finish() } }
             }
             busy = false
             cancelling = false
@@ -594,10 +641,37 @@ final class LinkTextView: NSTextView {
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
+        registerForDraggedTypes([.string, .URL])
         placeholderStorage.addLayoutManager(placeholderLayout)
         placeholderLayout.addTextContainer(placeholderContainer)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+    override func paste(_ sender: Any?) {
+        guard isEditable, let text = NSPasteboard.general.string(forType: .string) else { return }
+        insertCaptured(text)
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard isEditable, sender.draggingPasteboard.availableType(from: [.string, .URL]) != nil else { return [] }
+        if let value = sender.draggingPasteboard.string(forType: .URL), URL(string: value)?.isFileURL == true { return [] }
+        return .copy
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { draggingEntered(sender) }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { draggingEntered(sender) == .copy }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard draggingEntered(sender) == .copy, let text = sender.draggingPasteboard.string(forType: .URL) ?? sender.draggingPasteboard.string(forType: .string) else { return false }
+        do {
+            let captured = try PaperInput.captured(text)
+            let prefix = string.isEmpty || string.hasSuffix("\n") ? "" : "\n"
+            insertText(prefix + captured, replacementRange: NSRange(location: (string as NSString).length, length: 0))
+            return true
+        } catch { captureFailure?(error.localizedDescription); return false }
+    }
+    @discardableResult private func insertCaptured(_ text: String) -> Bool {
+        do { insertText(try PaperInput.captured(text), replacementRange: selectedRange()); return true }
+        catch { captureFailure?(error.localizedDescription); return false }
+    }
+    var captureFailure: ((String) -> Void)?
 
     func styleReferences(textColor: NSColor, accentColor: NSColor, underlineRecognized: Bool) {
         guard styledInput != string || styledTextColor != textColor || styledAccentColor != accentColor || styledUnderline != underlineRecognized,
@@ -709,6 +783,7 @@ struct LinkInput: NSViewRepresentable {
         editor.isAutomaticLinkDetectionEnabled = false
         editor.setAccessibilityLabel("论文链接，每行一个")
         editor.delegate = context.coordinator
+        editor.captureFailure = { [weak model] in model?.notice = $0 }
         editor.focusChanged = { [weak coordinator = context.coordinator] value in
             DispatchQueue.main.async { coordinator?.parent.focused = value }
         }
@@ -966,6 +1041,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
+    @objc private func focusInput() {
+        guard window.attachedSheet == nil, !model.busy else { return }
+        window.makeKeyAndOrderFront(nil)
+        model.focusInput()
+    }
+    @objc private func focusList() {
+        guard window.attachedSheet == nil else { return }
+        window.makeKeyAndOrderFront(nil); model.listRequest = UUID()
+    }
+
     @objc private func showSettings() {
         if settingsWindow == nil {
             let view = NSHostingView(rootView: SettingsView(model: model))
@@ -1006,6 +1091,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ("粘贴", #selector(NSText.paste(_:)), "v"), ("全选", #selector(NSText.selectAll(_:)), "a")
         ])
         edit.item(withTitle: "重做")?.keyEquivalentModifierMask = [.command, .shift]
+        let navigation = add("前往", [("添加论文", #selector(focusInput), "l"), ("论文列表", #selector(focusList), "j")])
+        navigation.items.forEach { $0.target = self }
         NSApp.windowsMenu = add("窗口", [("最小化", #selector(NSWindow.performMiniaturize(_:)), "m")])
         NSApp.mainMenu = menu
     }

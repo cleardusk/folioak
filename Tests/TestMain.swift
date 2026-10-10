@@ -109,6 +109,7 @@ struct CoreTests {
             try storageTests(root: root, pdf: pdf)
             try filenameStorageTests(root: root, pdf: pdf)
             try await cliTests(root: root, pdf: pdf)
+            try await featureTests(root: root, pdf: pdf)
             try await coordinatorTests(root: root, pdf: pdf)
             try await processTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)

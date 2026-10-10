@@ -12,6 +12,6 @@ xcrun swiftc -parse-as-library -swift-version 5 -framework PDFKit \
   Sources/Core.swift Sources/PDF.swift Sources/Shared.swift Tests/CoordinationProbe.swift -o build/CoordinationProbe
 xcrun swiftc -parse-as-library -swift-version 5 -D TESTING \
   -framework AppKit -framework SwiftUI -framework PDFKit \
-  Sources/Core.swift Sources/PDF.swift Sources/Shared.swift Sources/CLI.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspaceView.swift Sources/SidebarMotion.swift Sources/App.swift Tests/TestMain.swift Tests/TransportTests.swift Tests/SharedTests.swift Tests/PDFTests.swift Tests/WorkspaceTests.swift Tests/InteractionRenderingTests.swift \
+  Sources/Core.swift Sources/PDF.swift Sources/Shared.swift Sources/CLI.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/SidebarMotion.swift Sources/App.swift Tests/TestMain.swift Tests/TransportTests.swift Tests/SharedTests.swift Tests/FeatureTests.swift Tests/PDFTests.swift Tests/WorkspaceTests.swift Tests/InteractionRenderingTests.swift \
   -o build/CoreTests
 ./build/CoreTests "$@"

@@ -95,6 +95,7 @@ enum WorkspaceStore {
         let references = [item.reference, item.restoreReference, item.metadata?.reference].compactMap { $0 }
         guard references.allSatisfy({ (try? ArxivReference.parse($0.identifier)) == $0 }),
               item.original.utf8.count <= ResourceLimits.inputBytes,
+              item.diagnostics?.valid ?? true,
               item.metadata.map({ $0.title.count <= ResourceLimits.titleCharacters && (1...12).contains($0.month) && (1900...2199).contains($0.year) }) ?? true,
               item.documentTitle.map({ $0.count <= ResourceLimits.titleCharacters }) ?? true,
               item.savedURL.map({ $0.isFileURL && $0.pathExtension.lowercased() == "pdf" }) ?? true,

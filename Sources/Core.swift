@@ -757,6 +757,7 @@ actor DownloadEngine {
         let local: URL = try await retried(event: event) {
             event(.resolved(metadata))
             let request = URLRequest(url: metadata.reference.pdfURL)
+            event(.progress(DownloadProgress(received: 0, total: -1)))
             let (file, response) = try await self.transport.download(for: request) { event(.progress($0)) }
             do {
                 try self.check(response)
@@ -806,6 +807,7 @@ actor DownloadEngine {
                 request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match")
                 if cached.etag == nil { request.setValue(cached.modified, forHTTPHeaderField: "If-Modified-Since") }
             }
+            event(.progress(DownloadProgress(received: 0, total: -1)))
             let (file, response) = try await transport.download(for: request) { event(.progress($0)) }
             defer { try? FileManager.default.removeItem(at: file) }
             if response.statusCode == 304 {
