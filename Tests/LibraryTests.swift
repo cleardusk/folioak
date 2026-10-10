@@ -70,12 +70,13 @@ extension CoreTests {
         try expect(protected.papers.isEmpty && !protected.importingPDFs && protected.notice != nil, "read-only library rejects changes that cannot be saved")
 
         let shortcuts = ShortcutSettings(preferences)
+        try expect(!shortcuts.isCustomized, "default shortcuts have no reset operation")
         try expect(shortcuts.set(AppShortcut(key: "w"), for: .input) != nil, "window close shortcut is reserved")
         try expect(shortcuts.set(AppShortcut(key: "j"), for: .input) != nil, "duplicate app shortcuts rejected")
         let custom = AppShortcut(key: "l", modifiers: NSEvent.ModifierFlags([.command, .shift]).rawValue)
-        try expect(shortcuts.set(custom, for: .input) == nil && ShortcutSettings(preferences)[.input] == custom, "custom shortcuts persist")
+        try expect(shortcuts.set(custom, for: .input) == nil && shortcuts.isCustomized && ShortcutSettings(preferences)[.input] == custom, "custom shortcuts persist")
         shortcuts.reset()
-        try expect(ShortcutSettings(preferences)[.input].key == "l", "restore default shortcuts")
+        try expect(!shortcuts.isCustomized && !ShortcutSettings(preferences).isCustomized && ShortcutSettings(preferences)[.input].key == "l", "restore default shortcuts")
 
         for (input, expected) in [
             ("https://openreview.net/forum?id=abc_123&noteId=ignored", "https://openreview.net/pdf?id=abc_123"),

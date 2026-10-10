@@ -66,9 +66,7 @@ enum LibraryStore {
     struct Snapshot: Codable { var schema = 1; var papers: [LibraryPaper] }
     static func read(_ url: URL) throws -> [LibraryPaper]? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let handle = try PaperStorage.boundedRegularFile(at: url); defer { try? handle.close() }
-        let data = try handle.read(upToCount: byteLimit + 1) ?? Data()
-        guard data.count <= byteLimit else { throw DownloadError.limit("资料库超过 32 MB。") }
+        let data = try PaperStorage.read(url, limit: byteLimit, tooLarge: "资料库超过 32 MB。")
         let snapshot = try JSONDecoder().decode(Snapshot.self, from: data)
         guard snapshot.schema == 1, snapshot.papers.count <= countLimit,
               Set(snapshot.papers.map(\.id)).count == snapshot.papers.count,
@@ -285,8 +283,10 @@ struct LibraryRow: View {
                 if paper.removed { Button("恢复") { model.changePaper(paper.id) { $0.removed = false } }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else if paper.missing { Button("关联") { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else { Button("打开") { model.openPaper(paper) }.buttonStyle(QuietButtonStyle(palette: palette)) }
-                Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 20, height: 32) }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22).accessibilityLabel("\(paper.title)的更多操作")
+                if !paper.removed {
+                    Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 20, height: 32) }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22).accessibilityLabel("\(paper.title)的更多操作")
+                }
             }.padding(.top, 5)
         }.padding(20).background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(selected ? ThemePalette.color(palette.accent).opacity(0.65) : ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))

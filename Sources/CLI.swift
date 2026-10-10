@@ -78,9 +78,8 @@ struct CLIOptions {
             let data: Data
             if path == "-" { data = try await Self.readStandardInput() }
             else {
-                let file = try PaperStorage.boundedRegularFile(at: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
-                defer { try? file.close() }
-                data = try file.read(upToCount: ResourceLimits.inputBytes + 1) ?? Data()
+                data = try PaperStorage.read(URL(fileURLWithPath: (path as NSString).expandingTildeInPath),
+                                             limit: ResourceLimits.inputBytes, tooLarge: "输入超过 64 KB，请分批导入。")
             }
             bytes += data.count + (pieces.isEmpty ? 0 : 1)
             guard bytes <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批导入。") }

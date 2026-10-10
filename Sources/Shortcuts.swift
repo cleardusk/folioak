@@ -35,9 +35,11 @@ struct AppShortcut: Codable, Equatable {
 @MainActor final class ShortcutSettings: ObservableObject {
     @Published private(set) var bindings: [String: AppShortcut]
     private let preferences: UserDefaults
+    private static let defaults = Dictionary(uniqueKeysWithValues: ShortcutAction.allCases.map { ($0.rawValue, AppShortcut(key: $0.defaultKey)) })
+    var isCustomized: Bool { bindings != Self.defaults }
     init(_ preferences: UserDefaults) {
         self.preferences = preferences
-        let defaults = Dictionary(uniqueKeysWithValues: ShortcutAction.allCases.map { ($0.rawValue, AppShortcut(key: $0.defaultKey)) })
+        let defaults = Self.defaults
         if let data = preferences.data(forKey: "shortcuts"), let saved = try? JSONDecoder().decode([String: AppShortcut].self, from: data),
            saved.count == defaults.count, ShortcutAction.allCases.allSatisfy({ saved[$0.rawValue]?.valid == true && saved[$0.rawValue]?.reserved == false }),
            Set(saved.values.map { "\($0.modifiers):\($0.key)" }).count == defaults.count { bindings = saved }
@@ -53,7 +55,7 @@ struct AppShortcut: Codable, Equatable {
         return nil
     }
     func reset() {
-        bindings = Dictionary(uniqueKeysWithValues: ShortcutAction.allCases.map { ($0.rawValue, AppShortcut(key: $0.defaultKey)) })
+        bindings = Self.defaults
         preferences.removeObject(forKey: "shortcuts")
     }
 }
@@ -138,10 +140,15 @@ struct ShortcutSettingsView: View {
             HStack(spacing: 12) {
                 Text(error ?? "").foregroundStyle(UIColors.error).font(.system(size: 11))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button("恢复默认") {
-                    NSApp.keyWindow?.makeFirstResponder(nil)
-                    shortcuts.reset(); error = nil
-                }.controlSize(.small)
+                Group {
+                    if shortcuts.isCustomized {
+                        Button("恢复默认") {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            shortcuts.reset(); error = nil
+                        }.buttonStyle(.borderless).font(.system(size: 11))
+                            .help("恢复四项可修改的快捷键")
+                    }
+                }.frame(width: 126)
             }.frame(height: 28)
         }.font(.system(size: 12))
     }

@@ -85,9 +85,8 @@ struct DownloaderView: View {
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var visibleItems: [DownloadItem] {
         if page == .library { return libraryPapers.map(\.downloadItem) }
-        let source = model.items
-        return source.filter { item in
-            (page == .library || filter.includes(item)) &&
+        return model.items.filter { item in
+            filter.includes(item) &&
             (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) || item.original.localizedCaseInsensitiveContains(query))
         }
     }
@@ -233,13 +232,9 @@ struct DownloaderView: View {
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("资料库操作")
             } else if page == .logs && !model.logs.isEmpty {
                 searchField
-                Button {
-                    if page == .logs { model.exportLogs(visibleLogs) } else { model.exportLibrary() }
-                } label: { Image(systemName: "square.and.arrow.up") }
+                Button { model.exportLogs(visibleLogs) } label: { Image(systemName: "square.and.arrow.up") }
                     .buttonStyle(RoundButtonStyle(palette: palette))
-                    .disabled(page == .logs ? visibleLogs.isEmpty : model.history.isEmpty)
-                    .help(page == .logs ? "导出当前筛选的日志" : "导出资料库索引")
-                    .accessibilityLabel(page == .logs ? "导出日志" : "导出资料库")
+                    .disabled(visibleLogs.isEmpty).help("导出当前筛选的日志").accessibilityLabel("导出日志")
             } else if page == .downloads {
                 Button(action: model.openDirectory) { Image(systemName: "folder") }
                     .buttonStyle(RoundButtonStyle(palette: palette)).help("打开保存目录").accessibilityLabel("打开保存目录")
@@ -312,10 +307,8 @@ struct DownloaderView: View {
                         Button("重试未完成") { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
                     }
                     if model.items.contains(where: { $0.canRetry || $0.source == nil }) {
-                        Menu {
-                            Button("复制未完成链接", action: model.copyUnfinished)
-                        } label: { Image(systemName: "ellipsis").frame(width: 22, height: 30) }
-                            .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("任务操作")
+                        Button(action: model.copyUnfinished) { Image(systemName: "doc.on.doc").frame(width: 28, height: 30).contentShape(Rectangle()) }
+                            .buttonStyle(.plain).foregroundStyle(secondary).help("复制未完成链接").accessibilityLabel("复制未完成链接")
                     }
                 } else {
                     if libraryFilter == .removed {
@@ -347,7 +340,7 @@ struct DownloaderView: View {
                                     LibraryRow(paper: paper, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                         .id(item.id)
                                 } else {
-                                DownloadRow(item: item, model: model, inLibrary: page == .library, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                DownloadRow(item: item, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                     .contentShape(RoundedRectangle(cornerRadius: 20))
                                     .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
                                     .id(item.id)
@@ -400,7 +393,7 @@ struct DownloaderView: View {
 
     private var logContent: some View {
         let entries = visibleLogs
-        let headers = Dictionary(uniqueKeysWithValues: LogGroup.grouped(entries).map { ($0.id, $0) })
+        let headers = LogHeading.headings(entries)
         return VStack(spacing: 16) {
             if !model.logs.isEmpty {
             HStack(spacing: 4) {
@@ -418,10 +411,10 @@ struct DownloaderView: View {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(entries) { entry in
                                 VStack(alignment: .leading, spacing: 0) {
-                                    if let group = headers[entry.id], group.subject != nil || group.showsDate {
+                                    if let group = headers[entry.id], group.subject != nil || group.date != nil {
                                         VStack(alignment: .leading, spacing: 8) {
-                                            if group.showsDate {
-                                                Text(group.date.formatted(date: .abbreviated, time: .omitted))
+                                            if let date = group.date {
+                                                Text(date.formatted(date: .abbreviated, time: .omitted))
                                                     .font(.system(size: 11)).foregroundStyle(secondary)
                                             }
                                             if let subject = group.subject {
@@ -482,25 +475,24 @@ struct DownloaderView: View {
     }
 }
 
-struct LogGroup: Identifiable {
-    var entries: [ActivityEntry]
-    let showsDate: Bool
-    var id: UUID { entries[0].id }
-    var date: Date { entries[0].date }
-    var subject: String? { entries.last(where: { $0.subject?.isEmpty == false })?.subject }
+struct LogHeading {
+    let date: Date?
+    var subject: String?
 
-    // Group only adjacent events for a known task, after filtering; never reorder the timeline.
-    static func grouped(_ entries: [ActivityEntry], calendar: Calendar = .current) -> [LogGroup] {
-        var groups: [LogGroup] = []
+    // Keep rows flat and store only headings, not a second copy of every event.
+    static func headings(_ entries: [ActivityEntry], calendar: Calendar = .current) -> [UUID: LogHeading] {
+        var result: [UUID: LogHeading] = [:]
+        var previous: ActivityEntry?, groupID: UUID?
         for entry in entries {
-            let sameDay = groups.last.map { calendar.isDate($0.date, inSameDayAs: entry.date) } ?? false
-            if sameDay, let itemID = entry.itemID, groups.last?.entries.first?.itemID == itemID {
-                groups[groups.count - 1].entries.append(entry)
-            } else {
-                groups.append(LogGroup(entries: [entry], showsDate: !sameDay))
+            let sameDay = previous.map { calendar.isDate($0.date, inSameDayAs: entry.date) } ?? false
+            if !sameDay || entry.itemID == nil || entry.itemID != previous?.itemID {
+                groupID = entry.id
+                result[entry.id] = LogHeading(date: sameDay ? nil : entry.date)
             }
+            if let groupID, let subject = entry.subject, !subject.isEmpty { result[groupID]?.subject = subject }
+            previous = entry
         }
-        return groups
+        return result
     }
 }
 
@@ -508,6 +500,7 @@ struct LogRow: View {
     static let messageInset: CGFloat = 64 + 12 + 16 + 12
     let entry: ActivityEntry
     let palette: ThemePalette
+    var horizontalInset: CGFloat = 20
     private var color: Color {
         switch entry.level { case .error: return UIColors.error; case .success: return UIColors.success; case .warning: return ThemePalette.color(palette.accent); default: return ThemePalette.color(palette.secondary) }
     }
@@ -522,7 +515,7 @@ struct LogRow: View {
             Text(entry.message).font(.system(size: 12)).foregroundStyle(entry.level == .error ? color : ThemePalette.color(palette.text))
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading).textSelection(.enabled)
-        }.padding(.vertical, 8).padding(.horizontal, 20)
+        }.padding(.vertical, 8).padding(.horizontal, horizontalInset)
             .contentShape(Rectangle()).help(entry.subject ?? entry.message)
             .accessibilityElement(children: .ignore).accessibilityLabel(entry.line)
             .contextMenu {
@@ -534,14 +527,13 @@ struct LogRow: View {
 struct DownloadRow: View {
     let item: DownloadItem
     let model: DownloadModel
-    let inLibrary: Bool
     let busy: Bool
     let theme: AppTheme
     let selected: Bool
     let select: () -> Void
 
-    init(item: DownloadItem, model: DownloadModel, inLibrary: Bool = false, selected: Bool = false, select: @escaping () -> Void = {}) {
-        self.item = item; self.model = model; self.inLibrary = inLibrary
+    init(item: DownloadItem, model: DownloadModel, selected: Bool = false, select: @escaping () -> Void = {}) {
+        self.item = item; self.model = model
         busy = model.busy; theme = model.theme; self.selected = selected; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
@@ -565,7 +557,6 @@ struct DownloadRow: View {
                         Text(item.state.label)
                     }.foregroundStyle(item.state.color(palette)).lineLimit(1)
                     if let pages = item.pages { Text("\(pages) 页") }
-                    if inLibrary, let date = item.finishedAt { Text(date.formatted(date: .abbreviated, time: .omitted)) }
                 }.font(.system(size: 11)).foregroundStyle(secondary)
                 if let progress = item.progress, item.state == .downloading {
                     VStack(alignment: .leading, spacing: 6) {
@@ -583,7 +574,7 @@ struct DownloadRow: View {
                 if let url = item.savedURL {
                     Button("打开") { model.openFile(item) }.buttonStyle(QuietButtonStyle(palette: palette)).help(url.path)
                 } else if item.canRetry {
-                    Button("重试") { if inLibrary { model.retryFromLibrary(item) } else { model.retry(item.id) } }
+                    Button("重试") { model.retry(item.id) }
                         .buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
                 } else if item.source == nil {
                     Button("修改") { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
@@ -604,7 +595,6 @@ struct DownloadRow: View {
         if item.savedURL != nil {
             Button("快速预览") { select(); model.preview(item) }.help("选中论文后按空格")
             Button("在 Finder 中显示") { model.openFile(item, reveal: true) }
-            Button("文件信息…") { model.fileInfo(item) }
             Divider()
         }
         Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中论文后按 \(model.shortcuts[.details].label)")

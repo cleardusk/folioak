@@ -65,10 +65,7 @@ enum WorkspaceStore {
     }
     static func read(_ url: URL) throws -> WorkspaceSnapshot? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let file = try PaperStorage.boundedRegularFile(at: url)
-        defer { try? file.close() }
-        let data = try file.read(upToCount: byteLimit + 1) ?? Data()
-        guard data.count <= byteLimit else { throw DownloadError.limit("历史记录过大") }
+        let data = try PaperStorage.read(url, limit: byteLimit, tooLarge: "历史记录过大")
         var snapshot = try JSONDecoder().decode(WorkspaceSnapshot.self, from: data)
         guard snapshot.schema == 1, snapshot.input.utf8.count <= ResourceLimits.inputBytes,
               snapshot.items.count <= ResourceLimits.batchCount, snapshot.history.count <= historyLimit,

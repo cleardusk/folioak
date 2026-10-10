@@ -411,6 +411,13 @@ struct SavedPaper: Sendable {
 }
 
 enum PaperStorage {
+    static func read(_ url: URL, limit: Int, tooLarge: String) throws -> Data {
+        let file = try boundedRegularFile(at: url)
+        defer { try? file.close() }
+        let data = try file.read(upToCount: limit + 1) ?? Data()
+        guard data.count <= limit else { throw DownloadError.limit(tooLarge) }
+        return data
+    }
     private static let sourceAttribute = "local.paperrepo.arxiv-downloader.source"
     private struct SourceRecord: Codable {
         let schema: Int
@@ -745,17 +752,7 @@ actor DownloadEngine {
     func download(_ reference: ArxivReference, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedPaper {
         defer { lease = nil }
         try await acquire(event: event)
-        event(.metadata)
-        var components = URLComponents(string: "https://export.arxiv.org/api/query")!
-        components.queryItems = [URLQueryItem(name: "id_list", value: reference.identifier), URLQueryItem(name: "max_results", value: "1")]
-        var request = URLRequest(url: components.url!)
-        request.setValue("application/atom+xml", forHTTPHeaderField: "Accept")
-        let metadata: PaperMetadata = try await retried(event: event) {
-            event(.metadata)
-            let (data, response) = try await self.transport.data(for: request)
-            try self.check(response)
-            return try AtomParser.metadata(data, requested: reference)
-        }
+        let metadata = try await fetchMetadata(reference, event: event)
         event(.resolved(metadata))
         event(.checkingLocal)
         if let existing = try PaperStorage.existing(metadata: metadata, directory: directory, naming: naming) { return existing }
@@ -787,12 +784,19 @@ actor DownloadEngine {
     private func lookupReference(_ reference: ArxivReference) async throws -> ArxivReference {
         defer { lease = nil }
         try await acquire(event: { _ in })
+        return try await fetchMetadata(reference, event: { _ in }).reference
+    }
+    private func fetchMetadata(_ reference: ArxivReference, event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> PaperMetadata {
+        event(.metadata)
         var components = URLComponents(string: "https://export.arxiv.org/api/query")!
         components.queryItems = [URLQueryItem(name: "id_list", value: reference.identifier), URLQueryItem(name: "max_results", value: "1")]
-        return try await retried(event: { _ in }) {
-            let (data, response) = try await self.transport.data(for: URLRequest(url: components.url!))
+        var request = URLRequest(url: components.url!)
+        request.setValue("application/atom+xml", forHTTPHeaderField: "Accept")
+        return try await retried(event: event) {
+            event(.metadata)
+            let (data, response) = try await self.transport.data(for: request)
             try self.check(response)
-            return try AtomParser.metadata(data, requested: reference).reference
+            return try AtomParser.metadata(data, requested: reference)
         }
     }
 

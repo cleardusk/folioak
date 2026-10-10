@@ -205,10 +205,7 @@ final class DownloadModel: ObservableObject {
         present(panel) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
             do {
-                let handle = try PaperStorage.boundedRegularFile(at: url)
-                defer { try? handle.close() }
-                let data = try handle.read(upToCount: ResourceLimits.inputBytes + 1) ?? Data()
-                guard data.count <= ResourceLimits.inputBytes else { throw DownloadError.limit("文件超过 64 KB，请分批导入。") }
+                let data = try PaperStorage.read(url, limit: ResourceLimits.inputBytes, tooLarge: "文件超过 64 KB，请分批导入。")
                 guard let text = String(data: data, encoding: .utf8) else { throw DownloadError.limit("请选择 UTF-8 编码的文本文件。") }
                 self.appendInput(text.replacingOccurrences(of: "\u{FEFF}", with: ""))
             } catch { self.notice = error.localizedDescription }
@@ -508,15 +505,6 @@ final class DownloadModel: ObservableObject {
         }
     }
 
-    func fileInfo(_ item: DownloadItem) {
-        guard let url = item.savedURL else { return }
-        let alert = NSAlert()
-        alert.messageText = "文件信息"
-        alert.informativeText = "\(url.lastPathComponent)\n\n\(url.deletingLastPathComponent().path)\n\n\(item.pages.map { "\($0) 页 · " } ?? "")\(item.metadata?.reference.identifier ?? item.source?.label ?? "")"
-        alert.addButton(withTitle: "完成")
-        if let window = NSApp.keyWindow { alert.beginSheetModal(for: window) }
-    }
-
     private func update(_ id: UUID, _ transform: (inout DownloadItem) -> Void) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         transform(&items[index])
@@ -691,7 +679,8 @@ final class LinkTextView: NSTextView {
 
     override func paste(_ sender: Any?) {
         guard isEditable, let text = NSPasteboard.general.string(forType: .string) else { return }
-        insertCaptured(text)
+        do { insertText(try PaperInput.captured(text), replacementRange: selectedRange()) }
+        catch { captureFailure?(error.localizedDescription) }
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard isEditable, sender.draggingPasteboard.availableType(from: [.string, .URL]) != nil else { return [] }
@@ -708,10 +697,6 @@ final class LinkTextView: NSTextView {
             insertText(prefix + captured, replacementRange: NSRange(location: (string as NSString).length, length: 0))
             return true
         } catch { captureFailure?(error.localizedDescription); return false }
-    }
-    @discardableResult private func insertCaptured(_ text: String) -> Bool {
-        do { insertText(try PaperInput.captured(text), replacementRange: selectedRange()); return true }
-        catch { captureFailure?(error.localizedDescription); return false }
     }
     var captureFailure: ((String) -> Void)?
 

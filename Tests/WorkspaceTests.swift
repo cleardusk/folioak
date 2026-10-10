@@ -13,16 +13,15 @@ extension CoreTests {
         let entries = [entry(0, first, "1706.03762"), entry(1, first, "同名论文", .success),
                        entry(3, first, "同名论文"), entry(4, second, "同名论文"), entry(5, first, "同名论文"),
                        entry(6, nil, "旧记录"), entry(7, nil, "旧记录"), entry(8, nil, nil)]
-        let groups = LogGroup.grouped(entries, calendar: calendar)
-        try expect(groups.map { $0.entries.count } == [2, 1, 1, 1, 1, 1, 1], "logs preserve task identity, interleaving, midnight boundaries and unidentified events")
-        try expect(groups[0].subject == "同名论文", "a group's resolved title replaces its initial identifier")
-        try expect(groups.map(\.showsDate) == [true, true, false, false, false, false, false], "each visible day has one date heading")
-        try expect(groups.flatMap(\.entries).map(\.id) == entries.map(\.id), "grouping never reorders or drops log entries")
-        let filtered = LogGroup.grouped(entries.filter { $0.level == .success }, calendar: calendar)
-        try expect(filtered.first?.subject == "同名论文" && filtered.first?.showsDate == true, "filtered results supply their own title and date context")
+        let headings = LogHeading.headings(entries, calendar: calendar)
+        try expect(Set(headings.keys) == Set([0, 2, 3, 4, 5, 6, 7].map { entries[$0].id }), "logs preserve task identity, interleaving, midnight boundaries and unidentified events")
+        try expect(headings[entries[0].id]?.subject == "同名论文", "a group's resolved title replaces its initial identifier")
+        try expect(Set(headings.filter { $0.value.date != nil }.keys) == Set([entries[0].id, entries[2].id]), "each visible day has one date heading")
+        let filtered = LogHeading.headings(entries.filter { $0.level == .success }, calendar: calendar)
+        try expect(filtered[entries[1].id]?.subject == "同名论文" && filtered[entries[1].id]?.date != nil, "filtered results supply their own title and date context")
         let many = (0..<1501).map { entry(Double($0), first, "论文") }
-        let trimmed = LogGroup.grouped(Array(many.suffix(1500)), calendar: calendar)
-        try expect(trimmed.first?.subject == "论文" && trimmed.first?.showsDate == true && trimmed.flatMap(\.entries).count == 1500, "trimmed logs retain the new first entry's context")
+        let trimmed = LogHeading.headings(Array(many.suffix(1500)), calendar: calendar)
+        try expect(trimmed[many[1].id]?.subject == "论文" && trimmed[many[1].id]?.date != nil && trimmed.count == 2, "trimmed logs retain date boundaries without copying every entry")
         print("PASS log grouping: identity, resolved titles, interleaving, dates, filtering and retention")
     }
 

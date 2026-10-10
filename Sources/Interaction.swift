@@ -76,6 +76,12 @@ struct TaskDiagnosticView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(current.title).font(.system(size: 14, weight: .medium)).lineLimit(3)
                         Text(current.state.label).font(.system(size: 12)).foregroundStyle(current.state.color(palette))
+                        if let file = current.savedURL {
+                            Text(file.path).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                            Text([current.pages.map { "\($0) 页" }, current.metadata?.reference.identifier ?? current.source?.label].compactMap { $0 }.joined(separator: " · "))
+                                .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).textSelection(.enabled)
+                        }
                     }
                     if let trace = current.diagnostics, trace.finishedAt != nil {
                         timings(trace, now: trace.finishedAt!)
@@ -88,15 +94,9 @@ struct TaskDiagnosticView: View {
                         Text(ActivityEntry.redacted(error)).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
                     }
                     Divider()
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 0) {
                         if entries.isEmpty { Text("暂无记录").foregroundStyle(ThemePalette.color(palette.secondary)) }
-                        ForEach(entries.suffix(80)) { entry in
-                            HStack(alignment: .top, spacing: 14) {
-                                Text(entry.date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits)))
-                                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(ThemePalette.color(palette.secondary))
-                                Text(entry.message).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
+                        ForEach(entries.suffix(80)) { LogRow(entry: $0, palette: palette, horizontalInset: 0) }
                     }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
