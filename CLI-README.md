@@ -1,57 +1,44 @@
-# arxiv-download
+# leafpick
 
-Apple Silicon / macOS 13+ 命令行论文下载工具，无需启动 UI。
+拾取的命令行下载器，支持 Apple Silicon / macOS 13+，无需启动界面。
 
-DMG / 应用 ZIP 已内置 CLI。将应用放入 Applications 后，终端可直接运行：
+## 使用
 
-```sh
-"/Applications/arXiv下载器.app/Contents/MacOS/arxiv-download" --help
-```
-
-如需短命令，在当前终端设置别名；长期使用可将这一行加入 `~/.zshrc`：
+应用内置 CLI：
 
 ```sh
-alias arxiv-download='"/Applications/arXiv下载器.app/Contents/MacOS/arxiv-download"'
-arxiv-download https://arxiv.org/html/2605.18678
+"/Applications/Leafpick.app/Contents/MacOS/leafpick" --help
+alias leafpick='"/Applications/Leafpick.app/Contents/MacOS/leafpick"'
+leafpick 1706.03762 -o ~/Downloads/Papers
+leafpick 'https://www.youtube.com/watch?v=jNQXAC9IVRw' -o ~/Downloads
+leafpick --audio 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
 ```
 
-仅使用 CLI 也可下载独立 CLI ZIP，解压后在其目录运行：
+独立 CLI ZIP 解压后运行 `./leafpick`，旁边的 `media-tools` 文件夹必须保留。应用内的旧命令 `arxiv-download` 是兼容别名。
+
+支持论文链接／arXiv 编号，YouTube、Bilibili、X 单个公开视频，以及 HTTPS 图片、音频、视频直链。论文来源包括 Hugging Face、GitHub PDF、OpenReview、ACL Anthology、CVF 和普通 PDF 直链。不支持播放列表、账号主页、X 纯图片帖子或需登录的内容。
+
+`--audio` 对视频站点链接提取 M4A；直链按原格式保存。视频默认自动选择画质，合并可用音视频流。媒体文件经校验后保存；最多 16 GiB，PDF 最多 256 MiB。取消会停止下载器及其转换子进程，媒体下载片段保留供重试，已完成文件保留。
+
+## 输入与输出
 
 ```sh
-./arxiv-download https://arxiv.org/html/2605.18678 -o ~/Downloads/Papers
-./arxiv-download https://huggingface.co/papers/2608.15763
-./arxiv-download https://github.com/openai/math/blob/main/overview.pdf
-./arxiv-download https://aclanthology.org/2023.emnlp-main.1/
-./arxiv-download 1706.03762v1 2609.22978v1 --naming id-title --json
+leafpick -i links.md -o ~/Downloads
+cat links.txt | leafpick --json
+leafpick 1706.03762 -i extra.txt -i - < more.txt
+leafpick -i links.md --verbose
 ```
 
-文件与管道输入：
+`-i` 可指定多个 UTF-8 文件，`-i -` 或独立 `-` 表示标准输入。无链接和文件参数且 stdin 非终端时自动读取。支持从 Markdown／段落提取链接，合计最多 64 KiB、200 条（去重前）。读取管道时可 Ctrl+C 取消。
 
-```sh
-arxiv-download -i papers.md -o ~/Downloads/Papers
-cat papers.txt | arxiv-download --json
-arxiv-download 1706.03762 -i extra.txt -i - < more.txt
-arxiv-download -i papers.md --verbose
-```
+默认沿用 UI 的保存目录与论文命名。`-o` 和 `--naming` 仅影响本次执行；显式 `-o` 的目录不存在时会创建。arXiv 命名可选 `date-title`、`id-title`、`title`，其他文件按标题或原名保存。同名按内容复用或添加序号，不覆盖已有文件。
 
-`-i` 可指定多个 UTF-8 文件，`-i -` 或独立的 `-` 表示标准输入；无链接和文件参数且 stdin 非终端时自动读取。文件／管道中的 Markdown、段落自动提取链接和编号，纯链接输入保持原样；合计最多 64 KiB，最多 200 条（去重前）。读取结束后才开始下载，等待管道时仍可 Ctrl+C 取消。`--verbose` 在 stderr 显示阶段、耗时和重试次数，不改变 stdout 路径或 JSON。
+最多同时处理三个输入来源，同一来源串行。arXiv 继续共享 UI 的请求间隔、冷却和下载锁。媒体工具随包提供，不读取用户 yt-dlp 配置或浏览器 cookies。
 
-默认使用 UI 中的保存目录与命名方式。`-o` 和 `--naming` 仅影响本次执行，不修改设置；显式 `-o` 的目录不存在时会创建。arXiv 命名可选 `date-title`、`id-title`、`title`；通用 PDF 使用文档标题或原文件名。自动化脚本建议显式指定目录和命名方式。
+终端显示简短进度和结果，`NO_COLOR=1` 关闭颜色。重定向 stdout 时逐行输出所有成功文件的绝对路径；`--json` 输出 schema 1 批次对象，结果按输入顺序排列。进度和错误写入 stderr，`--verbose` 额外显示阶段与耗时。
 
-支持 arXiv 摘要、PDF、HTML 链接或编号、Hugging Face 论文页、GitHub PDF 预览页，以及通用 HTTPS PDF 直链，可混合输入。HF 论文页自动转为 arXiv 下载；公开 GitHub 仓库的 PDF 预览页自动转为原始文件链接，与对应 raw 链接去重。最多 200 条/批，自动去重。终端中进度原位更新，每篇只保留简短结果，状态使用颜色；设置 `NO_COLOR=1` 可关闭颜色。重定向 stdout 时输出成功文件的绝对路径；`--json` 始终输出无颜色的 schema 1 批次对象。进度与错误写入 stderr。Ctrl+C 取消并清理临时文件，完成的 PDF 保留。
+JSON 状态：saved、existing、failed、paused、cancelled；暂停项可能包含 ISO 8601 的 retryAfter。PDF 结果包含 pages；一条链接产生多个文件时，path 为第一个文件，其余位于可选 additionalPaths 数组。
 
-颜色只强调操作状态：进行中为青色、成功为绿色、等待为黄色、失败为红色；错误原因另起一行使用普通文字。进度按当前终端列宽裁切，保留完整中文字符和组合 emoji；极窄窗口或 `TERM=dumb` 使用静态输出，避免换行后残留旧进度。帮助页精简为用法、示例、对齐的选项与默认行为。
+退出码：0 全部成功；1 有失败或待重试项；2 参数或目录错误；130 SIGINT 取消；143 SIGTERM 取消。
 
-```sh
-arxiv-download https://mirros.ai/report/agent-garten.pdf
-```
-
-通用 PDF 用 ETag / Last-Modified 条件请求检查更新，304 时复用内容未变的本地文件。没有可靠更新标记或发生重定向时重新下载校验；登录网页和 HTML 页面不能作为 PDF 保存。限流只暂停同一输入站点，其余站点可继续下载。
-
-2.2 支持将公开 OpenReview 讨论页、ACL Anthology 论文页和 CVF 论文页转换为 PDF 地址。不同输入来源最多三个并行，同一来源串行；arXiv 的共享请求间隔与限流策略保持不变。混合来源下载使用简短逐项结果，避免进度覆盖；`--json` 的结果保持输入顺序，普通 stdout 路径按完成顺序输出。
-
-退出码：0 全部成功；1 有失败或待重试项；2 参数或目录错误；130 SIGINT 取消；143 SIGTERM 取消。JSON 的结果状态为 saved、existing、failed、paused、cancelled；暂停项可能包含 retryAfter（ISO 8601）。
-
-同一用户的新版 UI 与 CLI 共享请求间隔、冷却及下载锁；等待其他任务时可以取消。macOS 仍可能要求单独授权终端访问文件夹。内置 CLI 随应用一起升级；独立 CLI 请与 UI 同步更新。
-
-当前为 ad-hoc 签名和 Hardened Runtime，未 Apple 公证。macOS 可能拦截首次运行；请确认下载来源，再按系统「隐私与安全性」提示处理。
+当前为 ad-hoc 签名，未 Apple 公证。首次运行可能需要按系统「隐私与安全性」提示允许。独立 CLI 请与 UI 同步更新。

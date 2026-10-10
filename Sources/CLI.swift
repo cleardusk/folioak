@@ -9,6 +9,7 @@ struct CLIOptions {
     var naming: NamingStyle?
     var json = false
     var verbose = false
+    var mediaFormat: MediaFormat = .automatic
     var inputFiles: [String] = []
 
     static func parse(_ arguments: [String], pipedInput: Bool = false) throws -> Self {
@@ -44,6 +45,7 @@ struct CLIOptions {
                 options.naming = try naming(value(argument))
             case "--json": options.json = true
             case "--verbose": options.verbose = true
+            case "--audio": options.mediaFormat = .audio
             case "-i", "--input": options.inputFiles.append(try value(argument, allowDash: true))
             case "-": options.inputFiles.append("-")
             default:
@@ -110,19 +112,20 @@ struct CLIOptions {
     static func help(version: String, color: Bool = false) -> String {
         func accent(_ value: String) -> String { color ? "\u{1b}[36m\(value)\u{1b}[0m" : value }
         return """
-        \(accent("arxiv-download")) \(version)
-        用法  arxiv-download [LINK_OR_ID...] [选项]
-        示例  arxiv-download 1706.03762 -o ~/Downloads/Papers
+        \(accent("leafpick")) \(version)
+        用法  leafpick [LINK_OR_ID...] [选项]
+        示例  leafpick 1706.03762 -o ~/Downloads/Papers
 
           \(accent("-o, --output DIR"))     保存目录，不存在时创建
           \(accent("-i, --input FILE"))     从文本文件读取，- 表示标准输入
           \(accent("--verbose"))            显示阶段与耗时
+          \(accent("--audio"))              视频链接仅保存音频（M4A）
           \(accent("--naming STYLE"))       date-title / id-title / title
           \(accent("--json"))               输出 JSON
           \(accent("-h, --help"))           显示帮助
           \(accent("--version"))            显示版本
 
-        支持 arXiv、HF、GitHub PDF、OpenReview、ACL、CVF 与 HTTPS PDF。
+        支持论文、YouTube / Bilibili / X 视频，以及 HTTPS 图片、音频、视频直链。
         最多 200 条，自动去重；最多同时下载三个来源，同一来源串行。
         无链接参数时自动读取管道；支持 Markdown 与混合文本。
         默认沿用 UI 的目录与命名；选项仅影响本次运行。
@@ -139,6 +142,7 @@ struct CLIResult: Encodable, Sendable {
     var pages: Int?
     var error: String?
     var retryAfter: Date?
+    var additionalPaths: [String]?
 }
 struct CLIReport: Encodable {
     let schema = 1
@@ -333,14 +337,17 @@ enum CLIRunner {
                     if Task.isCancelled { result.status = "cancelled"; results.append((index, result)); continue }
                     if let pause = pauses[source.rateLimitKey] { result.status = "paused"; result.retryAfter = pause; results.append((index, result)); continue }
                     do {
-                        let paper = try await engine.download(source, to: directory, naming: naming) { event in
+                        let paper = try await engine.download(source, to: directory, naming: naming, mediaFormat: options.mediaFormat) { event in
                             console.receive(event)
                         }
                         result.identifier = paper.metadata?.reference.identifier
                         result.status = paper.alreadyExisted ? "existing" : "saved"
                         result.path = paper.url.path
-                        result.pages = paper.pages
-                        if !options.json && !human { stdout(terminalText(paper.url.path) + "\n") }
+                        result.pages = paper.pages > 0 ? paper.pages : nil
+                        result.additionalPaths = paper.additionalURLs.isEmpty ? nil : paper.additionalURLs.map(\.path)
+                        if !options.json && !human {
+                            stdout(([paper.url] + paper.additionalURLs).map { terminalText($0.path) }.joined(separator: "\n") + "\n")
+                        }
                     } catch is CancellationError { result.status = "cancelled" }
                     catch DownloadError.cooldown(let seconds) {
                         let pause = Date().addingTimeInterval(seconds)

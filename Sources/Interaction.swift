@@ -25,7 +25,7 @@ struct PaperListKeyboard: NSViewRepresentable {
         init(request: UUID?, didFocus: @escaping (UUID) -> Void, action: @escaping (Action) -> Void) {
             self.request = request; self.didFocus = didFocus; self.action = action
             super.init(frame: .zero)
-            setAccessibilityLabel("论文列表，方向键选择，空格预览，Return 打开，Command I 查看详情")
+            setAccessibilityLabel("文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情")
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
         override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); focusIfRequested() }
@@ -108,7 +108,7 @@ struct TaskDiagnosticView: View {
                 Spacer()
                 if current.canRetry && !model.busy {
                     Button("重试") {
-                        if model.items.contains(where: { $0.id == item.id }) { model.retry(item.id) }
+                        if model.items.contains(where: { $0.id == item.id }) || model.history.contains(where: { $0.id == item.id }) { model.retry(item.id) }
                         else { model.retryFromLibrary(current); dismiss() }
                     }.buttonStyle(QuietButtonStyle(palette: palette))
                 }

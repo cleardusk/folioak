@@ -26,7 +26,7 @@ enum DownloadError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidLink: return "无法识别：请输入 arXiv / HF 论文链接、编号或 HTTPS PDF 直链。"
+        case .invalidLink: return "无法识别：请输入论文、YouTube / Bilibili / X 视频链接，或 HTTPS 文件直链。"
         case .metadata(let message), .limit(let message), .coordination(let message): return message
         case .http(let code, _):
             if code == 403 { return "下载站点拒绝访问（403），可能需要登录或浏览器验证。" }
@@ -316,7 +316,7 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
             downloadTask.cancel(); return
         }
         if totalBytesWritten > limit || totalBytesExpectedToWrite > limit {
-            reject(.limit("PDF 超过 256 MB，已停止下载。")); downloadTask.cancel(); return
+            reject(.limit("文件超过 \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))，已停止下载。")); downloadTask.cancel(); return
         }
         let now = ContinuousClock().now
         lock.lock()
@@ -331,19 +331,20 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
 final class URLSessionTransport: HTTPTransport {
     private let session: URLSession
     private let policy: NetworkPolicy
+    private let fileLimit: Int64
     private let resolver: @Sendable (String) async throws -> [String]
     #if TESTING
     init(testConfiguration: URLSessionConfiguration, policy: NetworkPolicy = .arxiv,
          resolver: @escaping @Sendable (String) async throws -> [String] = { _ in ["93.184.216.34"] }) {
-        self.policy = policy; self.resolver = resolver
+        self.policy = policy; self.resolver = resolver; fileLimit = ResourceLimits.pdfBytes
         session = URLSession(configuration: testConfiguration)
     }
     #endif
-    init(policy: NetworkPolicy = .arxiv) {
-        self.policy = policy; resolver = { try await DNSValidation.resolve($0) }
+    init(policy: NetworkPolicy = .arxiv, fileLimit: Int64 = ResourceLimits.pdfBytes) {
+        self.policy = policy; self.fileLimit = fileLimit; resolver = { try await DNSValidation.resolve($0) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 300
+        configuration.timeoutIntervalForResource = fileLimit > ResourceLimits.pdfBytes ? 14_400 : 300
         configuration.httpMaximumConnectionsPerHost = 1
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpAdditionalHeaders = ["User-Agent": "ArxivPaperDownloader/1.0 (macOS personal-use client)"]
@@ -392,7 +393,7 @@ final class URLSessionTransport: HTTPTransport {
                             progress: @escaping @Sendable (DownloadProgress) -> Void = { _ in },
                             operation: (ProgressObserver) async throws -> T) async throws -> T {
         try await policy.validate(request.url, resolver: resolver)
-        let observer = ProgressObserver(policy: policy, allowNotModified: conditional, resolver: resolver, progress)
+        let observer = ProgressObserver(limit: fileLimit, policy: policy, allowNotModified: conditional, resolver: resolver, progress)
         defer { observer.stop() }
         do { return try await operation(observer) }
         catch {
@@ -800,12 +801,14 @@ actor DownloadEngine {
         }
     }
 
-    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
+    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, mediaFormat: MediaFormat = .automatic, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
         switch source {
         case .arxiv(let reference):
             let paper = try await download(reference, to: directory, naming: naming, event: event)
             return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
-        case .pdf(let url):
+        case .media(let url):
+            return try await MediaDownloader.download(url, to: directory, format: mediaFormat, event: event)
+        case .pdf(let url), .file(let url):
             guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
             var shared: RequestCoordinator?
             if let coordinator {
@@ -814,10 +817,31 @@ actor DownloadEngine {
                 Darwin.close(parent)
                 shared = RequestCoordinator(directory: coordinator.directory.appendingPathComponent("pdf-" + PDFStorage.key(url.host!.lowercased())))
             }
-            if pdfTransport == nil { pdfTransport = URLSessionTransport(policy: .externalPDF) }
-            let client = DownloadEngine(transport: pdfTransport!, requestInterval: coordinator == nil ? min(1, requestInterval) : 1,
+            let native = pdfTransport ?? URLSessionTransport(policy: .externalPDF, fileLimit: source.isPaper ? ResourceLimits.pdfBytes : FileStorage.byteLimit)
+            let client = DownloadEngine(transport: native, requestInterval: coordinator == nil ? min(1, requestInterval) : 1,
                 retryDelay: retryDelay, rateLimitDelay: rateLimitDelay, coordinator: shared)
-            return try await client.downloadPDF(url, to: directory, event: event)
+            if source.isPaper { return try await client.downloadPDF(url, to: directory, event: event) }
+            return try await client.downloadFile(url, to: directory, event: event)
+        }
+    }
+
+    private func downloadFile(_ url: URL, to directory: URL, event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
+        defer { lease = nil }
+        try await acquire(event: event)
+        return try await retried(event: event) {
+            event(.progress(DownloadProgress(received: 0, total: -1)))
+            let (file, response) = try await transport.download(for: URLRequest(url: url)) { event(.progress($0)) }
+            defer { try? FileManager.default.removeItem(at: file) }
+            try check(response)
+            guard response.statusCode == 200 else { throw DownloadError.http(response.statusCode, retryAfter: nil) }
+            event(.validating)
+            let ext = url.pathExtension.lowercased()
+            try await FileStorage.validate(file, extension: ext)
+            let filename = (response.suggestedFilename ?? url.lastPathComponent) as NSString
+            let title = PaperMetadata.cleanTitle((filename.lastPathComponent as NSString).deletingPathExtension)
+            let saved = try FileStorage.save(file, title: title, extension: ext, to: directory)
+            event(.document(saved.title))
+            return saved
         }
     }
 

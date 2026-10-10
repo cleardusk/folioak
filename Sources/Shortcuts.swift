@@ -4,7 +4,7 @@ private typealias ShortcutViewState<Value> = SwiftUI.State<Value>
 
 enum ShortcutAction: String, CaseIterable, Codable {
     case input, list, download, details
-    var title: String { switch self { case .input: return "添加论文"; case .list: return "论文列表"; case .download: return "开始下载"; case .details: return "任务详情" } }
+    var title: String { switch self { case .input: return "添加链接"; case .list: return "文件列表"; case .download: return "开始下载"; case .details: return "任务详情" } }
     var defaultKey: String { switch self { case .input: return "l"; case .list: return "j"; case .download: return "\r"; case .details: return "i" } }
 }
 struct AppShortcut: Codable, Equatable {
@@ -131,9 +131,9 @@ struct ShortcutSettingsView: View {
                     }
                 }
                 Divider().padding(.vertical, 8)
-                fixedRow("选择论文", key: "↑  ↓")
+                fixedRow("选择文件", key: "↑  ↓")
                 fixedRow("快速预览", key: "空格")
-                fixedRow("打开论文", key: "↩")
+                fixedRow("打开文件", key: "↩")
                 fixedRow("关闭窗口", key: "⌘W")
                 fixedRow("打开设置", key: "⌘,")
             }

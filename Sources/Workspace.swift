@@ -95,10 +95,14 @@ enum WorkspaceStore {
               item.diagnostics?.valid ?? true,
               item.metadata.map({ $0.title.count <= ResourceLimits.titleCharacters && (1...12).contains($0.month) && (1900...2199).contains($0.year) }) ?? true,
               item.documentTitle.map({ $0.count <= ResourceLimits.titleCharacters }) ?? true,
-              item.savedURL.map({ $0.isFileURL && $0.pathExtension.lowercased() == "pdf" }) ?? true,
-              item.directURL.map({ (try? DownloadSource.parse($0.absoluteString))?.directURL == $0 }) ?? true,
+              item.savedURL.map(validFile) ?? true,
+              item.additionalURLs.map({ $0.count <= 19 && $0.allSatisfy(validFile) }) ?? true,
+              item.directURL.map(PublicHTTPS.allows) ?? true,
               !(item.reference != nil && item.directURL != nil) else { return false }
         return true
+    }
+    private static func validFile(_ url: URL) -> Bool {
+        url.isFileURL && (url.pathExtension.lowercased() == "pdf" || FileStorage.extensions.contains(url.pathExtension.lowercased()))
     }
 
     static func export(_ data: Data, named name: String, to directory: URL) throws -> URL {

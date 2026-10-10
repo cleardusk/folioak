@@ -110,7 +110,7 @@ extension CoreTests {
         try expect(validationIndex < successIndex, "validation must appear before completion in logs")
         let restored = DownloadModel(preferences: prefs, stateURL: state)
         try expect(restored.items.count == 2 && restored.successes == 1 && restored.input == "bad-link", "queue and draft survive restart")
-        try expect(restored.history.count == 1 && restored.history[0].savedURL == model.items[0].savedURL, "library persists PDF paths")
+        try expect(restored.history.count == 2 && restored.history.contains { $0.savedURL == model.items[0].savedURL } && restored.library.count == 1, "history retains success and failure while paper library retains the PDF")
         try expect(restored.logs.map(\.id) == model.logs.map(\.id), "log identity persists")
         let permissions = try FileManager.default.attributesOfItem(atPath: state.path)[.posixPermissions] as? NSNumber
         try expect(permissions?.intValue == 0o600, "private workspace permissions")
@@ -118,7 +118,7 @@ extension CoreTests {
         model.input = "2501.12345v2"
         model.start()
         try await waitForQueue(model)
-        try expect(model.history.count == 1, "repeated download reuses library record")
+        try expect(model.history.count == 2 && model.library.count == 1, "repeated download reuses saved record and preserves failed history")
         let savedID = model.items[0].id
         model.items.append(DownloadItem(original: "2502.12345", reference: try ArxivReference.parse("2502.12345"), state: .downloading, progress: DownloadProgress(received: 5, total: 10)))
         model.input = "2502.12345"
@@ -154,7 +154,7 @@ extension CoreTests {
         model.retryFromLibrary(libraryMissing)
         try await waitForQueue(model)
         try expect(model.items.count == 1 && model.successes == 1 && model.input == "2503.99999", "library repair downloads one exact version and preserves draft")
-        try expect(model.history.count == 1 && model.history[0].id == missing.id && model.history[0].state == .saved, "library repair replaces missing record without duplicates")
+        try expect(model.history.count == 2 && model.history[0].id == missing.id && model.history[0].state == .saved, "library repair replaces missing record without discarding failed history")
 
         let export1 = try WorkspaceStore.export(Data("one".utf8), named: "log.txt", to: output)
         let export2 = try WorkspaceStore.export(Data("two".utf8), named: "log.txt", to: output)

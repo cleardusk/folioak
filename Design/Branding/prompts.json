@@ -1,0 +1,17 @@
+[
+  {
+    "name": "A · 单叶箭头",
+    "prompt": "Create one final high-quality 1024x1024 macOS app icon for Leafpick, a minimal downloader. NO text or letters. Clean precise vector-like geometric symbol, deep evergreen green on a soft white rounded-square tile occupying 88% of the square canvas, transparent outside rounded corners. Very subtle neutral tile edge, no dramatic shadow, no gloss, no scenery. Mark occupies 58% of tile, bold enough at 16px, generous negative space. Avoid mouths, lips, smiles, bowls, U-shaped trays, curved horizontal slits, or extra decorative strokes. Original restrained premium macOS icon craftsmanship. Direction A: ONE bold geometric downward arrow whose broad upper half is a simple asymmetric leaf silhouette pointing diagonally up-right and whose bottom resolves unmistakably into a small straight-edged DOWNWARD arrow tip. The two ideas are one cohesive continuous shape; the downward arrow direction must read clearly. No split leaf vein and no extra enclosing symbol. Icon should feel light, focused, and crisp.",
+    "tool": "built-in image_gen"
+  },
+  {
+    "name": "B · 折页叶片",
+    "prompt": "Create one final high-quality 1024x1024 macOS app icon for Leafpick, a minimal downloader. NO text or letters. Clean precise vector-like geometric symbol, deep evergreen green on a soft white rounded-square tile occupying 88% of the square canvas, transparent outside rounded corners. Very subtle neutral tile edge, no dramatic shadow, no gloss, no scenery. Mark occupies 58% of tile, bold enough at 16px, generous negative space. Avoid mouths, lips, smiles, bowls, U-shaped trays, curved horizontal slits, or extra decorative strokes. Original restrained premium macOS icon craftsmanship. Direction B: ONE upright rectangular document silhouette with softly rounded corners and a folded top-right corner. The diagonal fold creates a small stylized leaf shape through clean angular negative space. Compact proportions, extremely simple, instantly reads as paper/document first and leaf second. No curved slit through the center, no tray, no arrow, no line details. A distinctive polished file-collection symbol.",
+    "tool": "built-in image_gen"
+  },
+  {
+    "name": "C · 方框拾取",
+    "prompt": "Create one final high-quality 1024x1024 macOS app icon for Leafpick, a minimal downloader. NO text or letters. Clean precise vector-like geometric symbol, deep evergreen green on a soft white rounded-square tile occupying 88% of the square canvas, transparent outside rounded corners. Very subtle neutral tile edge, no dramatic shadow, no gloss, no scenery. Mark occupies 58% of tile, bold enough at 16px, generous negative space. Avoid mouths, lips, smiles, bowls, U-shaped trays, curved horizontal slits, or extra decorative strokes. Original restrained premium macOS icon craftsmanship. Direction C: a small solid geometric leaf tilted 35 degrees, clearly separated from TWO fine-but-bold right-angle corner brackets at lower-left and upper-right, like carefully selecting an object. Leaf has NO vein or internal slit. Brackets use crisp horizontal/vertical segments and slightly rounded ends, not a connected U. Overall silhouette compact, balanced, calm, exact. The mark suggests picking/selecting one useful thing, with an open airy square structure.",
+    "tool": "built-in image_gen"
+  }
+]

@@ -142,12 +142,12 @@ extension CoreTests {
             keys.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!)
         }
         try key(34, "i", .command)
-        try expect(model.diagnosticItem?.id == model.library.first?.id, "cross-page focus selects the first paper after navigation resets selection")
+        try expect(model.diagnosticItem?.id == model.downloads.first?.id, "cross-page focus selects the first download after navigation resets selection")
         model.diagnosticItem = nil
         try key(125, "\u{F701}")
         await settle()
         try key(34, "i", .command)
-        try expect(model.diagnosticItem?.id == model.library.last?.id, "arrow navigation remains available after cross-page focus")
+        try expect(model.diagnosticItem?.id == model.downloads.last?.id, "arrow navigation remains available after cross-page focus")
         model.diagnosticItem = nil
         let editor = try await search("no-matching-paper")
         editor.selectAll(nil); editor.insertText("", replacementRange: editor.selectedRange())
@@ -163,7 +163,7 @@ extension CoreTests {
         model.focusInput()
         await settle()
         try expect(window.firstResponder is LinkTextView, "same-page Command L wins over list focus with populated download rows")
-        model.items = []
+        model.items = []; model.history = []
         await settle()
         model.listRequest = UUID()
         await settle()

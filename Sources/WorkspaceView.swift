@@ -6,7 +6,8 @@ import UniformTypeIdentifiers
 typealias WorkspaceViewState<Value> = SwiftUI.State<Value>
 
 enum WorkspacePage: String, CaseIterable {
-    case downloads = "下载", library = "资料库", logs = "日志"
+    case downloads = "下载", library = "论文资料库", logs = "日志"
+    static let navigation: [Self] = [.downloads, .library]
     var icon: String {
         switch self { case .downloads: return "arrow.down.circle"; case .library: return "books.vertical"; case .logs: return "text.alignleft" }
     }
@@ -34,9 +35,9 @@ struct QuietButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(ThemePalette.color(palette.accent).opacity(enabled ? 1 : 0.4))
-            .padding(.horizontal, 14).frame(height: 34)
+            .padding(.horizontal, 10).frame(height: 28)
             .background(ThemePalette.color(palette.accent).opacity(configuration.isPressed ? 0.19 : 0.10))
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
@@ -46,9 +47,9 @@ struct RoundButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.system(size: 15, weight: .medium))
             .foregroundStyle(ThemePalette.color(palette.text).opacity(enabled ? 1 : 0.35))
-            .frame(width: 36, height: 36)
-            .background(ThemePalette.color(palette.accent).opacity(configuration.isPressed ? 0.20 : 0.09))
-            .clipShape(Circle())
+            .frame(width: 28, height: 28)
+            .background(ThemePalette.color(palette.accent).opacity(configuration.isPressed ? 0.14 : 0))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
@@ -85,7 +86,7 @@ struct DownloaderView: View {
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var visibleItems: [DownloadItem] {
         if page == .library { return libraryPapers.map(\.downloadItem) }
-        return model.items.filter { item in
+        return model.downloads.filter { item in
             filter.includes(item) &&
             (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) || item.original.localizedCaseInsensitiveContains(query))
         }
@@ -113,7 +114,7 @@ struct DownloaderView: View {
             Rectangle().fill(ThemePalette.color(palette.border).opacity(0.55)).frame(width: 1)
             VStack(alignment: .leading, spacing: 0) {
                 header
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 16) {
                     if page == .downloads { composer }
                     if page == .logs { logContent } else { papers }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -127,7 +128,7 @@ struct DownloaderView: View {
         .background(ThemePalette.color(palette.canvas))
         .ignoresSafeArea(.container, edges: .top)
         .onReceive(model.$listRequest.dropFirst()) { _ in
-            if page == .logs { focusListOnArrival = true; page = .library }
+            if page == .logs { focusListOnArrival = true; page = .downloads }
             else { focusList() }
         }
         .onReceive(model.$editRequest.dropFirst()) { _ in
@@ -144,7 +145,7 @@ struct DownloaderView: View {
         .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item) }
         .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
-        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all }
+        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; selectedID = nil; listFocus = nil }
     }
 
     private func focusList() {
@@ -164,7 +165,7 @@ struct DownloaderView: View {
                 Spacer(minLength: 0)
             }.padding(.top, 34).padding(.bottom, 10)
             VStack(spacing: 6) {
-                ForEach(WorkspacePage.allCases, id: \.self) { destination in
+                ForEach(WorkspacePage.navigation, id: \.self) { destination in
                     Button { page = destination; navigationActivatedAt = Date() } label: {
                         HStack(spacing: 13) {
                             SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: destination == page)
@@ -186,8 +187,8 @@ struct DownloaderView: View {
                 }
             }
             .overlay(alignment: .topLeading) {
-                SidebarSelectionIndicator(index: WorkspacePage.allCases.firstIndex(of: page) ?? 0, color: accent)
-                    .opacity(navigationHovered || navigationActivatedAt != nil ? 1 : 0)
+                SidebarSelectionIndicator(index: WorkspacePage.navigation.firstIndex(of: page) ?? 0, color: accent)
+                    .opacity(page != .logs && (navigationHovered || navigationActivatedAt != nil) ? 1 : 0)
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: navigationHovered || navigationActivatedAt != nil)
             }
             .onHover { navigationHovered = $0 }
@@ -212,7 +213,11 @@ struct DownloaderView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Text(page.rawValue).font(.system(size: 23, weight: .medium))
+            if page == .logs {
+                Button { page = .downloads } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(RoundButtonStyle(palette: palette)).help("返回下载").accessibilityLabel("返回下载")
+            }
+            Text(page.rawValue).font(.system(size: 20, weight: .semibold))
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty { searchField }
@@ -236,8 +241,13 @@ struct DownloaderView: View {
                     .buttonStyle(RoundButtonStyle(palette: palette))
                     .disabled(visibleLogs.isEmpty).help("导出当前筛选的日志").accessibilityLabel("导出日志")
             } else if page == .downloads {
+                if !model.downloads.isEmpty { searchField }
                 Button(action: model.openDirectory) { Image(systemName: "folder") }
                     .buttonStyle(RoundButtonStyle(palette: palette)).help("打开保存目录").accessibilityLabel("打开保存目录")
+                Menu {
+                    Button("查看日志") { page = .logs }
+                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 28) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 24).accessibilityLabel("下载操作")
             }
         }.frame(height: 76)
     }
@@ -246,8 +256,13 @@ struct DownloaderView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 9) {
                 Image(systemName: "link").font(.system(size: 15, weight: .medium))
-                Text("添加论文").font(.system(size: 14, weight: .medium))
+                Text("添加链接").font(.system(size: 14, weight: .medium))
                 Spacer()
+                if model.hasMediaInput {
+                    Picker("媒体格式", selection: $model.mediaFormat) {
+                        ForEach(MediaFormat.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }.labelsHidden().pickerStyle(.menu).buttonStyle(.automatic).frame(width: 132)
+                }
                 Button(action: model.importLinks) { Image(systemName: "square.and.arrow.down").frame(width: 32, height: 32).contentShape(Rectangle()) }
                     .help("从文本文件导入链接").accessibilityLabel("导入链接")
                 Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
@@ -286,7 +301,7 @@ struct DownloaderView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(secondary)
             TextField("搜索", text: $query).textFieldStyle(.plain).font(.system(size: 13))
-                .accessibilityLabel(page == .logs ? "搜索日志" : "搜索论文")
+                .accessibilityLabel(page == .logs ? "搜索日志" : (page == .library ? "搜索论文" : "搜索下载"))
             if !query.isEmpty {
                 Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary).frame(width: 24, height: 24).contentShape(Rectangle()) }
                     .buttonStyle(.plain).accessibilityLabel("清除搜索")
@@ -298,7 +313,7 @@ struct DownloaderView: View {
     private var papers: some View {
         let rows = visibleItems
         return VStack(spacing: 14) {
-            if page == .library || !model.items.isEmpty {
+            if page == .library || !model.downloads.isEmpty {
             HStack(spacing: 4) {
                 if page == .downloads {
                     FilterTabs(options: QueueFilter.allCases, selection: $filter, title: { $0.rawValue }, palette: palette)
@@ -306,7 +321,7 @@ struct DownloaderView: View {
                     if model.canRetry && !model.busy {
                         Button("重试未完成") { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
                     }
-                    if model.items.contains(where: { $0.canRetry || $0.source == nil }) {
+                    if model.downloads.contains(where: { $0.canRetry || $0.source == nil }) {
                         Button(action: model.copyUnfinished) { Image(systemName: "doc.on.doc").frame(width: 28, height: 30).contentShape(Rectangle()) }
                             .buttonStyle(.plain).foregroundStyle(secondary).help("复制未完成链接").accessibilityLabel("复制未完成链接")
                     }
@@ -334,14 +349,14 @@ struct DownloaderView: View {
             } else {
                 ScrollViewReader { scroll in
                     ScrollView {
-                        LazyVStack(spacing: 10) {
+                        LazyVStack(spacing: page == .library ? 8 : 0) {
                             ForEach(rows) { item in
                                 if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
                                     LibraryRow(paper: paper, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                         .id(item.id)
                                 } else {
                                 DownloadRow(item: item, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
-                                    .contentShape(RoundedRectangle(cornerRadius: 20))
+                                    .contentShape(Rectangle())
                                     .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
                                     .id(item.id)
                                 }
@@ -379,14 +394,13 @@ struct DownloaderView: View {
             if libraryTag != nil { return "没有匹配的结果" }
             switch libraryFilter { case .all: return "暂无论文"; case .favorites: return "暂无收藏"; case .unread: return "暂无未读论文"; case .removed: return "暂无已移除论文" }
         }
-        if !model.items.isEmpty { return "暂无\(filter.rawValue)任务" }
-        return "暂无下载"
+        if !model.downloads.isEmpty { return "暂无\(filter.rawValue)任务" }
+        return "粘贴链接，开始拾取"
     }
 
     private func empty(icon: String, text: String) -> some View {
         VStack(spacing: 16) {
-            Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(accent)
-                .frame(width: 68, height: 68).background(accent.opacity(0.08)).clipShape(Circle())
+            Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(secondary)
             Text(text).font(.system(size: 13)).foregroundStyle(secondary)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -454,7 +468,7 @@ struct DownloaderView: View {
                     else if !model.summary.isEmpty { Circle().fill(accent).frame(width: 5, height: 5) }
                     Text(model.summary).lineLimit(1)
                     Spacer()
-                    if !model.items.isEmpty { Text("\(model.items.count) 项").monospacedDigit() }
+                    if !model.downloads.isEmpty { Text("\(visibleItems.count) 项").monospacedDigit() }
                 } else if page == .logs {
                     Text("\(visibleLogs.count) 条").monospacedDigit()
                     Spacer()
@@ -541,13 +555,13 @@ struct DownloadRow: View {
     private var secondary: Color { ThemePalette.color(palette.secondary) }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 21, weight: .light)).foregroundStyle(ThemePalette.color(palette.accent))
-                .frame(width: 44, height: 44).background(ThemePalette.color(palette.accent).opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 13))
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: item.mediaFormat == .audio ? "waveform" : item.source?.symbol ?? "doc")
+                .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)
+                .frame(width: 28, height: 34)
                 .accessibilityLabel(item.state.label)
-            VStack(alignment: .leading, spacing: 9) {
-                Text(item.title).font(.system(size: 14, weight: .medium)).lineSpacing(3)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(item.title).font(.system(size: 13, weight: .medium)).lineSpacing(3)
                     .lineLimit(2).help(item.title)
                 HStack(spacing: 10) {
                     if let metadata = item.metadata { Text(metadata.reference.identifier).font(.system(size: 11, design: .monospaced)) }
@@ -556,7 +570,7 @@ struct DownloadRow: View {
                         Image(systemName: item.state.symbol).font(.system(size: 10))
                         Text(item.state.label)
                     }.foregroundStyle(item.state.color(palette)).lineLimit(1)
-                    if let pages = item.pages { Text("\(pages) 页") }
+                    if let files = item.additionalURLs, !files.isEmpty { Text("\(files.count + 1) 个文件") }
                 }.font(.system(size: 11)).foregroundStyle(secondary)
                 if let progress = item.progress, item.state == .downloading {
                     VStack(alignment: .leading, spacing: 6) {
@@ -583,21 +597,25 @@ struct DownloadRow: View {
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22)
                     .accessibilityLabel("\(item.title)的更多操作")
             }.padding(.top, 5)
-        }.padding(20).background(ThemePalette.color(palette.surface))
-            .clipShape(RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(selected ? ThemePalette.color(palette.accent).opacity(0.65) : ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))
+        }.padding(.horizontal, 10).padding(.vertical, 13)
+            .background(selected ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(alignment: .bottom) { Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 0.5) }
             .contextMenu { actions }
             .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder private var actions: some View {
-        if item.savedURL != nil {
-            Button("快速预览") { select(); model.preview(item) }.help("选中论文后按空格")
+        if !item.localURLs.isEmpty {
+            Button("快速预览") { select(); model.preview(item) }.help("选中文件后按空格")
             Button("在 Finder 中显示") { model.openFile(item, reveal: true) }
             Divider()
         }
-        Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中论文后按 \(model.shortcuts[.details].label)")
+        Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中文件后按 \(model.shortcuts[.details].label)")
+        if item.canRetry && item.savedURL != nil {
+            Button("重新下载缺失文件") { model.retry(item.id) }.disabled(busy)
+        }
         if let source = item.source {
             Button("打开来源页面") { model.openSource(item) }
             Button("复制来源链接") {

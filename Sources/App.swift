@@ -38,7 +38,7 @@ enum ItemState: Equatable, Codable {
         switch self {
         case .queued: return "等待下载"
         case .coordinating: return "等待其他下载任务"
-        case .metadata: return "获取论文信息"
+        case .metadata: return "获取信息"
         case .checkingLocal: return "检查本地文件"
         case .downloading: return "下载中"
         case .validating: return "校验并保存"
@@ -89,7 +89,10 @@ struct DownloadItem: Identifiable, Codable {
     var bytesPerSecond: Double?
     var transferSample: TransferSample?
     var diagnostics: TaskDiagnostics?
-    var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.map(DownloadSource.pdf) }
+    var mediaFormat: MediaFormat? = nil
+    var additionalURLs: [URL]? = nil
+    var localURLs: [URL] { (savedURL.map { [$0] } ?? []) + (additionalURLs ?? []) }
+    var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.flatMap { try? DownloadSource.parse($0.absoluteString) } }
     var title: String { metadata?.title ?? documentTitle ?? source?.label ?? original }
     var canRetry: Bool { source != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
 }
@@ -118,6 +121,7 @@ final class DownloadModel: ObservableObject {
         didSet { preferences.set(theme.rawValue, forKey: "theme") }
     }
     @Published var items: [DownloadItem] = []
+    @Published var mediaFormat: MediaFormat = .automatic
     @Published var history: [DownloadItem] = []
     @Published var papers: [LibraryPaper] = [] { didSet { libraryDirty = true; schedulePersistence() } }
     @Published var libraryNotice: String?
@@ -165,7 +169,7 @@ final class DownloadModel: ObservableObject {
         let downloadPreferences = DownloadPreferences(preferences)
         naming = downloadPreferences.naming
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
-        theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "") ?? .native
+        theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
         directory = downloadPreferences.directory
         restoreWorkspace()
         restoreLibrary()
@@ -175,6 +179,10 @@ final class DownloadModel: ObservableObject {
     }
 
     var library: [DownloadItem] { papers.filter { !$0.removed }.sorted { $0.addedAt > $1.addedAt }.map(\.downloadItem) }
+    var downloads: [DownloadItem] {
+        let current = Set(items.map(\.id))
+        return items + history.filter { !current.contains($0.id) }
+    }
 
     private func restoreLibrary() {
         do {
@@ -213,7 +221,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func copyUnfinished() {
-        let text = items.filter { $0.canRetry || $0.source == nil }.map(\.original).joined(separator: "\n")
+        let text = downloads.filter { $0.canRetry || $0.source == nil }.map(\.original).joined(separator: "\n")
         guard !text.isEmpty else { return }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
     }
@@ -261,7 +269,7 @@ final class DownloadModel: ObservableObject {
         let original = item.metadata?.reference.identifier ?? source.webURL.absoluteString
         archiveResults()
         guard let restored = try? DownloadSource.parse(original) else { return }
-        items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued)]
+        items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued, mediaFormat: item.mediaFormat)]
         duplicateCount = 0; batchID = UUID()
         record(.info, "重新下载", item: items[0])
         persistWorkspace()
@@ -274,7 +282,7 @@ final class DownloadModel: ObservableObject {
     }
 
     private func archiveResults() {
-        for item in items where item.savedURL != nil || item.state == .missing {
+        for item in items where item.state.terminal {
             history.removeAll { old in
                 old.id == item.id || (item.savedURL != nil && old.savedURL == item.savedURL && old.source == item.source)
                     || (old.state == .missing && item.savedURL != nil && old.metadata?.reference == item.metadata?.reference && old.source == item.source)
@@ -340,21 +348,22 @@ final class DownloadModel: ObservableObject {
     }
 
     var tokenCount: Int { DownloadSource.tokens(in: input).count }
-    var retryCount: Int { items.filter(\.canRetry).count }
-    var canRetry: Bool { items.contains(where: \.canRetry) }
+    var hasMediaInput: Bool { DownloadSource.tokens(in: input).contains { (try? DownloadSource.parse($0))?.isMedia == true } }
+    var retryCount: Int { downloads.filter(\.canRetry).count }
+    var canRetry: Bool { downloads.contains(where: \.canRetry) }
     var completed: Int { items.filter { $0.state.terminal }.count }
     var successes: Int { items.filter { $0.state == .saved || $0.state == .existing }.count }
     var failures: Int { items.filter { $0.state == .failed || $0.state == .missing }.count }
     var summary: String {
         if items.isEmpty { return "" }
         if cancelling { return "正在取消…" }
-        if busy { return "已处理 \(completed) / \(items.count) 篇" }
+        if busy { return "已处理 \(completed) / \(items.count) 项" }
         var parts: [String] = []
-        if failures > 0 { parts.append("\(failures) 篇失败") }
+        if failures > 0 { parts.append("\(failures) 项失败") }
         let cancelled = items.filter { $0.state == .cancelled }.count
-        if cancelled > 0 { parts.append("\(cancelled) 篇取消") }
+        if cancelled > 0 { parts.append("\(cancelled) 项取消") }
         let paused = items.filter { $0.state == .paused }.count
-        if paused > 0 { parts.append("\(paused) 篇待重试") }
+        if paused > 0 { parts.append("\(paused) 项待重试") }
         if duplicateCount > 0 { parts.append("已去重 \(duplicateCount) 条") }
         return parts.joined(separator: " · ")
     }
@@ -381,7 +390,7 @@ final class DownloadModel: ObservableObject {
                         continuation.resume(returning: text)
                     }
                 }
-                guard let text else { self?.notice = "请拖入论文链接或文本。"; return }
+                guard let text else { self?.notice = "请拖入链接或文本。"; return }
                 bytes += text.utf8.count + 1
                 guard bytes <= ResourceLimits.inputBytes else { self?.notice = "输入超过 64 KB，请分批导入。"; return }
                 texts.append(text)
@@ -394,7 +403,7 @@ final class DownloadModel: ObservableObject {
     func chooseDirectory() {
         guard !busy else { return }
         let panel = NSOpenPanel()
-        panel.title = "选择论文保存目录"
+        panel.title = "选择保存目录"
         panel.prompt = "选择"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -415,7 +424,7 @@ final class DownloadModel: ObservableObject {
         duplicateCount = batch.duplicates
         batchID = UUID()
         items = batch.entries.map { entry in
-            DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL, state: entry.source == nil ? .failed : .queued, error: entry.error)
+            DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL, state: entry.source == nil ? .failed : .queued, error: entry.error, mediaFormat: entry.source?.isMedia == true ? mediaFormat : nil)
         }
         guard !items.isEmpty else { notice = "请先粘贴至少一个链接。"; return }
         record(.info, "开始下载 · \(items.count) 项" + (duplicateCount > 0 ? " · 去重 \(duplicateCount) 条" : ""))
@@ -426,6 +435,16 @@ final class DownloadModel: ObservableObject {
 
     func retry(_ single: UUID? = nil) {
         guard !busy else { return }
+        if single == nil, history.contains(where: { old in old.canRetry && !items.contains(where: { $0.id == old.id }) }) {
+            let candidates = Array(downloads.filter(\.canRetry).prefix(ResourceLimits.batchCount))
+            archiveResults(); items = candidates; duplicateCount = 0; batchID = UUID()
+        }
+        if let single, !items.contains(where: { $0.id == single }), let previous = history.first(where: { $0.id == single }), previous.canRetry {
+            archiveResults()
+            // A new retry batch leaves the draft and earlier completed files intact.
+            items = [previous]
+            batchID = UUID()
+        }
         let ids = items.filter { $0.canRetry && (single == nil || $0.id == single) }.map(\.id)
         guard !ids.isEmpty else { return }
         record(.info, "重试 \(ids.count) 项")
@@ -464,23 +483,28 @@ final class DownloadModel: ObservableObject {
     }
 
     private func localFile(_ item: DownloadItem) -> URL? {
-        guard let url = item.savedURL else { return nil }
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        let files = item.localURLs
+        guard !files.isEmpty else { return nil }
+        let available = files.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard available.count == files.count else {
+            let message = available.isEmpty ? "原位置的文件不存在，可重新下载。" : "部分文件已不在原位置，仍可打开其余文件，或重新下载。"
             update(item.id) {
-                $0.state = .missing; $0.savedURL = nil
+                $0.state = .missing; $0.savedURL = available.first
+                $0.additionalURLs = available.count > 1 ? Array(available.dropFirst()) : nil
                 $0.restoreReference = $0.metadata?.reference
-                $0.error = "原位置的 PDF 不存在，可重新下载。"
+                $0.error = message
             }
             if let index = history.firstIndex(where: { $0.id == item.id }) {
-                history[index].state = .missing; history[index].savedURL = nil
-                history[index].error = "原位置的 PDF 不存在，可重新下载。"
+                history[index].state = .missing; history[index].savedURL = available.first
+                history[index].additionalURLs = available.count > 1 ? Array(available.dropFirst()) : nil
+                history[index].error = message
             }
             record(.warning, "本地文件不存在", item: item)
             archiveResults()
             persistWorkspace()
-            return nil
+            return available.first
         }
-        return url
+        return available.first
     }
 
     func preview(_ item: DownloadItem) {
@@ -490,8 +514,8 @@ final class DownloadModel: ObservableObject {
 
     func openFile(_ item: DownloadItem, reveal: Bool = false) {
         guard let url = localFile(item) else { return }
-        if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-        else if !opener(url) { notice = "无法打开 PDF，请检查默认 PDF 阅读器。文件仍保存在原位置。" }
+        if reveal { NSWorkspace.shared.activateFileViewerSelecting(item.localURLs.filter { FileManager.default.fileExists(atPath: $0.path) }) }
+        else if !opener(url) { notice = "无法打开文件，请检查默认应用。文件仍保存在原位置。" }
         else { notice = nil; if !reveal { markRead(url) } }
     }
 
@@ -565,14 +589,15 @@ final class DownloadModel: ObservableObject {
                 for await event in events { self?.receive(event, for: id, run: run) }
             }
             do {
-                let saved = try await engine.download(source, to: target, naming: namingStyle) { event in sink.yield(event) }
+                let saved = try await engine.download(source, to: target, naming: namingStyle, mediaFormat: item.mediaFormat ?? .automatic) { event in sink.yield(event) }
                 sink.finish()
                 await listener.value
                 update(id) {
                     $0.metadata = saved.metadata
                     $0.documentTitle = saved.title
                     $0.savedURL = saved.url
-                    $0.pages = saved.pages
+                    $0.pages = saved.pages > 0 ? saved.pages : nil
+                    $0.additionalURLs = saved.additionalURLs.isEmpty ? nil : saved.additionalURLs
                     $0.state = saved.alreadyExisted ? .existing : .saved
                     $0.progress = nil
                     $0.finishedAt = Date(); $0.diagnostics?.finish()
@@ -658,7 +683,7 @@ final class DownloadModel: ObservableObject {
 // Placeholder glyphs use the same TextKit layout and origin as editable text.
 // SwiftUI Text over TextEditor has a different first-line baseline on macOS.
 final class LinkTextView: NSTextView {
-    static let example = "https://arxiv.org/abs/2609.22978"
+    static let example = "粘贴论文、视频或文件链接"
     var placeholderColor = NSColor.secondaryLabelColor { didSet { if placeholderColor != oldValue { needsDisplay = true } } }
     var focusChanged: ((Bool) -> Void)?
     private var styledInput: String?
@@ -736,7 +761,7 @@ final class LinkTextView: NSTextView {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 8
         let text = NSMutableAttributedString(string: Self.example + "\n", attributes: [.font: font, .foregroundColor: placeholderColor, .paragraphStyle: paragraph])
-        text.append(NSAttributedString(string: "arXiv / HF 链接或 PDF，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
+        text.append(NSAttributedString(string: "支持多条链接，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
         placeholderStorage.setAttributedString(text)
         placeholderContainer.containerSize = textContainer.containerSize
         placeholderContainer.lineFragmentPadding = textContainer.lineFragmentPadding
@@ -808,7 +833,7 @@ struct LinkInput: NSViewRepresentable {
         editor.isAutomaticTextCompletionEnabled = false
         editor.isAutomaticTextReplacementEnabled = false
         editor.isAutomaticLinkDetectionEnabled = false
-        editor.setAccessibilityLabel("论文链接，每行一个")
+        editor.setAccessibilityLabel("下载链接，每行一个")
         editor.delegate = context.coordinator
         editor.captureFailure = { [weak model] in model?.notice = $0 }
         editor.focusChanged = { [weak editor, weak coordinator = context.coordinator] value in
@@ -1092,9 +1117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         makeMenu()
         shortcutObservation = model.shortcuts.$bindings.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { self?.makeMenu() } }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "arXiv下载器"
+        window.title = "拾取"
         window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow")
-        windowChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", workspace: true)
+        windowChrome = WindowChrome(window: window, model: model, title: "拾取 · Leafpick", workspace: true)
         window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }))
         window.minSize = NSSize(width: 820, height: 600)
         if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
@@ -1113,8 +1138,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if terminationPending { return .terminateLater }
         guard model.busy else { model.cancelVersionCheck(); model.persistWorkspace(); return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "仍有论文正在下载"
-        alert.informativeText = "已保存的论文会保留。退出将停止当前下载和等待中的任务。"
+        alert.messageText = "仍有文件正在下载"
+        alert.informativeText = "已保存的文件会保留。退出将停止当前下载和等待中的任务。"
         alert.addButton(withTitle: "继续下载")
         alert.addButton(withTitle: "停止并退出")
         guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
@@ -1153,7 +1178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let view = NSHostingView(rootView: SettingsView(model: model))
             let contentSize = view.fittingSize
             let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            panel.title = "arXiv下载器设置"
+            panel.title = "拾取设置"
             settingsChrome = WindowChrome(window: panel, model: model, title: "设置")
             panel.contentView = view
             panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
@@ -1176,10 +1201,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return submenu
         }
         let app = add("", [
-            ("关于 arXiv下载器", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""), ("", nil, ""),
+            ("关于 拾取", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""), ("", nil, ""),
             ("设置…", #selector(showSettings), ","), ("", nil, ""),
-            ("隐藏 arXiv下载器", #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
-            ("退出 arXiv下载器", #selector(NSApplication.terminate(_:)), "q")
+            ("隐藏 拾取", #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
+            ("退出 拾取", #selector(NSApplication.terminate(_:)), "q")
         ])
         app.item(withTitle: "设置…")?.target = self
         let edit = add("编辑", [
@@ -1188,7 +1213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ("粘贴", #selector(NSText.paste(_:)), "v"), ("全选", #selector(NSText.selectAll(_:)), "a")
         ])
         edit.item(withTitle: "重做")?.keyEquivalentModifierMask = [.command, .shift]
-        let navigation = add("前往", [("添加论文", #selector(focusInput), "l"), ("论文列表", #selector(focusList), "j")])
+        let navigation = add("前往", [("添加链接", #selector(focusInput), "l"), ("文件列表", #selector(focusList), "j")])
         navigation.items.forEach { $0.target = self }
         let start = NSMenuItem(title: "开始下载", action: #selector(startDownload), keyEquivalent: "\r"); start.target = self; navigation.addItem(start)
         for (action, item) in [(ShortcutAction.input, navigation.items[0]), (.list, navigation.items[1]), (.download, start)] {

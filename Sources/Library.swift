@@ -109,6 +109,7 @@ extension DownloadModel {
         return libraryWritable
     }
     func upsertPaper(_ item: DownloadItem) {
+        guard item.source?.isPaper != false, item.savedURL.map({ $0.pathExtension.lowercased() == "pdf" }) ?? true else { return }
         guard item.savedURL != nil || item.state == .missing else { return }
         guard canChangeLibrary() else { return }
         let incoming = LibraryPaper(item)

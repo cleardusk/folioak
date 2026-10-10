@@ -1,80 +1,57 @@
-# arXiv下载器
+# 拾取 · Leafpick
 
-原生 macOS 论文下载工具：粘贴 arXiv 链接／编号、Hugging Face 论文页、GitHub PDF 或通用 HTTPS PDF 直链，自动命名并保存。
+原生 macOS 下载器。粘贴链接，保存论文、视频、图片或音频。
 
-## 安装
+## 2.3.0
 
-支持 Apple Silicon（M 系列芯片），最低 macOS 13。
+- **论文**：arXiv 编号／链接、Hugging Face 论文页、GitHub PDF、OpenReview、ACL Anthology、CVF 和公开 HTTPS PDF 直链。
+- **视频**：YouTube、Bilibili、X 的单个公开视频链接。自动选择画质，也可选「仅音频」保存 M4A。
+- **文件**：HTTPS 图片、音频和视频直链。支持 PNG、JPEG、WebP、GIF、HEIC、TIFF、MP3、M4A、AAC、WAV、FLAC、OGG、Opus、MP4、MOV、WebM、MKV。
+- **界面**：只保留「下载」和「论文资料库」两个入口。输入框沿用原有圆角与留白，任务采用轻量列表，日志放入更多菜单。
 
-从 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases) 下载 DMG，将应用拖入 Applications；也可下载 ZIP 解压安装。私有仓库需登录有访问权限的 GitHub 账号。
+视频使用内置 yt-dlp、FFmpeg 和 Deno，无需另装 Python、Homebrew 或其他运行环境。支持范围以公开、可直接访问的单条内容为主；不支持播放列表、账号主页、X 纯图片帖子，也不导入浏览器登录信息。站点限制、地区限制和已失效内容可能导致失败。
+
+## 安装与使用
+
+支持 Apple Silicon（M 系列芯片），最低 macOS 13。从 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases) 下载 DMG，将 Leafpick 拖入 Applications；也可使用应用 ZIP。私有仓库需要有访问权限的 GitHub 账号。
 
 当前未做 Apple 公证，首次打开可能需要在系统「隐私与安全性」中允许打开。
 
-## 使用
+1. 粘贴或拖入链接；支持多行、Markdown 和含链接的段落。
+2. 选择保存目录；视频链接可选择自动画质或仅音频。
+3. 点击「下载」或按 `⌘ Return`。成功后可打开文件、快速预览或在 Finder 中查看。
 
-1. 粘贴或拖入论文链接，也可粘贴含链接／编号的段落、Markdown。
-2. 选择保存目录，点击「开始下载」。
+每批最多 200 条，自动去重，最多同时处理三个来源，同一来源串行。失败或取消后保留输入，可逐项重试；新批次开始后，历史结果仍可从下载列表找到。文件重名时按内容复用或添加序号，不覆盖已有文件。
 
-arXiv 默认命名为 `[arXiv年份.月份][论文标题].pdf`；通用 PDF 使用文档标题或原文件名。支持混合输入、链接去重、失败重试和取消，不覆盖已有文件；每批最多 200 条。
+arXiv 默认命名为 `[年份.月份][论文标题].pdf`，精确版本且内容未变的本地 PDF 可直接复用。其他 PDF 用服务器更新标记检查；图片／音视频在下载后校验格式和内容。PDF 上限 256 MiB，媒体文件上限 16 GiB。媒体中断片段保存在本机应用数据目录供重试使用。
 
-HF 论文页（如 `https://huggingface.co/papers/2608.15763`）自动转为 arXiv 下载，与相同编号或 arXiv 链接去重；支持版本号、分享参数及 `hf.co` 短域名，无需访问 HF 网页。
+## 论文资料库
 
-GitHub 公开仓库的 PDF 预览链接（如 `https://github.com/openai/math/blob/main/overview.pdf`）自动转为原始文件下载，与对应 raw 链接去重；保留分支／标签／提交和文件路径，无需访问预览页。不支持需要登录的私有仓库。
+论文下载成功后自动入库；图片、视频和音频只保留在下载列表。支持导入本地 PDF、收藏、已读状态、标签、搜索、排序、重新关联缺失文件及手动检查 arXiv 新版本。移出资料库可恢复，不删除原始 PDF。
 
-每篇保存成功后移除对应输入，下载结果保留在列表；失败或取消的链接保留。
+升级沿用原有偏好、输入草稿、任务和资料库，存储位置保持 `~/Library/Application Support/local.paperrepo.arxiv-downloader/`。独立资料库最多 20,000 条；任务历史保留最近 500 条，日志保留最近 1,500 条。损坏／未来版本的资料库会保持原样并进入只读状态。
 
-arXiv 精确版本且内容未变的本地 PDF 直接复用。通用 PDF 用服务器更新标记检查，未更新则复用；无更新标记或发生重定向时重新下载校验。
-
-限流时自动等待，持续限流会暂停该站点的下载，其余站点继续；输入和已完成结果保留，等待可取消，重启不会清除冷却期。
-
-设置可调整目录、文件命名、深浅外观及六套主题。`⌘ Return` 开始下载，`⌘ ,` 打开设置。
-
-## 2.2 新增
-
-- 独立资料库：下载完成自动入库，也可用右上角 `+` 导入本地 PDF。引用原文件位置，不移动文件；缺失文件可重新关联。资料库独立保存，不再受 500 条下载历史上限影响。
-- 收藏、已读／未读、标签及标题整理；搜索覆盖标题、作者、编号和标签，可组合关键词。筛选与排序集中在一个菜单，移出资料库可恢复，PDF 始终保留。
-- 在资料库菜单手动检查 arXiv 论文新版本；每次最多检查 200 篇。只查询元数据，发现新版后按需下载，旧版本和未提交输入保留，不在后台自动轮询。
-- OpenReview 论文讨论页、ACL Anthology 论文页、CVF 论文页自动转换为 PDF 地址。仅支持公开可访问的 PDF；访问限制和失效链接会显示失败原因。
-- UI 与 CLI 最多并行处理三个输入来源，同一来源串行。arXiv 保留原有间隔、共享锁与退避策略，某个来源等待时不阻塞其他来源。
-- 设置增加快捷键页：添加论文、论文列表、开始下载、任务详情可改键、检测冲突和恢复默认。`⌘W` 可关闭设置窗口；方向键、空格、Return 和系统编辑快捷键保持固定。
-
-资料库保存于 `~/Library/Application Support/local.paperrepo.arxiv-downloader/library.json`，首次升级迁移现有成功／缺失文件记录。最多 20,000 条、32 MiB，不自动淘汰旧论文；损坏或未来版本的文件保持原样并进入只读状态。未记录作者的旧任务仍可按标题、编号与标签检索。
-
-## 2.1 新增
-
-- 智能粘贴、拖入链接和 UTF-8 文本导入，自动提取段落与 Markdown 中的链接／编号；拖入统一追加，保留已有输入。
-- 论文菜单中的「任务详情」按需显示本次阶段耗时、重试次数与相关日志，可复制脱敏诊断。升级前的任务保留原有日志，不补造耗时。
-- 「快速预览」使用系统 Quick Look；缺失文件可重新下载。点击行或 `⌘ J` 进入列表，方向键选择、空格预览、Return 打开、`⌘ I` 查看详情。`⌘ L` 返回添加论文。
-- CLI 新增 `-i/--input` 文件输入、管道和 `--verbose` 阶段诊断；默认输出与 JSON schema 保持兼容。
-
-## 2.0 新增
-
-- FlClash 风格的三页工作台：下载、资料库、日志；支持侧栏收起、六套主题与深浅外观。
-- 下载进度与速率、状态筛选、单项 / 批量重试、复制未完成链接。
-- 从 UTF-8 文本导入链接；输入草稿和当前任务在重启后恢复。中断任务等待手动重试。
-- 2.0 的资料库基于最近 500 条下载记录；2.2 已迁移为独立资料库。任务历史仍保留最近 500 条。
-- 日志按级别和关键词筛选、跟随最新、复制 / 导出，最多保留最近 1,500 条，自动隐藏 URL 查询参数、片段及凭据。
-- 状态原子写入本机 `~/Library/Application Support/local.paperrepo.arxiv-downloader/workspace.json`；损坏记录先保留备份再写入新状态。旧版文件不自动扫描入库。
-- 状态文件上限 8 MiB；超长历史或日志触及上限时优先移除旧记录，保留当前任务和草稿。
+设置入口为 `⌘ ,`，可调整目录、论文命名、主题、深浅外观及快捷键。首次使用采用石墨主题；已有主题偏好保持不变。
 
 ## 命令行
 
-DMG / 应用 ZIP 已内置 CLI，安装一次即可同时使用 UI 和命令行，无需启动 UI：
+应用内置 CLI，无需启动界面：
 
 ```sh
-"/Applications/arXiv下载器.app/Contents/MacOS/arxiv-download" --help
+"/Applications/Leafpick.app/Contents/MacOS/leafpick" --help
+"/Applications/Leafpick.app/Contents/MacOS/leafpick" 1706.03762 -o ~/Downloads
 ```
 
-UI 与 CLI 共用默认目录、命名及限流；命令参数只影响本次执行。仅使用 CLI 也可下载独立 CLI ZIP。[CLI 用法](CLI-README.md)。
+另外提供带完整媒体组件的独立 CLI ZIP。`arxiv-download` 保留为应用内兼容别名。[CLI 用法](CLI-README.md)。
 
 ## 开发
 
-需要 Apple Command Line Tools 或 Xcode，应用运行无需额外依赖。
+需要 Apple Command Line Tools 或 Xcode，以及 Python 3 用于准备构建依赖；应用运行不需要这些开发工具。首次构建下载并校验固定版本的媒体组件，从源码构建 FFmpeg，后续复用本机缓存。
 
 ```sh
-./build.command     # 构建 UI 与 CLI
-./test.command      # 离线回归
-./package.command   # 生成 UI / CLI 安装包和校验文件
+./build.command       # 构建 UI 与 CLI
+./test.command        # 离线回归
+./package.command     # DMG、应用 ZIP、CLI ZIP 和 SHA-256
 ```
 
-[构建与发布](RELEASING.md) · [架构与界面](DESIGN.md) · [安全与实测](SECURITY-AUDIT.md)
+[构建与发布](RELEASING.md) · [架构与界面](DESIGN.md) · [安全与实测](SECURITY-AUDIT.md) · [媒体组件](Resources/MediaComponents.md)

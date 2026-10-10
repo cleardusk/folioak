@@ -10,14 +10,16 @@
 
 ## 本地打包
 
-需要 Apple Command Line Tools 或 Xcode：
+需要 Apple Command Line Tools 或 Xcode，以及 Python 3（仅构建使用）。首次构建会下载固定版本并校验 SHA-256，构建 FFmpeg 后缓存到 `build/media-tools/`：
 
 ```sh
 ./test.command --stress
 ./package.command
 ```
 
-`package.command` 构建含 CLI 的 arm64 `.app`，先签名内置 CLI，再签名完整应用；验证解压后的签名、架构、CLI 版本及 JSON，并确认内置和独立 CLI 相同。生成统一 DMG / 应用 ZIP、可选 CLI ZIP 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
+`package.command` 构建含 CLI 和媒体组件的 arm64 `Leafpick.app`，先签名内置组件、CLI，再签名完整应用；验证解压后的签名、架构、CLI 版本及 JSON，并确认内置和独立 CLI 相同。生成 `Leafpick-v版本-macos-arm64.dmg` / `.zip`、`leafpick-cli-v版本-macos-arm64.zip` 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
+
+yt-dlp、Deno、FFmpeg 的版本、源码和校验值在 `Tools/prepare-media.py`，许可说明在 `Resources/MediaComponents.md`。Deno 仅有其 JS 运行所需的 JIT entitlement；PyInstaller yt-dlp 仅有加载内嵌 Python 所需的 library-validation entitlement。应用主程序不继承这些例外。组件更新必须修改固定版本／校验值并重新验证，不在用户运行时自更新。
 
 `test.command` 还支持 `--stress`（200 次模拟下载及释放检查）、`--live`（真实下载至 `build/live-UUID/`）和 `--snapshots`（界面预览输出至 `build/qa/`）。离线检查包含 CLI 退出码、信号取消和独立进程协调；真实下载测试不写入 PapersRepo。
 
@@ -32,7 +34,7 @@
 3. 创建与应用版本一致的 tag 并推送：
 
 ```sh
-git tag -a v1.2.0 -m 'arXiv下载器 1.2.0'
+git tag -a v1.2.0 -m 'Leafpick 1.2.0'
 git push origin v1.2.0
 ```
 

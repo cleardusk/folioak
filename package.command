@@ -23,27 +23,28 @@ fi
 ./build.command
 staging_dir=$(mktemp -d "$project_dir/build/package.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT
-app_dir="$project_dir/dist/arXiv下载器.app"
-asset_name="arxiv-downloader-v$version-macos-arm64"
-cli_asset="arxiv-download-cli-v$version-macos-arm64"
-mkdir -p "$staging_dir/cli/arxiv-download"
-cp "$project_dir/dist/arxiv-download" "$staging_dir/cli/arxiv-download/arxiv-download"
-cp CLI-README.md "$staging_dir/cli/arxiv-download/README.md"
-ditto -c -k --norsrc --noextattr --keepParent "$staging_dir/cli/arxiv-download" "$staging_dir/$cli_asset.zip"
+app_dir="$project_dir/dist/Leafpick.app"
+asset_name="Leafpick-v$version-macos-arm64"
+cli_asset="leafpick-cli-v$version-macos-arm64"
+mkdir -p "$staging_dir/cli/leafpick"
+cp "$project_dir/dist/arxiv-download" "$staging_dir/cli/leafpick/leafpick"
+cp -R build/media-tools "$staging_dir/cli/leafpick/media-tools"
+cp CLI-README.md "$staging_dir/cli/leafpick/README.md"
+ditto -c -k --norsrc --noextattr --keepParent "$staging_dir/cli/leafpick" "$staging_dir/$cli_asset.zip"
 ditto -x -k "$staging_dir/$cli_asset.zip" "$staging_dir/cli-unpacked"
-codesign --verify --strict "$staging_dir/cli-unpacked/arxiv-download/arxiv-download"
-xcrun lipo "$staging_dir/cli-unpacked/arxiv-download/arxiv-download" -verify_arch arm64
-test "$("$staging_dir/cli-unpacked/arxiv-download/arxiv-download" --version)" = "$version"
+codesign --verify --strict "$staging_dir/cli-unpacked/leafpick/leafpick"
+xcrun lipo "$staging_dir/cli-unpacked/leafpick/leafpick" -verify_arch arm64
+test "$("$staging_dir/cli-unpacked/leafpick/leafpick" --version)" = "$version"
 ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$staging_dir/$asset_name.zip"
 ditto -x -k "$staging_dir/$asset_name.zip" "$staging_dir/unpacked"
-codesign --verify --deep --strict "$staging_dir/unpacked/arXiv下载器.app"
-xcrun lipo "$staging_dir/unpacked/arXiv下载器.app/Contents/MacOS/ArxivDownloader" -verify_arch arm64
-bundled_cli="$staging_dir/unpacked/arXiv下载器.app/Contents/MacOS/arxiv-download"
+codesign --verify --deep --strict "$staging_dir/unpacked/Leafpick.app"
+xcrun lipo "$staging_dir/unpacked/Leafpick.app/Contents/MacOS/LeafpickApp" -verify_arch arm64
+bundled_cli="$staging_dir/unpacked/Leafpick.app/Contents/MacOS/arxiv-download"
 codesign --verify --strict "$bundled_cli"
 xcrun lipo "$bundled_cli" -verify_arch arm64
 test "$("$bundled_cli" --version)" = "$version"
 "$bundled_cli" --help > /dev/null
-cmp "$bundled_cli" "$staging_dir/cli-unpacked/arxiv-download/arxiv-download"
+cmp "$bundled_cli" "$staging_dir/cli-unpacked/leafpick/leafpick"
 invalid_status=0
 "$bundled_cli" not-an-arxiv-link --json > "$staging_dir/invalid.json" 2> "$staging_dir/invalid.stderr" || invalid_status=$?
 if [[ "$invalid_status" != 1 ]]; then
@@ -56,9 +57,9 @@ let report = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURL
 let rows = report["results"] as! [[String: Any]]
 precondition(report["schema"] as? Int == 1 && rows.count == 1 && rows[0]["status"] as? String == "failed")' "$staging_dir/invalid.json"
 mkdir -p "$staging_dir/dmg"
-ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/arXiv下载器.app"
+ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/Leafpick.app"
 ln -s /Applications "$staging_dir/dmg/Applications"
-hdiutil create -volname 'arXiv下载器' -srcfolder "$staging_dir/dmg" -format UDZO "$staging_dir/$asset_name.dmg"
+hdiutil create -volname 'Leafpick 拾取' -srcfolder "$staging_dir/dmg" -format UDZO "$staging_dir/$asset_name.dmg"
 hdiutil verify "$staging_dir/$asset_name.dmg"
 mv -f "$staging_dir/$asset_name.zip" "$project_dir/dist/$asset_name.zip"
 mv -f "$staging_dir/$asset_name.dmg" "$project_dir/dist/$asset_name.dmg"

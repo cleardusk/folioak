@@ -87,6 +87,7 @@ actor MockTransport: HTTPTransport {
 struct CoreTests {
     static func main() async {
         do {
+            if CommandLine.arguments.contains("--preview-230") { try renderMediaSnapshots(); return }
             if CommandLine.arguments.contains("--ui-only") {
                 try sidebarMotionTests()
                 try themeTests()
@@ -105,6 +106,8 @@ struct CoreTests {
             defer { try? FileManager.default.removeItem(at: root) }
             let pdf = root.appendingPathComponent("sample.pdf")
             try createPDF(at: pdf)
+            try await mediaTests(root: root)
+            if CommandLine.arguments.contains("--media-only") { return }
             try parseTests()
             try await huggingFaceTests(root: root, pdf: pdf)
             try await githubPDFTests(root: root, pdf: pdf)
@@ -525,7 +528,7 @@ struct CoreTests {
         paused.start()
         try await waitForQueue(paused)
         try expect(paused.items.map(\.state) == [.paused, .paused] && paused.retryCount == 2, "rate-limit exhaustion pauses the entire queue")
-        try expect(paused.input == "2501.12345\n2501.12345v2" && paused.summary.contains("2 篇待重试") && paused.items[0].error?.contains("后重试") == true, "paused queue preserves inputs and gives a resume time")
+        try expect(paused.input == "2501.12345\n2501.12345v2" && paused.summary.contains("2 项待重试") && paused.items[0].error?.contains("后重试") == true, "paused queue preserves inputs and gives a resume time")
         paused.retry()
         try await waitForQueue(paused)
         let pausedCalls = await (throttled.metadataCalls, throttled.pdfCalls)
@@ -728,7 +731,7 @@ struct CoreTests {
         }
         settle()
         guard let editor = findEditor(view), let layout = editor.layoutManager, let container = editor.textContainer else { throw TestFailure.failed("native input text layout missing") }
-        try expect(editor.frame.width > 500 && editor.frame.height >= 104, "input document must fill scroll area")
+        try expect(editor.frame.width > 500 && editor.frame.height >= (editor.enclosingScrollView?.contentSize.height ?? 62), "input document must fill scroll area")
         let placeholder = editor.placeholderFirstGlyphOrigin
         model.input = LinkTextView.example
         settle()
@@ -1019,7 +1022,7 @@ struct CoreTests {
         let suite = "arxiv-theme-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
-        try expect(DownloadModel(preferences: preferences).theme == .native, "theme migration default")
+        try expect(DownloadModel(preferences: preferences).theme == .graphite, "new installs use neutral graphite")
         preferences.set("unknown-future-theme", forKey: "theme")
         try expect(DownloadModel(preferences: preferences).theme == .native, "invalid theme fallback")
         print("PASS themes: 12 palettes contrast, migration and persistent selection")

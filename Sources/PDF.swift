@@ -5,13 +5,24 @@ import Darwin
 import dnssd
 
 enum DownloadSource: Hashable, Sendable {
-    case arxiv(ArxivReference), pdf(URL)
+    case arxiv(ArxivReference), pdf(URL), file(URL), media(URL)
     var reference: ArxivReference? { if case .arxiv(let ref) = self { return ref }; return nil }
-    var directURL: URL? { if case .pdf(let url) = self { return url }; return nil }
+    var directURL: URL? {
+        switch self { case .arxiv: return nil; case .pdf(let url), .file(let url), .media(let url): return url }
+    }
+    var isMedia: Bool { if case .media = self { return true }; return false }
+    var isPaper: Bool { switch self { case .arxiv, .pdf: return true; default: return false } }
+    var symbol: String {
+        if isPaper { return "doc.text" }
+        if isMedia { return "play.rectangle" }
+        let ext = directURL?.pathExtension.lowercased() ?? ""
+        if FileStorage.videoExtensions.contains(ext) { return "play.rectangle" }
+        return FileStorage.imageExtensions.contains(ext) ? "photo" : "waveform"
+    }
     var label: String {
         switch self {
         case .arxiv(let ref): return ref.identifier
-        case .pdf(let url): return (url.host ?? "PDF") + "/" + PaperMetadata.cleanTitle(url.lastPathComponent)
+        case .pdf(let url), .file(let url), .media(let url): return (url.host ?? "文件") + "/" + PaperMetadata.cleanTitle(url.lastPathComponent)
         }
     }
     var rateLimitKey: String { reference != nil ? "arxiv" : directURL!.host!.lowercased() }
@@ -60,6 +71,11 @@ enum DownloadSource: Hashable, Sendable {
         parts.fragment = nil; parts.scheme = "https"; parts.host = parts.host?.lowercased()
         if parts.port == 443 { parts.port = nil }
         guard let canonical = parts.url else { throw DownloadError.invalidLink(input) }
+        if MediaDownloader.hosts.contains(parts.host ?? "") {
+            guard MediaDownloader.accepts(canonical) else { throw DownloadError.metadata("请粘贴单个视频或 X 帖子的链接。") }
+            return .media(canonical)
+        }
+        if FileStorage.extensions.contains(canonical.pathExtension.lowercased()) { return .file(canonical) }
         return .pdf(canonical)
     }
 
@@ -200,6 +216,7 @@ struct SavedDocument: Sendable {
     let url: URL
     let alreadyExisted: Bool
     let pages: Int
+    var additionalURLs: [URL] = []
 }
 
 enum PDFStorage {
