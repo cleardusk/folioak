@@ -146,12 +146,19 @@ final class MediaOutput: @unchecked Sendable {
 }
 
 enum FileStorage {
+    struct Stream: Decodable, Equatable {
+        let codec_type: String?
+        let codec_name: String?
+    }
+    private struct Probe: Decodable { let streams: [Stream] }
     static let byteLimit: Int64 = 16 * 1024 * 1024 * 1024
     static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "tif", "tiff"]
     static let videoExtensions: Set<String> = ["mp4", "mov", "webm", "mkv"]
     static let extensions = imageExtensions.union(videoExtensions).union(["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus"])
 
-    static func validate(_ file: URL, extension ext: String) async throws {
+    @discardableResult
+    static func validate(_ file: URL, extension ext: String) async throws -> [Stream] {
+        var streams: [Stream] = []
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true,
               let size = values.fileSize, size > 0, Int64(size) <= byteLimit, extensions.contains(ext) else {
@@ -164,16 +171,16 @@ enum FileStorage {
             }
         } else {
             let tools = try MediaTools.installed(), output = MediaOutput()
-            let status = try await MediaProcess().run(try tools.executable("ffprobe"), arguments: ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", file.path], timeout: 30) {
+            let status = try await MediaProcess().run(try tools.executable("ffprobe"), arguments: ["-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", file.path], timeout: 30) {
                 if output.text.utf8.count < 64 * 1024 { output.text += $0 + "\n" }
             }
-            let object = try? JSONSerialization.jsonObject(with: Data(output.text.utf8)) as? [String: Any]
-            let streams = object?["streams"] as? [[String: Any]] ?? []
-            guard status == 0, streams.contains(where: { ["audio", "video"].contains($0["codec_type"] as? String ?? "") }) else {
+            streams = (try? JSONDecoder().decode(Probe.self, from: Data(output.text.utf8)).streams) ?? []
+            guard status == 0, streams.contains(where: { ["audio", "video"].contains($0.codec_type ?? "") }) else {
                 throw DownloadError.metadata("收到的内容不是有效音视频，未保存。")
             }
         }
         try Task.checkCancellation()
+        return streams
     }
 
     static func hash(_ file: URL) throws -> SHA256.Digest {
@@ -241,6 +248,36 @@ enum FileStorage {
 }
 
 enum MediaDownloader {
+    // Site manifests can omit codec names, causing a conservative MKV choice.
+    // Let the MP4 muxer decide using the downloaded streams, without re-encoding
+    // or dropping tracks. The original stays available until publication succeeds.
+    static func preferMP4(_ file: URL, tools: MediaTools, scratch: URL) async throws -> URL {
+        try Task.checkCancellation()
+        guard ["mkv", "webm", "mov"].contains(file.pathExtension.lowercased()) else { return file }
+        let originalStreams = try await FileStorage.validate(file, extension: file.pathExtension.lowercased())
+        guard originalStreams.contains(where: { $0.codec_type == "video" }) else { return file }
+        let candidate = scratch.appendingPathComponent(file.deletingPathExtension().lastPathComponent + ".mp4")
+        var keepCandidate = false
+        defer { if !keepCandidate { try? FileManager.default.removeItem(at: candidate) } }
+        do {
+            try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+            let status = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: [
+                "-nostdin", "-v", "error", "-xerror", "-n", "-i", file.path, "-map", "0", "-c", "copy",
+                "-movflags", "+faststart", "-f", "mp4", candidate.path
+            ]) { _ in }
+            if status == 0 {
+                let convertedStreams = try await FileStorage.validate(candidate, extension: "mp4")
+                if convertedStreams == originalStreams {
+                    keepCandidate = true
+                    return candidate
+                }
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch { /* A usable original is preferable to a failed optional remux. */ }
+        try Task.checkCancellation()
+        return file
+    }
+
     static func validatedOutputs(_ files: [URL], in folder: URL) throws -> [URL] {
         let expected = folder.resolvingSymlinksInPath().standardizedFileURL.path
         return try files.map { file in
@@ -298,7 +335,14 @@ enum MediaDownloader {
         }
         guard status == 0, !output.files.isEmpty else { throw DownloadError.metadata(failure(output.error)) }
         event(.validating)
-        let files = try validatedOutputs(output.files, in: folder)
+        var files = try validatedOutputs(output.files, in: folder)
+        let scratch = folder.appendingPathComponent(".mp4-" + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        if format == .automatic {
+            for index in files.indices {
+                files[index] = try await preferMP4(files[index], tools: tools, scratch: scratch.appendingPathComponent(String(index)))
+            }
+        }
         let result = try await FileStorage.publish(files, title: output.title, to: directory, organizeByType: organizeByType)
         // Keep the coordination inode; remove only our completed media files.
         for file in output.files { try? FileManager.default.removeItem(at: file) }

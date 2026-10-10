@@ -302,7 +302,33 @@ extension CoreTests {
         probe.entries = [ActivityEntry(level: .info, message: "短日志", subject: nil, itemID: nil)]
         await settle()
         try expect(observer(view).flatMap(\.scroll).map { !LogScrollPosition(scroll: $0).canScroll } == true, "short list needs no scroll control")
-        print("PASS logs: 1500 variable-height rows, tail following, manual reading, empty-search/filter restoration, short list")
+        // Exercise native animation frames and cancellation independently of SwiftUI rendering.
+        let native = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 400))
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 2500))
+        let driver = LogScrollObserver.Observer(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        document.addSubview(driver); native.documentView = document; window.contentView = native
+        driver.connect(); driver.jump(toBottom: true, animated: false)
+        let bottom = native.contentView.bounds.minY
+        driver.jump(toBottom: false, animated: true)
+        try await Task.sleep(nanoseconds: 90_000_000)
+        let middle = native.contentView.bounds.minY
+        try expect(middle > 2 && middle < bottom - 2, "log jump renders intermediate frames")
+        driver.jump(toBottom: true, animated: true)
+        try expect(abs(native.contentView.bounds.minY - middle) < 2, "reversed log animation starts at the displayed position")
+        try await Task.sleep(nanoseconds: 350_000_000)
+        try expect(LogScrollPosition(scroll: native).atBottom, "reversed animation reaches exact tail")
+        driver.jump(toBottom: false, animated: true)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        userScroll(native, y: 200)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        try expect(abs(native.contentView.bounds.minY - 200) < 2, "manual scrolling cancels an in-flight jump")
+        driver.jump(toBottom: false, animated: false)
+        try expect(LogScrollPosition(scroll: native).atTop, "reduced motion jumps directly to exact top")
+        driver.jump(toBottom: true, animated: true)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        driver.finishTransition(toBottom: true)
+        try expect(LogScrollPosition(scroll: native).atBottom, "enabling reduced motion settles an in-flight jump immediately")
+        print("PASS logs: 1500 variable-height rows, tail following, manual reading, empty-search/filter restoration, animation reversal/cancellation and reduced motion")
     }
 
     @MainActor static func inputColorTransitionTests() async throws {

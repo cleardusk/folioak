@@ -105,7 +105,75 @@ extension CoreTests {
         try expect(try CLIOptions.parse([source.webURL.absoluteString, "--audio"]).mediaFormat == .audio, "CLI audio option")
         try await categoryDestinationTests(root: root, image: image)
         try await mediaLibraryTests(root: root, image: image)
+        try await mediaContainerTests(root: root)
         print("PASS media: routing, native transfer, reuse, invalid response, atomic group rollback, safe process arguments, child cancellation, restoration and paper isolation")
+    }
+
+    @MainActor static func mediaContainerTests(root: URL) async throws {
+        let tools = try MediaTools.installed()
+        let fixtures = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Tests/Fixtures/Media")
+        let folder = root.appendingPathComponent("containers")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let original = folder.appendingPathComponent("中文视频.mkv")
+        let status = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: [
+            "-v", "error", "-i", fixtures.appendingPathComponent("h264.mp4").path,
+            "-i", fixtures.appendingPathComponent("tone.m4a").path, "-map", "0:v", "-map", "1:a", "-c", "copy", original.path
+        ]) { _ in }
+        try expect(status == 0, "H.264/AAC MKV fixture")
+        let originalStreams = try await FileStorage.validate(original, extension: "mkv")
+        try expect(originalStreams.map(\.codec_name) == ["h264", "aac"], "fixture matches X H.264/AAC streams")
+        let originalBytes = try Data(contentsOf: original)
+        let preferred = try await MediaDownloader.preferMP4(original, tools: tools, scratch: folder.appendingPathComponent("preferred"))
+        try expect(preferred.lastPathComponent == "中文视频.mp4", "compatible video prefers MP4 without changing its name")
+        func packets(_ file: URL) async throws -> [String] {
+            let output = ProcessProbe()
+            let status = try await MediaProcess().run(try tools.executable("ffprobe"), arguments: [
+                "-v", "error", "-show_packets", "-show_entries", "packet=stream_index,data_hash", "-show_data_hash", "sha256", "-of", "json", file.path
+            ]) { output.append($0) }
+            try expect(status == 0, "packet hashes readable")
+            let data = try JSONSerialization.jsonObject(with: Data(output.text.utf8)) as! [String: Any]
+            return (data["packets"] as! [[String: Any]]).map { "\($0["stream_index"]!):\($0["data_hash"]!)" }.sorted()
+        }
+        let before = try await packets(original), after = try await packets(preferred)
+        try expect(!before.isEmpty && before == after, "MP4 retains every original video/audio packet without re-encoding")
+        try expect(try Data(contentsOf: original) == originalBytes, "remux leaves original intact until publication")
+        let blockedScratch = folder.appendingPathComponent("blocked")
+        try Data("occupied".utf8).write(to: blockedScratch)
+        try expect(try await MediaDownloader.preferMP4(original, tools: tools, scratch: blockedScratch) == original,
+                   "optional remux filesystem failure preserves a usable original")
+        try expect(try Data(contentsOf: original) == originalBytes, "fallback leaves original bytes intact")
+        try expect(try await MediaDownloader.preferMP4(preferred, tools: tools, scratch: folder.appendingPathComponent("unchanged")) == preferred, "existing MP4 is untouched")
+        let other = try await MediaDownloader.preferMP4(original, tools: tools, scratch: folder.appendingPathComponent("other-input"))
+        try expect(other != preferred && other.lastPathComponent == preferred.lastPathComponent, "same basename inputs have independent remux outputs")
+        let audio = fixtures.appendingPathComponent("tone.m4a")
+        try expect(try await MediaDownloader.preferMP4(audio, tools: tools, scratch: folder.appendingPathComponent("audio")) == audio, "audio remains in its original container")
+
+        let attachment = folder.appendingPathComponent("note.txt")
+        try Data("Keep all tracks and attachments".utf8).write(to: attachment)
+        let incompatible = folder.appendingPathComponent("with-attachment.mkv")
+        let attached = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: [
+            "-v", "error", "-i", original.path, "-map", "0", "-c", "copy", "-attach", attachment.path,
+            "-metadata:s:t", "mimetype=text/plain", incompatible.path
+        ]) { _ in }
+        try expect(attached == 0, "container with a non-MP4 attachment")
+        let fallback = folder.appendingPathComponent("fallback")
+        try expect(try await MediaDownloader.preferMP4(incompatible, tools: tools, scratch: fallback) == incompatible, "unsupported MP4 streams preserve the full original container")
+        try expect(try FileManager.default.contentsOfDirectory(atPath: fallback.path).isEmpty, "failed remux removes its partial output")
+
+        let slowTools = folder.appendingPathComponent("slow-tools")
+        try FileManager.default.createDirectory(at: slowTools, withIntermediateDirectories: true)
+        let shim = slowTools.appendingPathComponent("ffmpeg")
+        try Data("#!/bin/sh\nfor last do :; done\nprintf partial > \"$last\"\nsleep 30\n".utf8).write(to: shim)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shim.path)
+        let cancelFolder = folder.appendingPathComponent("cancel"), partial = cancelFolder.appendingPathComponent("中文视频.mp4")
+        let task = Task { try await MediaDownloader.preferMP4(original, tools: MediaTools(directory: slowTools), scratch: cancelFolder) }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: partial.path) { try await Task.sleep(nanoseconds: 20_000_000) }
+        try expect(FileManager.default.fileExists(atPath: partial.path), "remux process began writing output")
+        let cancelledAt = Date(); task.cancel()
+        do { _ = try await task.value; throw TestFailure.failed("cancelled remux completed") } catch is CancellationError {}
+        try expect(Date().timeIntervalSince(cancelledAt) < 4 && !FileManager.default.fileExists(atPath: partial.path), "remux cancellation stops the process and removes partial MP4")
+        try expect(try Data(contentsOf: original) == originalBytes, "cancelled remux preserves the original")
+        print("PASS MP4: packet-identical remux, multi-input isolation, original/audio preservation, unsupported-track fallback and cancellable partial cleanup")
     }
 
     @MainActor static func categoryDestinationTests(root: URL, image: URL) async throws {

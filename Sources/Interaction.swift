@@ -155,35 +155,54 @@ struct LogScrollPosition: Equatable {
     var atTop = true
     var atBottom = false
     var canScroll = false
-    var contentHeight: CGFloat = 0
-    var viewportHeight: CGFloat = 0
     init() {}
     init(scroll: NSScrollView) {
         let visible = scroll.contentView.bounds
         let content = scroll.documentView?.bounds ?? .zero
-        contentHeight = content.height
-        viewportHeight = visible.height
         canScroll = content.height > visible.height + 2
         atTop = visible.minY <= content.minY + 2
         atBottom = visible.maxY >= content.maxY - 2
     }
 }
 
-// Observe actual clip bounds; programmatic animation must not be mistaken for
-// the user leaving the tail. No timers or global event monitors are installed.
+// A single native owner avoids LazyVStack's estimated scrollTo anchors on macOS 15.
+// Programmatic animation must not be mistaken for the user leaving the tail.
 struct LogScrollObserver: NSViewRepresentable {
+    let followingLatest: Bool
+    let request: Int
+    let destination: Bool?
+    let animated: Bool
     let changed: (LogScrollPosition) -> Void
     let userScrolled: (LogScrollPosition) -> Void
     func makeNSView(context: Context) -> Observer { Observer() }
     func updateNSView(_ view: Observer, context: Context) {
-        view.changed = changed; view.userScrolled = userScrolled; view.connect()
+        view.changed = changed; view.userScrolled = userScrolled
+        view.followingLatest = followingLatest
+        view.connect()
+        if view.request != request {
+            view.request = request
+            view.jump(toBottom: destination ?? true, animated: animated && destination != nil)
+        } else if !animated {
+            view.finishTransition(toBottom: destination ?? followingLatest)
+        }
     }
     final class Observer: NSView {
         var changed: ((LogScrollPosition) -> Void)?
         var userScrolled: ((LogScrollPosition) -> Void)?
         weak var scroll: NSScrollView?
+        var followingLatest = true
+        var request: Int?
         private var observing: [NSObjectProtocol] = []
         private var queued = false
+        private var transition: ScrollTransition?
+        private var generation = 0
+        private final class ScrollTransition: NSAnimation {
+            var apply: ((CGFloat) -> Void)?
+            override var runLoopModesForAnimating: [RunLoop.Mode]? { [.common, .eventTracking] }
+            override var currentProgress: NSAnimation.Progress {
+                didSet { apply?(CGFloat(currentValue)) }
+            }
+        }
         override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); connect() }
         override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); connect() }
         func connect() {
@@ -196,21 +215,66 @@ struct LogScrollObserver: NSViewRepresentable {
             for (name, object) in [(NSView.boundsDidChangeNotification, clip as NSView), (NSView.frameDidChangeNotification, enclosingScrollView.documentView ?? clip)] {
                 observing.append(NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in self?.report() })
             }
-            for name in [NSScrollView.didLiveScrollNotification, NSScrollView.didEndLiveScrollNotification] {
+            for name in [NSScrollView.willStartLiveScrollNotification, NSScrollView.didLiveScrollNotification, NSScrollView.didEndLiveScrollNotification] {
                 observing.append(NotificationCenter.default.addObserver(forName: name, object: enclosingScrollView, queue: .main) { [weak self] _ in
                     guard let self, let scroll = self.scroll else { return }
-                    self.userScrolled?(LogScrollPosition(scroll: scroll)); self.report()
+                    self.stopTransition()
+                    let metrics = LogScrollPosition(scroll: scroll)
+                    self.followingLatest = metrics.atBottom
+                    self.userScrolled?(metrics); self.report()
                 })
             }
             report()
+        }
+        private func endpoint(_ toBottom: Bool, in scroll: NSScrollView) -> CGFloat {
+            let bounds = scroll.documentView?.bounds ?? .zero
+            return toBottom ? max(bounds.minY, bounds.maxY - scroll.contentView.bounds.height) : bounds.minY
+        }
+        private func move(to y: CGFloat, in scroll: NSScrollView) {
+            let clip = scroll.contentView
+            clip.scroll(to: NSPoint(x: clip.bounds.minX, y: y))
+            scroll.reflectScrolledClipView(clip)
+        }
+        private func stopTransition() {
+            generation += 1
+            transition?.stop(); transition = nil
+        }
+        func finishTransition(toBottom: Bool) {
+            guard transition != nil else { return }
+            jump(toBottom: toBottom, animated: false)
+        }
+        func jump(toBottom: Bool, animated: Bool) {
+            stopTransition()
+            followingLatest = toBottom
+            guard let scroll else { return }
+            let start = scroll.contentView.bounds.minY
+            guard animated, abs(endpoint(toBottom, in: scroll) - start) > 2 else {
+                move(to: endpoint(toBottom, in: scroll), in: scroll); report(); return
+            }
+            let token = generation
+            let motion = ScrollTransition(duration: 0.28, animationCurve: .easeInOut)
+            motion.animationBlockingMode = .nonblocking
+            motion.apply = { [weak self] progress in
+                guard let self, self.generation == token, let scroll = self.scroll else { return }
+                // Resolve the destination each frame as lazy rows refine their height.
+                self.move(to: start + (self.endpoint(toBottom, in: scroll) - start) * progress, in: scroll)
+                if progress >= 1 { self.transition = nil; self.report() }
+            }
+            transition = motion
+            motion.start()
         }
         private func report() {
             guard !queued else { return }; queued = true
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }; self.queued = false
-                if let scroll = self.scroll { self.changed?(LogScrollPosition(scroll: scroll)) }
+                if let scroll = self.scroll {
+                    if self.followingLatest && self.transition == nil && !LogScrollPosition(scroll: scroll).atBottom {
+                        self.move(to: self.endpoint(true, in: scroll), in: scroll)
+                    }
+                    self.changed?(LogScrollPosition(scroll: scroll))
+                }
             }
         }
-        deinit { observing.forEach(NotificationCenter.default.removeObserver) }
+        deinit { transition?.stop(); observing.forEach(NotificationCenter.default.removeObserver) }
     }
 }

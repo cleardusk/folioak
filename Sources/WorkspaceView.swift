@@ -629,91 +629,75 @@ struct LogContent: View {
     @WorkspaceViewState private var position = LogScrollPosition()
     @WorkspaceViewState private var followingLatest = true
     @WorkspaceViewState private var requestedBottom: Bool?
+    @WorkspaceViewState private var scrollRequest = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var pointsUp: Bool { requestedBottom ?? position.atBottom }
 
     var body: some View {
         let headers = LogHeading.headings(entries)
-        ScrollViewReader { proxy in
-            VStack(spacing: 16) {
-                if hasLogs {
-                    HStack(spacing: 4) {
-                        FilterTabs(options: [nil] + ActivityLevel.allCases.map(Optional.some), selection: $level, title: { $0?.label ?? "全部" }, palette: palette)
-                        Spacer()
-                        if position.canScroll && !entries.isEmpty {
-                            Button { jump(toBottom: !pointsUp, proxy: proxy) } label: {
-                                Image(systemName: "arrow.down.to.line")
-                                    .rotationEffect(.degrees(pointsUp ? 180 : 0))
-                                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: pointsUp)
-                            }.buttonStyle(RoundButtonStyle(palette: palette))
-                                .help(pointsUp ? "回到最早日志" : "前往最新日志")
-                                .accessibilityLabel(pointsUp ? "回到最早日志" : "前往最新日志")
-                        }
-                    }.frame(height: 36)
-                }
-                if entries.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "text.alignleft").font(.system(size: 28, weight: .light))
-                        Text(query.isEmpty && level == nil ? "暂无日志" : "没有匹配的日志").font(.system(size: 13))
-                    }.foregroundStyle(secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            Color.clear.frame(height: 1).id("log-start")
-                            ForEach(entries) { entry in
-                                VStack(alignment: .leading, spacing: 0) {
-                                    if let group = headers[entry.id], group.subject != nil || group.date != nil {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            if let date = group.date {
-                                                Text(date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
-                                            }
-                                            if let subject = group.subject {
-                                                Text(subject).font(.system(size: 12, weight: .medium)).lineLimit(1).help(subject).textSelection(.enabled)
-                                                    .padding(.leading, LogRow.messageInset)
-                                            }
-                                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 8)
-                                    }
-                                    LogRow(entry: entry, palette: palette)
-                                }.id(entry.id)
-                            }
-                            Color.clear.frame(height: 1).id("log-end")
-                        }.background(LogScrollObserver(changed: { metrics in
-                            let layoutChanged = abs(position.contentHeight - metrics.contentHeight) > 0.5 || abs(position.viewportHeight - metrics.viewportHeight) > 0.5
-                            position = metrics
-                            if requestedBottom == true && metrics.atBottom || requestedBottom == false && metrics.atTop { requestedBottom = nil }
-                            // Lazy rows refine their height after the first scroll request.
-                            // Keep the tail aligned only while the user intends to follow it.
-                            if layoutChanged && followingLatest && !metrics.atBottom {
-                                withAnimation(requestedBottom == true && !reduceMotion ? .easeInOut(duration: 0.28) : nil) {
-                                    proxy.scrollTo("log-end", anchor: .bottom)
+        VStack(spacing: 16) {
+            if hasLogs {
+                HStack(spacing: 4) {
+                    FilterTabs(options: [nil] + ActivityLevel.allCases.map(Optional.some), selection: $level, title: { $0?.label ?? "全部" }, palette: palette)
+                    Spacer()
+                    if position.canScroll && !entries.isEmpty {
+                        Button { jump(toBottom: !pointsUp) } label: {
+                            Image(systemName: "arrow.down.to.line")
+                                .rotationEffect(.degrees(pointsUp ? 180 : 0))
+                                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: pointsUp)
+                        }.buttonStyle(RoundButtonStyle(palette: palette))
+                            .help(pointsUp ? "回到最早日志" : "前往最新日志")
+                            .accessibilityLabel(pointsUp ? "回到最早日志" : "前往最新日志")
+                    }
+                }.frame(height: 36)
+            }
+            if entries.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "text.alignleft").font(.system(size: 28, weight: .light))
+                    Text(query.isEmpty && level == nil ? "暂无日志" : "没有匹配的日志").font(.system(size: 13))
+                }.foregroundStyle(secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(entries) { entry in
+                            VStack(alignment: .leading, spacing: 0) {
+                                if let group = headers[entry.id], group.subject != nil || group.date != nil {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        if let date = group.date {
+                                            Text(date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
+                                        }
+                                        if let subject = group.subject {
+                                            Text(subject).font(.system(size: 12, weight: .medium)).lineLimit(1).help(subject).textSelection(.enabled)
+                                                .padding(.leading, LogRow.messageInset)
+                                        }
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 8)
                                 }
-                            }
-                        }, userScrolled: { metrics in
-                            requestedBottom = nil
-                            followingLatest = metrics.atBottom
-                        }))
-                    }
-                    .onAppear { proxy.scrollTo("log-end", anchor: .bottom) }
-                    .onChange(of: entries.last?.id) { _ in
-                        if followingLatest { proxy.scrollTo("log-end", anchor: .bottom) }
-                    }
-
+                                LogRow(entry: entry, palette: palette)
+                            }.id(entry.id)
+                        }
+                    }.background(LogScrollObserver(followingLatest: followingLatest, request: scrollRequest,
+                                                   destination: requestedBottom, animated: !reduceMotion, changed: { metrics in
+                        position = metrics
+                        if requestedBottom == true && metrics.atBottom || requestedBottom == false && metrics.atTop { requestedBottom = nil }
+                    }, userScrolled: { metrics in
+                        requestedBottom = nil
+                        followingLatest = metrics.atBottom
+                    }))
                 }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onChange(of: query) { _ in reset(proxy) }
-                .onChange(of: level) { _ in reset(proxy) }
-        }
+
+            }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: query) { _ in reset() }
+            .onChange(of: level) { _ in reset() }
     }
-    private func reset(_ proxy: ScrollViewProxy) {
+    private func reset() {
         followingLatest = true; requestedBottom = nil; position = LogScrollPosition()
-        proxy.scrollTo("log-end", anchor: .bottom)
+        scrollRequest += 1
     }
-    private func jump(toBottom: Bool, proxy: ScrollViewProxy) {
+    private func jump(toBottom: Bool) {
         followingLatest = toBottom; requestedBottom = toBottom
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) {
-            proxy.scrollTo(toBottom ? "log-end" : "log-start", anchor: toBottom ? .bottom : .top)
-        }
+        scrollRequest += 1
     }
 }
 
