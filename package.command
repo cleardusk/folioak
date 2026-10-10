@@ -38,6 +38,13 @@ test "$("$staging_dir/cli-unpacked/leafpick/leafpick" --version)" = "$version"
 ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$staging_dir/$asset_name.zip"
 ditto -x -k "$staging_dir/$asset_name.zip" "$staging_dir/unpacked"
 codesign --verify --deep --strict "$staging_dir/unpacked/Leafpick.app"
+for media_dir in "$staging_dir/unpacked/Leafpick.app/Contents/Resources/media-tools" "$staging_dir/cli-unpacked/leafpick/media-tools"; do
+  for binary in "$media_dir/ffmpeg" "$media_dir/ffprobe" "$media_dir/"*.dylib; do
+    codesign --verify --strict "$binary"
+  done
+  "$media_dir/ffmpeg" -version > /dev/null
+  "$media_dir/ffprobe" -v error -show_entries stream=codec_name -of json Tests/Fixtures/Media/tone.m4a > /dev/null
+done
 xcrun lipo "$staging_dir/unpacked/Leafpick.app/Contents/MacOS/LeafpickApp" -verify_arch arm64
 bundled_cli="$staging_dir/unpacked/Leafpick.app/Contents/MacOS/arxiv-download"
 codesign --verify --strict "$bundled_cli"
@@ -59,7 +66,8 @@ precondition(report["schema"] as? Int == 1 && rows.count == 1 && rows[0]["status
 mkdir -p "$staging_dir/dmg"
 ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/Leafpick.app"
 ln -s /Applications "$staging_dir/dmg/Applications"
-hdiutil create -volname 'Leafpick 拾取' -srcfolder "$staging_dir/dmg" -format UDZO "$staging_dir/$asset_name.dmg"
+# LZMA disk images are supported since macOS 10.15; Leafpick requires macOS 13.
+hdiutil create -volname 'Leafpick 拾取' -srcfolder "$staging_dir/dmg" -format ULMO "$staging_dir/$asset_name.dmg"
 hdiutil verify "$staging_dir/$asset_name.dmg"
 mv -f "$staging_dir/$asset_name.zip" "$project_dir/dist/$asset_name.zip"
 mv -f "$staging_dir/$asset_name.dmg" "$project_dir/dist/$asset_name.dmg"

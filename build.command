@@ -22,14 +22,18 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 cp -R Resources/en.lproj Resources/zh-Hans.lproj "$staged_app/Contents/Resources/"
 cp -R build/media-tools "$staged_app/Contents/Resources/media-tools"
+for library in "$staged_app/Contents/Resources/media-tools/"*.dylib; do
+  codesign --force --options runtime --timestamp=none --sign - "$library"
+done
 for tool in ffmpeg ffprobe; do
-  codesign --force --options runtime --timestamp=none --sign - "$staged_app/Contents/Resources/media-tools/$tool"
+  codesign --force --options runtime --entitlements Resources/Downloader.entitlements --timestamp=none --sign - "$staged_app/Contents/Resources/media-tools/$tool"
 done
 codesign --force --options runtime --entitlements Resources/Downloader.entitlements --timestamp=none --sign - "$staged_app/Contents/Resources/media-tools/yt-dlp"
 codesign --force --options runtime --entitlements Resources/Deno.entitlements --timestamp=none --sign - "$staged_app/Contents/Resources/media-tools/deno"
 "$staged_app/Contents/Resources/media-tools/deno" eval 'console.log("JS runtime ready")'
 "$staged_app/Contents/Resources/media-tools/yt-dlp" --ignore-config --version
 "$staged_app/Contents/Resources/media-tools/ffmpeg" -version > /dev/null
+"$staged_app/Contents/Resources/media-tools/ffprobe" -version > /dev/null
 if [[ -f Resources/AppIcon.icns ]]; then
   cp Resources/AppIcon.icns "$staged_app/Contents/Resources/AppIcon.icns"
 fi

@@ -50,7 +50,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/media-tools
-          key: media-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.media-key }}-${{ hashFiles('Tools/prepare-media.py', 'Resources/MediaComponents.md') }}
+          key: media-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.media-key }}-${{ hashFiles('Tools/prepare-media.py', 'Resources/MediaComponents.md', 'Resources/Downloader.entitlements') }}
           # Use an exact recipe match; prepare-media.py still verifies file hashes.
       - name: Prepare verified media tools
         run: python3 Tools/prepare-media.py

@@ -160,13 +160,10 @@ extension CoreTests {
         let explicitRows = (try JSONSerialization.jsonObject(with: Data(explicitConsole.output.utf8)) as! [String: Any])["results"] as! [[String: Any]]
         try expect(explicitCode == 0 && URL(fileURLWithPath: explicitRows[0]["path"] as! String).deletingLastPathComponent().path == explicit.path
                    && DownloadPreferences(preferences).directory == folder, "CLI -o remains exact and does not change root preference")
-        let tools = try MediaTools.installed(), audio = root.appendingPathComponent("sample.wav"), video = root.appendingPathComponent("sample.mp4")
-        let pcm = root.appendingPathComponent("silence.pcm"), frame = root.appendingPathComponent("frame.yuv")
-        try Data(repeating: 0, count: 800).write(to: pcm)
-        try Data(repeating: 128, count: 384).write(to: frame)
-        let audioStatus = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: ["-v", "error", "-f", "s16le", "-ar", "8000", "-ac", "1", "-i", pcm.path, audio.path]) { _ in }
-        let videoStatus = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: ["-v", "error", "-f", "rawvideo", "-pixel_format", "yuv420p", "-video_size", "16x16", "-i", frame.path, "-frames:v", "1", "-c:v", "mpeg4", video.path]) { _ in }
-        try expect(audioStatus == 0 && videoStatus == 0, "valid media fixtures created")
+        let fixtures = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Tests/Fixtures/Media")
+        let audio = root.appendingPathComponent("sample.wav"), video = root.appendingPathComponent("sample.mp4")
+        try FileManager.default.copyItem(at: fixtures.appendingPathComponent("tone.wav"), to: audio)
+        try FileManager.default.copyItem(at: fixtures.appendingPathComponent("video.mp4"), to: video)
         let published = try await FileStorage.publish([image, audio, video], title: nil, to: folder, organizeByType: true)
         try expect(([published.url] + published.additionalURLs).map { $0.deletingLastPathComponent().lastPathComponent } == ["Images", "Audio", "Videos"], "actual media outputs route by final type including mixed groups")
         let blocked = root.appendingPathComponent("blocked-group")
