@@ -93,6 +93,7 @@ struct CoreTests {
                 try inputLayoutTests()
                 try windowChromeTests()
                 try filterRenderingTests()
+                try await listFocusTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
             }
@@ -125,6 +126,7 @@ struct CoreTests {
             try inputLayoutTests()
             try windowChromeTests()
             try filterRenderingTests()
+            try await listFocusTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
             if CommandLine.arguments.contains("--stress") {
                 try await resourceTests(root: root, pdf: pdf)

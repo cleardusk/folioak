@@ -3,27 +3,38 @@ import SwiftUI
 
 struct PaperListKeyboard: NSViewRepresentable {
     enum Action { case up, down, preview, open, diagnostics }
-    let request: UUID
+    let request: UUID?
+    let didFocus: (UUID) -> Void
     let action: (Action) -> Void
-    func makeNSView(context: Context) -> KeyView { KeyView(request: request, action: action) }
+    func makeNSView(context: Context) -> KeyView { KeyView(request: request, didFocus: didFocus, action: action) }
     func updateNSView(_ view: KeyView, context: Context) {
         view.action = action
+        view.didFocus = didFocus
         guard view.request != request else { return }
         view.request = request
-        DispatchQueue.main.async { [weak view] in
-            guard let view, view.request == request else { return }
-            view.window?.makeFirstResponder(view)
-        }
+        view.focusIfRequested()
     }
     final class KeyView: NSView {
-        var request: UUID
+        var request: UUID?
+        private var fulfilledRequest: UUID?
+        var didFocus: (UUID) -> Void
         var action: (Action) -> Void
-        init(request: UUID, action: @escaping (Action) -> Void) {
-            self.request = request; self.action = action
+        init(request: UUID?, didFocus: @escaping (UUID) -> Void, action: @escaping (Action) -> Void) {
+            self.request = request; self.didFocus = didFocus; self.action = action
             super.init(frame: .zero)
             setAccessibilityLabel("论文列表，方向键选择，空格预览，Return 打开，Command I 查看详情")
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); focusIfRequested() }
+        func focusIfRequested() {
+            guard let request, request != fulfilledRequest else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.request == request, self.fulfilledRequest != request,
+                      let window = self.window, window.makeFirstResponder(self) else { return }
+                self.fulfilledRequest = request
+                self.didFocus(request)
+            }
+        }
         override var acceptsFirstResponder: Bool { true }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func keyDown(with event: NSEvent) {

@@ -20,6 +20,80 @@ private struct MovingFilterProbe: View {
 }
 
 extension CoreTests {
+    @MainActor static func listFocusTests() async throws {
+        _ = NSApplication.shared
+        let suite = "arxiv-list-focus-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        model.history = [
+            DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"), state: .saved, finishedAt: Date()),
+            DownloadItem(original: "2003.07733", reference: try ArxivReference.parse("2003.07733"), state: .saved, finishedAt: Date().addingTimeInterval(-1))
+        ]
+        model.items = model.history
+        model.record(.info, "下载中", item: model.history[1])
+        let view = NSHostingView(rootView: DownloaderView(model: model, page: .logs))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { window.orderOut(nil) }
+        func settle() async {
+            view.layoutSubtreeIfNeeded()
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            view.layoutSubtreeIfNeeded()
+        }
+        func searchField(_ root: NSView) -> NSTextField? {
+            if let field = root as? NSTextField, field.placeholderString == "搜索" { return field }
+            return root.subviews.lazy.compactMap { searchField($0) }.first
+        }
+        func search(_ text: String) async throws -> NSTextView {
+            guard let field = searchField(view), window.makeFirstResponder(field), let editor = field.currentEditor() as? NSTextView else {
+                throw TestFailure.failed("search editor available")
+            }
+            editor.selectAll(nil); editor.insertText(text, replacementRange: editor.selectedRange())
+            await settle()
+            return editor
+        }
+        await settle()
+        _ = try await search("2003.07733")
+        model.listRequest = UUID()
+        await settle()
+        for _ in 0..<10 where !(window.firstResponder is PaperListKeyboard.KeyView) { await settle() }
+        func key(_ code: UInt16, _ text: String, _ modifiers: NSEvent.ModifierFlags = []) throws {
+            guard let keys = window.firstResponder as? PaperListKeyboard.KeyView else {
+                throw TestFailure.failed("paper list must be first responder, got \(String(describing: window.firstResponder))")
+            }
+            keys.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!)
+        }
+        try key(34, "i", .command)
+        try expect(model.diagnosticItem?.id == model.library.first?.id, "cross-page focus selects the first paper after navigation resets selection")
+        model.diagnosticItem = nil
+        try key(125, "\u{F701}")
+        await settle()
+        try key(34, "i", .command)
+        try expect(model.diagnosticItem?.id == model.library.last?.id, "arrow navigation remains available after cross-page focus")
+        model.diagnosticItem = nil
+        let editor = try await search("no-matching-paper")
+        editor.selectAll(nil); editor.insertText("", replacementRange: editor.selectedRange())
+        await settle()
+        try expect(window.firstResponder === editor, "restoring search results does not replay a consumed list focus request")
+        model.focusInput()
+        await settle()
+        try expect(window.firstResponder is LinkTextView, "Command L moves focus back to the input without list focus stealing it")
+        model.listRequest = UUID()
+        await settle()
+        try key(34, "i", .command)
+        model.diagnosticItem = nil
+        model.focusInput()
+        await settle()
+        try expect(window.firstResponder is LinkTextView, "same-page Command L wins over list focus with populated download rows")
+        model.items = []
+        await settle()
+        model.listRequest = UUID()
+        await settle()
+        try expect(!(window.firstResponder is PaperListKeyboard.KeyView), "empty list does not create a stale keyboard responder")
+        print("PASS keyboard focus: filtered logs to list, selection, arrows, search remount and input return")
+    }
+
     @MainActor static func filterRenderingTests() throws {
         _ = NSApplication.shared
         let probe = FilterLayoutProbe()

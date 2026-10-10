@@ -71,7 +71,8 @@ struct DownloaderView: View {
     @WorkspaceViewState private var followLogs = true
     @WorkspaceViewState private var dropTargeted = false
     @WorkspaceViewState private var selectedID: UUID?
-    @WorkspaceViewState private var listFocus = UUID()
+    @WorkspaceViewState private var listFocus: UUID?
+    @WorkspaceViewState private var focusListOnArrival = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
@@ -108,17 +109,29 @@ struct DownloaderView: View {
         .background(ThemePalette.color(palette.canvas))
         .ignoresSafeArea(.container, edges: .top)
         .onReceive(model.$listRequest.dropFirst()) { _ in
-            if page == .logs { page = .library }
-            if selectedID == nil { selectedID = visibleItems.first?.id }
-            inputFocused = false; listFocus = UUID()
+            if page == .logs { focusListOnArrival = true; page = .library }
+            else { focusList() }
         }
-        .onReceive(model.$editRequest.dropFirst()) { _ in page = .downloads; inputFocused = true }
-        .onChange(of: page) { _ in query = ""; selectedID = nil }
-        .onChange(of: visibleItems.map(\.id)) { ids in if let selectedID, !ids.contains(selectedID) { self.selectedID = nil } }
+        .onReceive(model.$editRequest.dropFirst()) { _ in
+            listFocus = nil; focusListOnArrival = false; page = .downloads; inputFocused = true
+        }
+        .onChange(of: page) { _ in
+            query = ""; selectedID = nil; listFocus = nil
+            if focusListOnArrival { focusListOnArrival = false; focusList() }
+        }
+        .onChange(of: visibleItems.map(\.id)) { _ in
+            if let selectedID, !visibleItems.contains(where: { $0.id == selectedID }) { self.selectedID = nil }
+        }
         .quickLookPreview($model.previewURL)
         .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item) }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
         .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all }
+    }
+
+    private func focusList() {
+        guard !visibleItems.isEmpty else { listFocus = nil; return }
+        if selectedID == nil { selectedID = visibleItems.first?.id }
+        inputFocused = false; listFocus = UUID()
     }
 
     private var sidebar: some View {
@@ -289,7 +302,9 @@ struct DownloaderView: View {
                             }
                         }.padding(1)
                     }
-                    .background(PaperListKeyboard(request: listFocus) { action in
+                    .background(PaperListKeyboard(request: listFocus, didFocus: { request in
+                        if listFocus == request { listFocus = nil }
+                    }) { action in
                         guard !rows.isEmpty else { return }
                         if action == .up || action == .down {
                             let index = selectedID.flatMap { id in rows.firstIndex { $0.id == id } }
