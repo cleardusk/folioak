@@ -83,7 +83,6 @@ struct MenuChevron: NSViewRepresentable {
                 mark.add(turn, forKey: "turn")
             } else { mark.removeAnimation(forKey: "turn") }
             CATransaction.commit()
-            CATransaction.flush()
         }
     }
 }

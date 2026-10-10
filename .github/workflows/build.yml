@@ -68,7 +68,6 @@ jobs:
           path: |
             dist/Leafpeak-*-macos-arm64.zip
             dist/Leafpeak-*-macos-arm64.dmg
-            dist/leafpeak-cli-*-macos-arm64.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           compression-level: 0
@@ -103,15 +102,13 @@ jobs:
           cd dist
           sha256sum --check SHA256SUMS.txt
           asset_name="Leafpeak-$RELEASE_TAG-macos-arm64"
-          cli_asset="leafpeak-cli-$RELEASE_TAG-macos-arm64"
           test -f "$asset_name.zip"
           test -f "$asset_name.dmg"
-          test -f "$cli_asset.zip"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo 'Release already exists; published assets will not be overwritten.' >&2
             exit 1
           fi
-          gh release create "$RELEASE_TAG" "$asset_name.zip" "$asset_name.dmg" "$cli_asset.zip" SHA256SUMS.txt \
+          gh release create "$RELEASE_TAG" "$asset_name.zip" "$asset_name.dmg" SHA256SUMS.txt \
             --draft --verify-tag --target "$RELEASE_COMMIT" --title "Leafpeak $RELEASE_TAG" \
             --notes-file ../.github/release-notes.md
           gh release edit "$RELEASE_TAG" --draft=false

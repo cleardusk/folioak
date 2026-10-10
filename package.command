@@ -25,37 +25,26 @@ staging_dir=$(mktemp -d "$project_dir/build/package.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT
 app_dir="$project_dir/dist/Leafpeak.app"
 asset_name="Leafpeak-v$version-macos-arm64"
-cli_asset="leafpeak-cli-v$version-macos-arm64"
-mkdir -p "$staging_dir/cli/leafpeak"
-cp "$project_dir/dist/arxiv-download" "$staging_dir/cli/leafpeak/leafpeak"
-cp -R build/media-tools "$staging_dir/cli/leafpeak/media-tools"
-cp CLI-README.md "$staging_dir/cli/leafpeak/README.md"
-ditto -c -k --norsrc --noextattr --keepParent "$staging_dir/cli/leafpeak" "$staging_dir/$cli_asset.zip"
-ditto -x -k "$staging_dir/$cli_asset.zip" "$staging_dir/cli-unpacked"
-codesign --verify --strict "$staging_dir/cli-unpacked/leafpeak/leafpeak"
-xcrun lipo "$staging_dir/cli-unpacked/leafpeak/leafpeak" -verify_arch arm64
-test "$("$staging_dir/cli-unpacked/leafpeak/leafpeak" --version)" = "$version"
 ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$staging_dir/$asset_name.zip"
 ditto -x -k "$staging_dir/$asset_name.zip" "$staging_dir/unpacked"
 codesign --verify --deep --strict "$staging_dir/unpacked/Leafpeak.app"
-for media_dir in "$staging_dir/unpacked/Leafpeak.app/Contents/Resources/media-tools" "$staging_dir/cli-unpacked/leafpeak/media-tools"; do
-  for binary in "$media_dir/ffmpeg" "$media_dir/ffprobe" "$media_dir/"*.dylib; do
-    codesign --verify --strict "$binary"
-  done
-  "$media_dir/ffmpeg" -version > /dev/null
-  "$media_dir/ffprobe" -v error -show_entries stream=codec_name -of json Tests/Fixtures/Media/tone.m4a > /dev/null
-  codesign --verify --strict "$media_dir/qjs"
-  "$media_dir/yt-dlp" --ignore-config --no-plugin-dirs --plugin-dirs "$project_dir/Tests/Fixtures/EJS" \
-    --no-remote-components --no-update --no-cache-dir --no-js-runtimes --js-runtimes "quickjs:$media_dir/qjs" \
-    --skip-download --print title leafpick-ejs:fixture | /usr/bin/grep -qx 'EJS provider passed'
+media_dir="$staging_dir/unpacked/Leafpeak.app/Contents/Resources/media-tools"
+for binary in "$media_dir/ffmpeg" "$media_dir/ffprobe" "$media_dir/"*.dylib; do
+  codesign --verify --strict "$binary"
 done
+"$media_dir/ffmpeg" -version > /dev/null
+"$media_dir/ffprobe" -v error -show_entries stream=codec_name -of json Tests/Fixtures/Media/tone.m4a > /dev/null
+codesign --verify --strict "$media_dir/qjs"
+"$media_dir/yt-dlp" --ignore-config --no-plugin-dirs --plugin-dirs "$project_dir/Tests/Fixtures/EJS" \
+  --no-remote-components --no-update --no-cache-dir --no-js-runtimes --js-runtimes "quickjs:$media_dir/qjs" \
+  --skip-download --print title leafpick-ejs:fixture | /usr/bin/grep -qx 'EJS provider passed'
 xcrun lipo "$staging_dir/unpacked/Leafpeak.app/Contents/MacOS/LeafpeakApp" -verify_arch arm64
-bundled_cli="$staging_dir/unpacked/Leafpeak.app/Contents/MacOS/arxiv-download"
+bundled_cli="$staging_dir/unpacked/Leafpeak.app/Contents/MacOS/leafpick"
 codesign --verify --strict "$bundled_cli"
 xcrun lipo "$bundled_cli" -verify_arch arm64
 test "$("$bundled_cli" --version)" = "$version"
 "$bundled_cli" --help > /dev/null
-cmp "$bundled_cli" "$staging_dir/cli-unpacked/leafpeak/leafpeak"
+cmp "$bundled_cli" "$project_dir/dist/leafpick"
 invalid_status=0
 "$bundled_cli" not-an-arxiv-link --json > "$staging_dir/invalid.json" 2> "$staging_dir/invalid.stderr" || invalid_status=$?
 if [[ "$invalid_status" != 1 ]]; then
@@ -75,10 +64,8 @@ hdiutil create -volname 'Leafpeak' -srcfolder "$staging_dir/dmg" -format ULMO "$
 hdiutil verify "$staging_dir/$asset_name.dmg"
 mv -f "$staging_dir/$asset_name.zip" "$project_dir/dist/$asset_name.zip"
 mv -f "$staging_dir/$asset_name.dmg" "$project_dir/dist/$asset_name.dmg"
-mv -f "$staging_dir/$cli_asset.zip" "$project_dir/dist/$cli_asset.zip"
 cd "$project_dir/dist"
-shasum -a 256 "$asset_name.zip" "$asset_name.dmg" "$cli_asset.zip" > "$staging_dir/SHA256SUMS.txt"
+shasum -a 256 "$asset_name.zip" "$asset_name.dmg" > "$staging_dir/SHA256SUMS.txt"
 mv -f "$staging_dir/SHA256SUMS.txt" SHA256SUMS.txt
 print "已打包：$project_dir/dist/$asset_name.zip"
 print "已打包：$project_dir/dist/$asset_name.dmg"
-print "已打包：$project_dir/dist/$cli_asset.zip"

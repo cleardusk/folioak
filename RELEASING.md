@@ -1,10 +1,10 @@
 # 打包与发布
 
-仓库：<https://github.com/cleardusk/arxiv-download-ui>（private）。源码、Actions 日志与 Releases 仅对有仓库权限的账号开放。
+仓库：<https://github.com/cleardusk/leafpick>（public）。标准 GitHub 托管 runner 的 Actions 运行免费。
 
 ## 在其他 Mac 使用
 
-登录 GitHub，打开 [Releases](https://github.com/cleardusk/arxiv-download-ui/releases)，下载最新的 DMG 安装包，打开后将应用拖入 Applications。也可下载 ZIP，解压后拖入 Applications。支持 Apple Silicon（M 系列芯片），最低 macOS 13；首次启动后选择当前电脑的保存目录。无需安装开发工具。
+打开 [Releases](https://github.com/cleardusk/leafpick/releases)，下载最新的 DMG 安装包，打开后将应用拖入 Applications。也可下载 ZIP，解压后拖入 Applications。支持 Apple Silicon（M 系列芯片），最低 macOS 13；首次启动后选择当前电脑的保存目录。无需安装开发工具。
 
 当前为 ad-hoc 签名，开启 Hardened Runtime，但没有 Apple Developer ID 或公证。macOS 首次打开可能拦截；确认来源后在「系统设置 → 隐私与安全性」允许打开。后续若需顺畅分发，应单独配置 Developer ID 与公证凭据；DMG 不替代签名、公证。
 
@@ -18,7 +18,7 @@ python3 Tools/prepare-media.py # 首次准备；后续校验并复用缓存
 ./package.command
 ```
 
-`package.command` 构建含 CLI 和媒体组件的 arm64 `Leafpeak.app`，先签名内置组件、CLI，再签名完整应用；验证解压后的签名、架构、CLI 版本及 JSON，并确认内置和独立 CLI 相同。生成 `Leafpeak-v版本-macos-arm64.dmg` / `.zip`、`leafpeak-cli-v版本-macos-arm64.zip` 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
+`package.command` 构建含 CLI 和媒体组件的 arm64 `Leafpeak.app`，先签名内置组件、CLI，再签名完整应用；验证解压后的签名、架构、CLI 版本及 JSON，并确认内置 CLI 与构建产物相同。生成 `Leafpeak-v版本-macos-arm64.dmg` / `.zip` 和 SHA-256 校验文件，输出到 `dist/`。构建失败不会替换已有 `.app`。
 
 yt-dlp、QuickJS-NG、FFmpeg 的版本、源码和校验值在 `Tools/prepare-media.py`，许可说明在 `Resources/MediaComponents.md`。QuickJS-NG 使用不暴露文件、网络、进程或模块加载接口的最小 JS host，无 JIT entitlement；PyInstaller yt-dlp 和 FFmpeg / ffprobe 仅有加载各自私有库所需的 library-validation entitlement（ad-hoc 签名没有 Team ID）。应用主程序不继承这些例外。组件更新必须修改固定版本／校验值并重新验证，不在用户运行时自更新。
 
@@ -26,7 +26,7 @@ yt-dlp 使用官方目录版，仅保留 arm64 二进制，恢复 Python.framewo
 
 FFmpeg / ffprobe 共用安装包内的动态库，保留原有输入解码能力，移除未使用的编码器和特效；不依赖 Homebrew。离线测试会搬移完整组件目录，在隔离 PATH 下验证合并、M4A 提取、HLS 修复、签名和动态库路径。DMG 使用 macOS 10.15 起支持的 ULMO（LZMA）压缩；应用最低系统版本仍为 macOS 13。
 
-`test.command` 还支持 `--stress`（200 次模拟下载及释放检查）、`--live`（真实下载至 `build/live-UUID/`）和 `--snapshots`（界面预览输出至 `build/qa/`）。离线检查包含 CLI 退出码、信号取消和独立进程协调；真实下载测试不写入 PapersRepo。
+`test.command` 还支持 `--stress`（200 次模拟下载及释放检查）、`--live`（真实下载至 `build/live-UUID/`）和 `--snapshots`（界面预览输出至 `build/qa/`）。离线检查包含 CLI 退出码、信号取消和独立进程协调；真实下载测试只写入隔离的测试目录。
 
 ## 提交规范
 
@@ -43,7 +43,7 @@ git tag -a v1.2.0 -m 'Leafpeak 1.2.0'
 git push origin v1.2.0
 ```
 
-Actions 会再次执行离线／资源测试，构建安装包，核验包的 SHA-256 后创建 Release，附上 UI DMG / ZIP、CLI ZIP、校验文件。任一检查失败都不会发布；tag 与应用版本不一致会失败。已发布的版本不会自动覆盖，修正内容应发布新版本。
+Actions 会再次执行离线／资源测试，构建安装包，核验包的 SHA-256 后创建 Release，附上 应用 DMG / ZIP、校验文件。任一检查失败都不会发布；tag 与应用版本不一致会失败。已发布的版本不会自动覆盖，修正内容应发布新版本。
 
 更新本机 `/Applications` 前，退出应用，备份旧 `.app`、偏好设置、`workspace.json` 及存在的 `library.json`、`media-library.json`。核验已发布 ZIP 的校验和、签名、版本和内置 CLI 后再替换；首次启动检查旧任务、草稿与独立资料库迁移，避免使用测试数据覆盖用户状态。
 
@@ -57,4 +57,4 @@ Actions 会再次执行离线／资源测试，构建安装包，核验包的 SH
 
 工作流只使用固定提交版本的 GitHub 官方 actions。测试、构建任务只有只读仓库权限；仅通过全部检查的 tag 发布任务获得写入 Release 的权限，无需额外上传个人 GitHub token。Apple 签名凭据未配置。
 
-私有仓库的 macOS Actions 消耗账号的构建额度，超出免费额度后的运行受账号计费设置约束；本工作流构建设置 15 分钟超时，同分支的新提交取消旧运行，tag 发布保留独立运行。
+公有仓库使用标准 GitHub 托管 runner，Actions 运行免费；本工作流构建设置 15 分钟超时，同分支的新提交取消旧运行，tag 发布保留独立运行。

@@ -34,16 +34,15 @@ fi
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 -framework PDFKit \
   Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Shared.swift Sources/CLI.swift "$staging_dir/Version.swift" \
-  -o "$staging_dir/arxiv-download"
-strip "$staging_dir/arxiv-download"
-codesign --force --options runtime --timestamp=none --sign - "$staging_dir/arxiv-download"
-codesign --verify --strict "$staging_dir/arxiv-download"
-xcrun lipo "$staging_dir/arxiv-download" -verify_arch arm64
-test "$("$staging_dir/arxiv-download" --version)" = "$version"
-"$staging_dir/arxiv-download" --help > /dev/null
-cp "$staging_dir/arxiv-download" "$staged_app/Contents/MacOS/leafpeak"
-ln -s leafpeak "$staged_app/Contents/MacOS/arxiv-download"
-ln -s leafpeak "$staged_app/Contents/MacOS/leafpick"
+  -o "$staging_dir/leafpick"
+strip "$staging_dir/leafpick"
+codesign --force --options runtime --timestamp=none --sign - "$staging_dir/leafpick"
+codesign --verify --strict "$staging_dir/leafpick"
+xcrun lipo "$staging_dir/leafpick" -verify_arch arm64
+test "$("$staging_dir/leafpick" --version)" = "$version"
+"$staging_dir/leafpick" --help > /dev/null
+cp "$staging_dir/leafpick" "$staged_app/Contents/MacOS/leafpick"
+ln -s leafpick "$staged_app/Contents/MacOS/arxiv-download"
 # Sign nested code first, then seal the complete app bundle.
 codesign --force --options runtime --timestamp=none --sign - "$staged_app"
 codesign --verify --deep --strict "$staged_app"
@@ -51,13 +50,12 @@ codesign --verify --strict "$staged_app/Contents/MacOS/arxiv-download"
 xcrun lipo "$staged_app/Contents/MacOS/LeafpeakApp" -verify_arch arm64
 test "$("$staged_app/Contents/MacOS/arxiv-download" --version)" = "$version"
 "$staged_app/Contents/MacOS/arxiv-download" --help > /dev/null
-cmp "$staging_dir/arxiv-download" "$staged_app/Contents/MacOS/arxiv-download"
+cmp "$staging_dir/leafpick" "$staged_app/Contents/MacOS/arxiv-download"
 rm -rf "$app_dir"
 mv "$staged_app" "$app_dir"
-mv -f "$staging_dir/arxiv-download" "$project_dir/dist/leafpeak"
+mv -f "$staging_dir/leafpick" "$project_dir/dist/leafpick"
 rm -rf "$project_dir/dist/media-tools"
 cp -R build/media-tools "$project_dir/dist/"
-cp "$project_dir/dist/leafpeak" "$project_dir/dist/arxiv-download"
-cp "$project_dir/dist/leafpeak" "$project_dir/dist/leafpick"
+cp "$project_dir/dist/leafpick" "$project_dir/dist/arxiv-download"
 print "已构建：$app_dir"
-print "已构建：$project_dir/dist/leafpeak"
+print "已构建：$project_dir/dist/leafpick"

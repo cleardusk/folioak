@@ -304,6 +304,7 @@ enum MediaDownloader {
         var args = ["--ignore-config", "--no-plugin-dirs", "--no-remote-components", "--no-update", "--no-cache-dir",
                     "--no-playlist", "--max-downloads", "20", "--no-overwrites", "--continue", "--newline", "--no-colors",
                     "--socket-timeout", "30", "--retries", "3", "--fragment-retries", "3", "--abort-on-unavailable-fragments", "--max-filesize", "16G",
+                    "--retry-sleep", "http:exp=1:8", "--retry-sleep", "fragment:exp=1:8",
                     "--ffmpeg-location", tools.directory.path, "--no-js-runtimes", "--js-runtimes", "quickjs:" + (try tools.executable("qjs")).path,
                     "--windows-filenames", "--trim-filenames", "180", "--paths", folder.path,
                     "--output", "%(title).140B [%(id)s].%(ext)s",
@@ -333,7 +334,7 @@ enum MediaDownloader {
         let status = try await MediaProcess().run(try tools.executable("yt-dlp"), arguments: arguments(url: url, format: format, tools: tools, folder: folder)) {
             output.receive($0, event: event)
         }
-        guard status == 0, !output.files.isEmpty else { throw DownloadError.metadata(failure(output.error)) }
+        guard status == 0, !output.files.isEmpty else { throw failure(output.error) }
         event(.validating)
         var files = try validatedOutputs(output.files, in: folder)
         let scratch = folder.appendingPathComponent(".mp4-" + UUID().uuidString, isDirectory: true)
@@ -349,20 +350,25 @@ enum MediaDownloader {
         return result
     }
 
-    static func failure(_ raw: String) -> String {
+    static func failure(_ raw: String) -> DownloadError {
         let lower = raw.lowercased()
-        if lower.contains("suspended") { return "来源账号已被停用，当前无法获取此内容。" }
+        // Match an HTTP status rather than digits in a video ID. yt-dlp does not
+        // expose Retry-After here; use the native engine's default one-minute pause.
+        if lower.range(of: #"\bhttp(?: error)?(?: status(?: code)?)?[:\s]+429\b"#, options: .regularExpression) != nil ||
+            lower.contains("too many requests") || lower.contains("rate limit") || lower.contains("rate-limit") {
+            return .cooldown(60)
+        }
+        if lower.contains("suspended") { return .metadata("来源账号已被停用，当前无法获取此内容。") }
         if lower.contains("video is unavailable") || lower.contains("tweet is unavailable") || lower.contains("deleted") {
-            return "此内容当前不可访问，可能已被删除或设为非公开。"
+            return .metadata("此内容当前不可访问，可能已被删除或设为非公开。")
         }
         if lower.contains("sign in") || lower.contains("login") || lower.contains("cookies") || lower.contains("403") || lower.contains("authentication") {
-            return "此内容需要登录或站点验证，当前无法直接下载。请在浏览器中确认链接可访问，或换一个公开链接。"
+            return .metadata("此内容需要登录或站点验证，当前无法直接下载。请在浏览器中确认链接可访问，或换一个公开链接。")
         }
-        if lower.contains("429") || lower.contains("rate limit") { return "视频站点暂时限流，请稍后重试。" }
-        if lower.contains("no video") || lower.contains("does not contain") { return "链接中没有可下载的视频。若是图片，请使用图片文件的直链。" }
-        if lower.contains("unsupported url") { return "该链接暂不支持，请使用单个视频或帖子链接。" }
-        if lower.contains("requested format") { return "当前视频没有可用的下载格式，请稍后重试。" }
-        if lower.contains("space left") { return "磁盘空间不足，请释放空间后重试。" }
-        return "媒体下载未完成，请检查链接和网络后重试。若站点已变更，请更新应用。"
+        if lower.contains("no video") || lower.contains("does not contain") { return .metadata("链接中没有可下载的视频。若是图片，请使用图片文件的直链。") }
+        if lower.contains("unsupported url") { return .metadata("该链接暂不支持，请使用单个视频或帖子链接。") }
+        if lower.contains("requested format") { return .metadata("当前视频没有可用的下载格式，请稍后重试。") }
+        if lower.contains("space left") { return .metadata("磁盘空间不足，请释放空间后重试。") }
+        return .metadata("媒体下载未完成，请检查链接和网络后重试。若站点已变更，请更新应用。")
     }
 }

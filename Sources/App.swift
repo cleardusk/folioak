@@ -118,6 +118,15 @@ final class DownloadModel: ObservableObject {
         return FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
+    func prepareDefaultDirectory(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        guard directory.standardizedFileURL.path == home.appendingPathComponent("Downloads/Leafpeak").standardizedFileURL.path else { return }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            directoryNotice = "无法创建默认保存位置，请选择其他文件夹。"
+        }
+    }
+
     @Published var naming: NamingStyle {
         didSet { preferences.set(naming.rawValue, forKey: "namingStyle") }
     }
@@ -1229,6 +1238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     init(model: DownloadModel? = nil) { self.model = model ?? DownloadModel(stateURL: WorkspaceStore.defaultURL); super.init() }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        model.prepareDefaultDirectory()
         NSApp.setActivationPolicy(.regular)
         model.applyAppearance()
         makeMenu()

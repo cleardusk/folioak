@@ -1,4 +1,4 @@
-# leafpeak
+# leafpick
 
 Leafpeak 的命令行下载器，支持 Apple Silicon / macOS 13+，无需启动界面。
 
@@ -7,14 +7,14 @@ Leafpeak 的命令行下载器，支持 Apple Silicon / macOS 13+，无需启动
 应用内置 CLI：
 
 ```sh
-"/Applications/Leafpeak.app/Contents/MacOS/leafpeak" --help
-alias leafpeak='"/Applications/Leafpeak.app/Contents/MacOS/leafpeak"'
-leafpeak 1706.03762 -o ~/Downloads/Papers
-leafpeak 'https://www.youtube.com/watch?v=jNQXAC9IVRw' -o ~/Downloads
-leafpeak --audio 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
+"/Applications/Leafpeak.app/Contents/MacOS/leafpick" --help
+alias leafpick='"/Applications/Leafpeak.app/Contents/MacOS/leafpick"'
+leafpick 1706.03762 -o ~/Downloads/Papers
+leafpick 'https://www.youtube.com/watch?v=jNQXAC9IVRw' -o ~/Downloads
+leafpick --audio 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
 ```
 
-独立 CLI ZIP 解压后运行 `./leafpeak`，旁边的 `media-tools` 文件夹必须保留。应用内的旧命令 `leafpick` 和 `arxiv-download` 是兼容别名。
+`arxiv-download` 保留为兼容别名。
 
 支持论文链接／arXiv 编号，YouTube、Bilibili、X、今日头条的单个公开视频，以及 HTTPS 图片、音频、视频直链。论文来源包括 Hugging Face、GitHub PDF、OpenReview、ACL Anthology、CVF 和普通 PDF 直链。不支持播放列表、账号主页、X 纯图片帖子或需登录的内容。
 
@@ -23,10 +23,10 @@ leafpeak --audio 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
 ## 输入与输出
 
 ```sh
-leafpeak -i links.md -o ~/Downloads
-cat links.txt | leafpeak --json
-leafpeak 1706.03762 -i extra.txt -i - < more.txt
-leafpeak -i links.md --verbose
+leafpick -i links.md -o ~/Downloads
+cat links.txt | leafpick --json
+leafpick 1706.03762 -i extra.txt -i - < more.txt
+leafpick -i links.md --verbose
 ```
 
 `-i` 可指定多个 UTF-8 文件，`-i -` 或独立 `-` 表示标准输入。无链接和文件参数且 stdin 非终端时自动读取。支持从 Markdown／段落提取链接，合计最多 64 KiB、200 条（去重前）。读取管道时可 Ctrl+C 取消。
@@ -41,4 +41,4 @@ JSON 状态：saved、existing、failed、paused、cancelled；暂停项可能�
 
 退出码：0 全部成功；1 有失败或待重试项；2 参数或目录创建错误；130 SIGINT 取消；143 SIGTERM 取消。
 
-当前为 ad-hoc 签名，未 Apple 公证。首次运行可能需要按系统「隐私与安全性」提示允许。独立 CLI 请与 UI 同步更新。
+当前为 ad-hoc 签名，未 Apple 公证。首次运行可能需要按系统「隐私与安全性」提示允许。CLI 随应用一起更新。

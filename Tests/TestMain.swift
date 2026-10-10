@@ -89,6 +89,8 @@ struct CoreTests {
         do {
             if CommandLine.arguments.contains("--preview-230") { try renderMediaSnapshots(); return }
             if CommandLine.arguments.contains("--ui-only") {
+                try initialDirectoryTests()
+                try await sidebarLayoutTests()
                 try menuChevronTests()
                 try sidebarMotionTests()
                 try themeTests()
@@ -133,6 +135,8 @@ struct CoreTests {
             try await restoreVersionTests(root: root, pdf: pdf)
             try await workspaceTests(root: root, pdf: pdf)
             try menuChevronTests()
+            try initialDirectoryTests()
+            try await sidebarLayoutTests()
             try sidebarMotionTests()
             try themeTests()
             try inputLayoutTests()

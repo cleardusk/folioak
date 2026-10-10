@@ -12,6 +12,7 @@ private final class ProcessProbe: @unchecked Sendable {
 
 extension CoreTests {
     @MainActor static func mediaTests(root: URL) async throws {
+        try mediaRetryPolicyTests(root: root)
         for url in ["https://youtu.be/BaW_jenozKc", "https://www.youtube.com/watch?v=BaW_jenozKc", "https://www.bilibili.com/video/BV1xx411c7mD", "https://x.com/user/status/123/video/2"] {
             try expect(try DownloadSource.parse(url).isMedia, "media source routing")
         }
@@ -107,6 +108,63 @@ extension CoreTests {
         try await mediaLibraryTests(root: root, image: image)
         try await mediaContainerTests(root: root)
         print("PASS media: routing, native transfer, reuse, invalid response, atomic group rollback, safe process arguments, child cancellation, restoration and paper isolation")
+    }
+
+    @MainActor static func mediaRetryPolicyTests(root: URL) throws {
+        let platformLinks = [
+            ["youtube.com/watch?v=one", "www.youtube.com/watch?v=two", "m.youtube.com/shorts/three", "youtu.be/four"],
+            ["bilibili.com/video/BV1one", "www.bilibili.com/video/BV1two", "m.bilibili.com/video/BV1three", "b23.tv/four"],
+            ["x.com/user/status/1", "www.x.com/user/status/2", "twitter.com/user/status/3", "www.twitter.com/user/status/4", "mobile.twitter.com/user/status/5"],
+            ["toutiao.com/video/1/", "www.toutiao.com/video/2/", "m.toutiao.com/video/3/"]
+        ]
+        var sources: [DownloadSource] = []
+        for links in platformLinks {
+            let aliases = try links.map { try DownloadSource.parse("https://" + $0) }
+            try expect(aliases.allSatisfy(\.isMedia) && Set(aliases.map(\.rateLimitKey)).count == 1,
+                       "all supported aliases of a media platform share one rate-limit group")
+            sources += aliases
+        }
+        let groups = SourceScheduler.groups(sources, key: \.rateLimitKey)
+        try expect(groups.map(\.count) == platformLinks.map(\.count), "platform aliases are serialized while other media sites retain independent groups")
+        for link in platformLinks.flatMap({ $0 }) + ["youtube.com.example.org/file.pdf"] {
+            let url = URL(string: "https://" + link)!
+            for source in [DownloadSource.pdf(url), .file(url)] {
+                try expect(source.rateLimitKey == url.host, "native PDF and direct-file rate limits retain the original host")
+                try expect(!sources.contains { $0.rateLimitKey == source.rateLimitKey }, "native origins never inherit a media platform cooldown")
+            }
+        }
+        let tools = try MediaTools.installed()
+        for format in MediaFormat.allCases {
+            let arguments = try MediaDownloader.arguments(url: URL(string: "https://youtu.be/BaW_jenozKc")!, format: format, tools: tools, folder: root)
+            func values(_ option: String) -> [String] {
+                zip(arguments, arguments.dropFirst()).compactMap { $0.0 == option ? $0.1 : nil }
+            }
+            try expect(values("--retries") == ["3"] && values("--fragment-retries") == ["3"], "media retries remain bounded in both output modes")
+            try expect(values("--retry-sleep") == ["http:exp=1:8", "fragment:exp=1:8"], "HTTP and fragment retries use capped exponential delays")
+            try expect(arguments.contains("--continue") && arguments.contains("--abort-on-unavailable-fragments"), "backoff preserves resume and missing-fragment failure")
+        }
+        for message in ["ERROR: HTTP Error 429: Too Many Requests", "ERROR: HTTP status code: 429", "ERROR: HTTP 429; try cookies",
+                        "ERROR: Too many requests", "ERROR: Rate limit exceeded", "ERROR: Rate-limit reached"] {
+            guard case .cooldown(let seconds) = MediaDownloader.failure(message) else {
+                throw TestFailure.failed("media rate limit must pause the existing same-site queue: \(message)")
+            }
+            try expect(seconds == 60, "media rate limit uses the native default one-minute cooldown")
+        }
+        for (message, detail) in [
+            ("ERROR: [youtube] clip429id: Requested format is not available", "下载格式"),
+            ("ERROR: [twitter] 20429429: HTTP Error 403: Forbidden", "登录"),
+            ("ERROR: https://example.com/429: Connection timed out", "媒体下载未完成"),
+            ("ERROR: HTTP Error 4290", "媒体下载未完成"),
+            ("ERROR: Video is unavailable", "不可访问"),
+            ("ERROR: No space left on device", "磁盘空间不足"),
+            ("", "媒体下载未完成")
+        ] {
+            guard case .metadata(let description) = MediaDownloader.failure(message) else {
+                throw TestFailure.failed("non-rate-limit failure must not pause other downloads: \(message)")
+            }
+            try expect(description.contains(detail), "existing media failure guidance remains specific")
+        }
+        print("PASS media retry policy: bounded HTTP/fragment backoff, typed rate-limit pause and non-rate-limit isolation")
     }
 
     @MainActor static func mediaContainerTests(root: URL) async throws {

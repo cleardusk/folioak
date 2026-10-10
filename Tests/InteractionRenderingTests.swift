@@ -20,6 +20,95 @@ private struct MovingFilterProbe: View {
 }
 
 extension CoreTests {
+    @MainActor static func initialDirectoryTests() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("leafpeak-first-launch-\(UUID().uuidString)")
+        let suite = "leafpeak-first-launch-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer {
+            try? FileManager.default.removeItem(at: home)
+            preferences.removePersistentDomain(forName: suite)
+        }
+        let root = home.appendingPathComponent("Downloads/Leafpeak")
+        preferences.set(root.path, forKey: "downloadRootDirectory")
+        let model = DownloadModel(preferences: preferences)
+        model.prepareDefaultDirectory(home: home)
+        try expect(model.directoryExists && model.directoryNotice == nil, "fresh launch creates the default root")
+        try expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty, "type folders stay lazy")
+        let file = root.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: file)
+        model.prepareDefaultDirectory(home: home)
+        try expect(try String(contentsOf: file, encoding: .utf8) == "keep", "repeated launch preserves existing files")
+        model.directory = home.appendingPathComponent("OfflineCustomFolder")
+        model.prepareDefaultDirectory(home: home)
+        try expect(!model.directoryExists, "launch never recreates an unavailable custom destination")
+        try FileManager.default.removeItem(at: root)
+        try Data("occupied".utf8).write(to: root)
+        model.directory = root
+        model.prepareDefaultDirectory(home: home)
+        try expect(model.directoryNotice != nil && (try String(contentsOf: root, encoding: .utf8)) == "occupied", "blocked default root reports a recoverable error without overwriting")
+        print("PASS first launch: default folder creation, preserved files, custom paths and occupied-path recovery")
+    }
+
+    @MainActor static func sidebarLayoutTests() async throws {
+        _ = NSApplication.shared
+        let suite = "leafpeak-sidebar-layout-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        model.theme = .graphite
+        let view = NSHostingView(rootView: DownloaderView(model: model).environment(\.colorScheme, .dark))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
+        window.contentView = view; window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        func settle() async throws {
+            try await Task.sleep(nanoseconds: 400_000_000)
+            view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        }
+        func toggle() throws {
+            // Send events to this test window only; no system accessibility grant.
+            let point = NSPoint(x: 37, y: view.bounds.height - 55)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
+                    throw TestFailure.failed("sidebar mouse event")
+                }
+                window.sendEvent(event)
+            }
+        }
+        func input(_ root: NSView) -> LinkTextView? {
+            (root as? LinkTextView) ?? root.subviews.lazy.compactMap(input).first
+        }
+        func verify(collapsed: Bool) throws {
+            guard let editor = input(view), let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw TestFailure.failed("sidebar layout input and bitmap")
+            }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let scale = CGFloat(bitmap.pixelsWide) / view.bounds.width
+            // Inspect actual pixels away from controls: stale sidebar paint must not
+            // survive on either side of the new divider after folding or resizing.
+            let sidebarWidth: CGFloat = collapsed ? 74 : 190
+            let y = Int((view.bounds.height - 120) * scale)
+            let left = bitmap.colorAt(x: Int((sidebarWidth - 4) * scale), y: y)!.usingColorSpace(.deviceRGB)!
+            let right = bitmap.colorAt(x: Int((sidebarWidth + 4) * scale), y: y)!.usingColorSpace(.deviceRGB)!
+            try expect(left.redComponent - right.redComponent > 0.025, "sidebar background ends at \(sidebarWidth) pt")
+            let frame = editor.convert(editor.bounds, to: view)
+            try expect(abs(frame.minX + editor.textContainerOrigin.x + (editor.textContainer?.lineFragmentPadding ?? 0) - (sidebarWidth + 1 + 24 + 20)) < 1,
+                       "input follows the divider without overlap: \(frame.minX), sidebar \(sidebarWidth)")
+        }
+        try await settle(); try verify(collapsed: false)
+        for size in [NSSize(width: 960, height: 700), NSSize(width: 780, height: 540), NSSize(width: 1120, height: 900)] {
+            window.setContentSize(size); try await settle()
+            try toggle()
+            try await settle(); try verify(collapsed: true)
+            window.setContentSize(NSSize(width: size.width, height: size.height + 80))
+            try await settle(); try verify(collapsed: true)
+            try toggle()
+            try await settle(); try verify(collapsed: false)
+        }
+        print("PASS sidebar layout: real fold/unfold actions, 74/190 pt boundaries, input alignment and window resizing")
+    }
+
     @MainActor static func menuChevronTests() throws {
         _ = NSApplication.shared
         let view = MenuChevron.ChevronView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))

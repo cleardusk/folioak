@@ -6,3 +6,7 @@ dist/
 *.p12
 *.p8
 __pycache__/
+.cache/
+logs/
+*.log
+*.log.*

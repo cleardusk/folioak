@@ -25,7 +25,18 @@ enum DownloadSource: Hashable, Sendable {
         case .pdf(let url), .file(let url), .media(let url): return (url.host ?? "文件") + "/" + PaperMetadata.cleanTitle(url.lastPathComponent)
         }
     }
-    var rateLimitKey: String { reference != nil ? "arxiv" : directURL!.host!.lowercased() }
+    var rateLimitKey: String {
+        if reference != nil { return "arxiv" }
+        let host = directURL!.host!.lowercased()
+        guard isMedia else { return host }
+        switch host {
+        case "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be": return "media:youtube"
+        case "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv": return "media:bilibili"
+        case "x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com": return "media:x"
+        case "toutiao.com", "www.toutiao.com", "m.toutiao.com", "v.toutiao.com": return "media:toutiao"
+        default: return host
+        }
+    }
     var webURL: URL { reference?.abstractURL ?? directURL! }
 
     static func parse(_ input: String) throws -> Self {
