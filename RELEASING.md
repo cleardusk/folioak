@@ -44,6 +44,10 @@ Actions 会再次执行离线／资源测试，构建安装包，核验包的 SH
 
 普通 `main` 推送会测试、构建并保留安装包 artifact 7 天；PR 只测试、构建。在 Actions 页面手动运行也可获取安装包，手动运行不创建 Release。自动测试不访问 arXiv，以免真实服务故障影响发布。
 
+云端使用固定提交的 `actions/cache` 缓存 `build/media-tools/`，包含媒体可执行文件、校验清单和许可文件。缓存键包含系统／架构、Xcode／SDK，以及 `Tools/prepare-media.py` 和媒体说明的内容哈希；普通 UI 改动和应用版本号不使缓存失效。`main` 成功构建产生的缓存可供之后的版本标签复用，详见 [GitHub 缓存作用域](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)。
+
+不使用跨版本回退键。缓存命中后仍由准备脚本逐个校验二进制 SHA-256，应用的签名与安装包校验照常执行。首次构建、组件／编译配置／工具链变化、媒体二进制校验不符或缓存被 GitHub 清理时会重新构建；长期保留缓存不是发布的前提。仅缓存组件，不缓存 `.app` 或已签名的安装包。
+
 云端固定使用 Xcode 26.3 / macOS SDK 26.2，避免默认旧 SDK 改变新系统上的原生控件外观；最低系统版本仍为 macOS 13。该工具链来自 [GitHub 官方 macOS runner 镜像](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)，缺失或版本不符时构建直接失败。
 
 工作流只使用固定提交版本的 GitHub 官方 actions。测试、构建任务只有只读仓库权限；仅通过全部检查的 tag 发布任务获得写入 Release 的权限，无需额外上传个人 GitHub token。Apple 签名凭据未配置。

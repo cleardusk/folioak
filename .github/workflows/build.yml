@@ -28,6 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Check toolchain and version
+        id: toolchain
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
@@ -37,6 +38,8 @@ jobs:
           xcodebuild -version
           test "$(xcrun --sdk macosx --show-sdk-version)" = 26.2
           xcrun swiftc --version
+          toolchain_key=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-version; } | shasum -a 256 | cut -d ' ' -f 1)
+          echo "media-key=$toolchain_key" >> "$GITHUB_OUTPUT"
           plutil -lint Resources/Info.plist
           if [[ "$REF_TYPE" == tag ]]; then
             version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
@@ -45,6 +48,12 @@ jobs:
           fi
       - name: Run offline regression and resource tests
         run: ./test.command --stress
+      - name: Cache media tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/media-tools
+          key: media-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.media-key }}-${{ hashFiles('Tools/prepare-media.py', 'Resources/MediaComponents.md') }}
+          # Use an exact recipe match; prepare-media.py still verifies file hashes.
       - name: Package app
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
