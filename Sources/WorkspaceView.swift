@@ -54,13 +54,6 @@ struct RoundButtonStyle: ButtonStyle {
 }
 
 struct DownloaderView: View {
-    private struct LogScrollTarget: Hashable {
-        let lastID: UUID?
-        let count: Int
-        let following: Bool
-        let query: String
-        let level: ActivityLevel?
-    }
     @ObservedObject var model: DownloadModel
     @WorkspaceViewState var page: WorkspacePage = .downloads
     var showSettings: () -> Void = {}
@@ -71,7 +64,6 @@ struct DownloaderView: View {
     @WorkspaceViewState private var query = ""
     @WorkspaceViewState private var filter: QueueFilter = .all
     @WorkspaceViewState private var logLevel: ActivityLevel? = nil
-    @WorkspaceViewState private var followLogs = true
     @WorkspaceViewState private var dropTargeted = false
     @WorkspaceViewState private var selectedID: UUID?
     @WorkspaceViewState private var listFocus: UUID?
@@ -95,6 +87,7 @@ struct DownloaderView: View {
             (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) || item.original.localizedCaseInsensitiveContains(query))
         }
     }
+    private var libraryTags: [String] { Array(Set(model.papers.filter { !$0.removed }.flatMap(\.tags))).sorted() }
     private var libraryPapers: [LibraryPaper] {
         model.papers.filter { paper in
             paper.removed == (libraryFilter == .removed) &&
@@ -131,6 +124,8 @@ struct DownloaderView: View {
         .foregroundStyle(ThemePalette.color(palette.text))
         .tint(accent)
         .background(ThemePalette.color(palette.canvas))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
         .ignoresSafeArea(.container, edges: .top)
         .onReceive(model.$listRequest.dropFirst()) { _ in
             if page == .logs { focusListOnArrival = true; page = .downloads }
@@ -226,9 +221,19 @@ struct DownloaderView: View {
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty { searchField }
-                Button { libraryFilter = .all; libraryTag = nil; query = ""; model.importPDFs() } label: { Image(systemName: "plus") }
-                    .buttonStyle(RoundButtonStyle(palette: palette)).help("导入本地 PDF").accessibilityLabel("导入 PDF").disabled(model.importingPDFs || !model.libraryWritable)
                 Menu {
+                    Button("导入 PDF…") { libraryFilter = .all; libraryTag = nil; query = ""; model.importPDFs() }
+                        .disabled(model.importingPDFs || !model.libraryWritable)
+                    Picker("排序", selection: $librarySort) { ForEach(LibrarySort.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                    if !libraryTags.isEmpty {
+                        Menu("标签") {
+                            Button { libraryTag = nil } label: { if libraryTag == nil { Label("全部标签", systemImage: "checkmark") } else { Text("全部标签") } }
+                            ForEach(libraryTags, id: \.self) { tag in
+                                Button { libraryTag = tag } label: { if libraryTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) } }
+                            }
+                        }
+                    }
+                    Divider()
                     Button("导出文档库", action: model.exportLibrary).disabled(!model.papers.contains { !$0.removed })
                     if model.checkingVersions.isEmpty {
                         Button("检查论文新版本") { model.checkPaperVersions(libraryPapers.map(\.id)) }
@@ -238,8 +243,8 @@ struct DownloaderView: View {
                     Button(libraryFilter == .removed ? "返回文档库" : "已移除的文档") {
                         libraryFilter = libraryFilter == .removed ? .all : .removed; query = ""; libraryTag = nil
                     }
-                } label: { Image(systemName: "ellipsis").frame(width: 28, height: 32) }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("文档库操作")
+                } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
+                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel("文档库操作")
             } else if page == .media {
                 if !model.mediaLibrary.isEmpty { searchField }
             } else if page == .logs && !model.logs.isEmpty {
@@ -264,7 +269,7 @@ struct DownloaderView: View {
             Divider()
             Button("查看日志") { page = .logs }
         } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32).contentShape(Rectangle()) }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 32)
+            .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
             .help("更多下载操作").accessibilityLabel("下载操作")
     }
 
@@ -285,31 +290,23 @@ struct DownloaderView: View {
             LinkInput(model: model, focused: $inputFocused, palette: palette)
                 .frame(height: 104).padding(.horizontal, 8).padding(.top, 8)
             HStack(spacing: 12) {
-                Menu {
-                    Text(model.directoryLabel)
-                    Text("自动归入 Papers、Videos、Audio、Images")
-                    if !model.directoryExists { Text("首次下载时创建文件夹") }
-                    Divider()
-                    Button("更改保存位置…", action: model.chooseDirectory).disabled(model.busy)
-                    Button("在访达中打开", action: model.openDirectory).disabled(!model.directoryExists)
-                } label: {
-                    Label(model.directory.lastPathComponent.isEmpty ? "/" : model.directory.lastPathComponent, systemImage: "folder")
-                        .font(.system(size: 12)).lineLimit(1).truncationMode(.middle).foregroundStyle(secondary)
-                }.menuStyle(.borderlessButton).menuIndicator(.visible)
-                    .fixedSize(horizontal: false, vertical: true)
+                DirectoryMenu(model: model, palette: palette)
                     .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                    .help("\(model.directoryLabel)\n自动归入 Papers、Videos、Audio、Images")
-                    .accessibilityLabel("保存位置：\(model.directoryLabel)，自动按类型归档")
                 Spacer(minLength: 8)
                 if model.busy {
-                    Button(action: model.cancel) { Label(model.cancelling ? "正在取消" : "取消下载", systemImage: "stop.fill") }
-                        .buttonStyle(PrimaryActionStyle(palette: palette, prominent: false))
-                        .keyboardShortcut(.cancelAction).disabled(model.cancelling).frame(width: 128)
+                    Button(action: model.cancel) {
+                        if model.cancelling { ProgressView().controlSize(.small).tint(ThemePalette.color(palette.secondary)) }
+                        else { Image(systemName: "stop.fill").font(.system(size: 14, weight: .semibold)) }
+                    }.buttonStyle(PrimaryActionStyle(palette: palette))
+                        .keyboardShortcut(.cancelAction).disabled(model.cancelling)
+                        .help(model.cancelling ? "正在取消" : "取消下载（Esc）")
+                        .accessibilityLabel(model.cancelling ? "正在取消" : "取消下载")
                 } else {
-                    Button(action: model.start) { Label("开始下载", systemImage: "arrow.down") }
+                    Button(action: model.start) { Image(systemName: "arrow.down") }
                         .buttonStyle(PrimaryActionStyle(palette: palette))
                         .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
-                        .disabled(model.tokenCount == 0).frame(width: 128).help("开始下载（\(model.shortcuts[.download].label)）")
+                        .disabled(model.tokenCount == 0).help("开始下载（\(model.shortcuts[.download].label)）")
+                        .accessibilityLabel("开始下载")
                 }
             }.padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 18)
         }
@@ -353,15 +350,12 @@ struct DownloaderView: View {
                     }
                     else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { $0.rawValue }, palette: palette) }
                     Spacer()
-                    Menu {
-                        Picker("排序", selection: $librarySort) { ForEach(LibrarySort.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
-                        Divider()
-                        Button("全部标签") { libraryTag = nil }
-                        ForEach(Array(Set(model.papers.filter { !$0.removed }.flatMap(\.tags))).sorted(), id: \.self) { tag in
-                            Button { libraryTag = tag } label: { if libraryTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) } }
-                        }
-                    } label: { Label(libraryTag ?? librarySort.rawValue, systemImage: "line.3.horizontal.decrease").font(.system(size: 12)).lineLimit(1) }
-                        .menuStyle(.borderlessButton).frame(maxWidth: 155).accessibilityLabel("筛选与排序")
+                    if let tag = libraryTag {
+                        Button { libraryTag = nil } label: {
+                            HStack(spacing: 6) { Text(tag).lineLimit(1); Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }
+                        }.buttonStyle(QuietButtonStyle(palette: palette)).help("清除标签筛选")
+                            .accessibilityLabel("清除标签筛选：\(tag)")
+                    }
                 }
             }.frame(height: 36)
             }
@@ -428,54 +422,7 @@ struct DownloaderView: View {
     }
 
     private var logContent: some View {
-        let entries = visibleLogs
-        let headers = LogHeading.headings(entries)
-        return VStack(spacing: 16) {
-            if !model.logs.isEmpty {
-            HStack(spacing: 4) {
-                FilterTabs(options: [nil] + ActivityLevel.allCases.map(Optional.some), selection: $logLevel, title: { $0?.label ?? "全部" }, palette: palette)
-                Spacer()
-                Button { followLogs.toggle() } label: { Image(systemName: "arrow.down.to.line").foregroundStyle(followLogs ? accent : secondary) }
-                    .buttonStyle(RoundButtonStyle(palette: palette)).help(followLogs ? "停止跟随最新日志" : "跟随最新日志")
-                    .accessibilityLabel("跟随最新日志").accessibilityValue(followLogs ? "开启" : "关闭")
-            }.frame(height: 36)
-            }
-            if entries.isEmpty { empty(icon: "text.alignleft", text: query.isEmpty && logLevel == nil ? "暂无日志" : "没有匹配的日志") }
-            else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(entries) { entry in
-                                VStack(alignment: .leading, spacing: 0) {
-                                    if let group = headers[entry.id], group.subject != nil || group.date != nil {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            if let date = group.date {
-                                                Text(date.formatted(date: .abbreviated, time: .omitted))
-                                                    .font(.system(size: 11)).foregroundStyle(secondary)
-                                            }
-                                            if let subject = group.subject {
-                                                Text(subject).font(.system(size: 12, weight: .medium))
-                                                    .lineLimit(1).help(subject).textSelection(.enabled)
-                                                    .padding(.leading, LogRow.messageInset)
-                                            }
-                                        }.frame(maxWidth: .infinity, alignment: .leading)
-                                            .padding(.horizontal, 20)
-                                            .padding(.vertical, 8)
-                                    }
-                                    LogRow(entry: entry, palette: palette)
-                                }.id(entry.id)
-                            }
-                            Color.clear.frame(height: 1).id("log-end")
-                        }
-                    }
-                    .task(id: LogScrollTarget(lastID: entries.last?.id, count: entries.count, following: followLogs, query: query, level: logLevel)) {
-                        // Let the lazy rows register their scroll targets on first entry.
-                        await Task.yield()
-                        if !Task.isCancelled, followLogs { proxy.scrollTo("log-end", anchor: .bottom) }
-                    }
-                }
-            }
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        LogContent(entries: visibleLogs, hasLogs: !model.logs.isEmpty, query: query, level: $logLevel, palette: palette)
     }
 
     private var footer: some View {
@@ -549,6 +496,7 @@ struct LogRow: View {
                 .frame(width: 64, height: 16, alignment: .leading)
                 .help(entry.date.formatted(date: .complete, time: .standard))
             Image(systemName: entry.level.symbol).font(.system(size: 12)).foregroundStyle(color).frame(width: 16, height: 16)
+                .opacity(entry.level == .info ? 0 : 1)
                 .accessibilityLabel(entry.level.label)
             Text(entry.message).font(.system(size: 12)).foregroundStyle(entry.level == .error ? color : ThemePalette.color(palette.text))
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
@@ -620,8 +568,8 @@ struct DownloadRow: View {
                 } else if item.source == nil {
                     Button("修改") { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
                 }
-                Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 20, height: 32) }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22)
+                Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
+                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
                     .accessibilityLabel("\(item.title)的更多操作")
             }.padding(.top, 5)
         }.padding(.horizontal, 10).padding(.vertical, 13)
@@ -665,5 +613,137 @@ struct DownloadRow: View {
             parts.append(ByteCountFormatter.string(fromByteCount: Int64(speed), countStyle: .file) + "/s")
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+struct LogContent: View {
+    let entries: [ActivityEntry]
+    let hasLogs: Bool
+    let query: String
+    @Binding var level: ActivityLevel?
+    let palette: ThemePalette
+    @WorkspaceViewState private var position = LogScrollPosition()
+    @WorkspaceViewState private var followingLatest = true
+    @WorkspaceViewState private var requestedBottom: Bool?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var secondary: Color { ThemePalette.color(palette.secondary) }
+    private var pointsUp: Bool { requestedBottom ?? position.atBottom }
+
+    var body: some View {
+        let headers = LogHeading.headings(entries)
+        ScrollViewReader { proxy in
+            VStack(spacing: 16) {
+                if hasLogs {
+                    HStack(spacing: 4) {
+                        FilterTabs(options: [nil] + ActivityLevel.allCases.map(Optional.some), selection: $level, title: { $0?.label ?? "全部" }, palette: palette)
+                        Spacer()
+                        if position.canScroll && !entries.isEmpty {
+                            Button { jump(toBottom: !pointsUp, proxy: proxy) } label: {
+                                Image(systemName: "arrow.down.to.line")
+                                    .rotationEffect(.degrees(pointsUp ? 180 : 0))
+                                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: pointsUp)
+                            }.buttonStyle(RoundButtonStyle(palette: palette))
+                                .help(pointsUp ? "回到最早日志" : "前往最新日志")
+                                .accessibilityLabel(pointsUp ? "回到最早日志" : "前往最新日志")
+                        }
+                    }.frame(height: 36)
+                }
+                if entries.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "text.alignleft").font(.system(size: 28, weight: .light))
+                        Text(query.isEmpty && level == nil ? "暂无日志" : "没有匹配的日志").font(.system(size: 13))
+                    }.foregroundStyle(secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            Color.clear.frame(height: 1).id("log-start")
+                            ForEach(entries) { entry in
+                                VStack(alignment: .leading, spacing: 0) {
+                                    if let group = headers[entry.id], group.subject != nil || group.date != nil {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            if let date = group.date {
+                                                Text(date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
+                                            }
+                                            if let subject = group.subject {
+                                                Text(subject).font(.system(size: 12, weight: .medium)).lineLimit(1).help(subject).textSelection(.enabled)
+                                                    .padding(.leading, LogRow.messageInset)
+                                            }
+                                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 8)
+                                    }
+                                    LogRow(entry: entry, palette: palette)
+                                }.id(entry.id)
+                            }
+                            Color.clear.frame(height: 1).id("log-end")
+                        }.background(LogScrollObserver(changed: { metrics in
+                            position = metrics
+                            if requestedBottom == true && metrics.atBottom || requestedBottom == false && metrics.atTop { requestedBottom = nil }
+                        }, userScrolled: { metrics in
+                            requestedBottom = nil
+                            followingLatest = metrics.atBottom
+                        }))
+                    }
+                    .onAppear { proxy.scrollTo("log-end", anchor: .bottom) }
+                    .onChange(of: entries.last?.id) { _ in
+                        if followingLatest { proxy.scrollTo("log-end", anchor: .bottom) }
+                    }
+
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onChange(of: query) { _ in reset(proxy) }
+                .onChange(of: level) { _ in reset(proxy) }
+        }
+    }
+    private func reset(_ proxy: ScrollViewProxy) {
+        followingLatest = true; requestedBottom = nil
+        proxy.scrollTo("log-end", anchor: .bottom)
+    }
+    private func jump(toBottom: Bool, proxy: ScrollViewProxy) {
+        followingLatest = toBottom; requestedBottom = toBottom
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) {
+            proxy.scrollTo(toBottom ? "log-end" : "log-start", anchor: toBottom ? .bottom : .top)
+        }
+    }
+}
+
+struct DirectoryMenu: View {
+    @ObservedObject var model: DownloadModel
+    let palette: ThemePalette
+    var body: some View {
+        Menu {
+            Text(model.directoryLabel)
+            Text("自动归入 Papers、Videos、Audio、Images")
+            if !model.directoryExists { Text("首次下载时创建文件夹") }
+            Divider()
+            Button("更改保存位置…", action: model.chooseDirectory).disabled(model.busy)
+            Button("在访达中打开", action: model.openDirectory).disabled(!model.directoryExists)
+        } label: {
+            Label(model.directory.lastPathComponent.isEmpty ? "/" : model.directory.lastPathComponent, systemImage: "folder")
+                .font(.system(size: 12)).lineLimit(1).truncationMode(.middle).foregroundStyle(ThemePalette.color(palette.secondary))
+        }.menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, showsChevron: true)).menuIndicator(.hidden)
+            .fixedSize(horizontal: false, vertical: true)
+            .help("\(model.directoryLabel)\n自动归入 Papers、Videos、Audio、Images")
+            .accessibilityLabel("保存位置：\(model.directoryLabel)，自动按类型归档")
+    }
+}
+
+struct MenuTriggerStyle: ButtonStyle {
+    let palette: ThemePalette
+    var showsChevron = false
+    @WorkspaceViewState private var hovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) {
+            configuration.label
+            if showsChevron {
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(ThemePalette.color(palette.secondary))
+                    .rotationEffect(.degrees(configuration.isPressed ? 180 : 0))
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: configuration.isPressed)
+            }
+        }.frame(minWidth: 32, minHeight: 32)
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .background(ThemePalette.color(palette.accent).opacity(enabled ? (configuration.isPressed ? 0.18 : hovered ? 0.09 : 0) : 0), in: RoundedRectangle(cornerRadius: 8))
+            .onHover { hovered = $0 }
     }
 }

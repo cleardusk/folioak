@@ -150,3 +150,63 @@ struct TaskDiagnosticView: View {
         return lines.map(ActivityEntry.redacted).joined(separator: "\n")
     }
 }
+
+struct LogScrollPosition: Equatable {
+    var atTop = true
+    var atBottom = false
+    var canScroll = false
+    init() {}
+    init(scroll: NSScrollView) {
+        let visible = scroll.contentView.bounds
+        let content = scroll.documentView?.bounds ?? .zero
+        canScroll = content.height > visible.height + 2
+        atTop = visible.minY <= content.minY + 2
+        atBottom = visible.maxY >= content.maxY - 2
+    }
+}
+
+// Observe actual clip bounds; programmatic animation must not be mistaken for
+// the user leaving the tail. No timers or global event monitors are installed.
+struct LogScrollObserver: NSViewRepresentable {
+    let changed: (LogScrollPosition) -> Void
+    let userScrolled: (LogScrollPosition) -> Void
+    func makeNSView(context: Context) -> Observer { Observer() }
+    func updateNSView(_ view: Observer, context: Context) {
+        view.changed = changed; view.userScrolled = userScrolled; view.connect()
+    }
+    final class Observer: NSView {
+        var changed: ((LogScrollPosition) -> Void)?
+        var userScrolled: ((LogScrollPosition) -> Void)?
+        weak var scroll: NSScrollView?
+        private var observing: [NSObjectProtocol] = []
+        private var queued = false
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); connect() }
+        override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); connect() }
+        func connect() {
+            guard let enclosingScrollView, scroll !== enclosingScrollView else { return }
+            observing.forEach(NotificationCenter.default.removeObserver); observing = []
+            scroll = enclosingScrollView
+            let clip = enclosingScrollView.contentView
+            clip.postsBoundsChangedNotifications = true
+            enclosingScrollView.documentView?.postsFrameChangedNotifications = true
+            for (name, object) in [(NSView.boundsDidChangeNotification, clip as NSView), (NSView.frameDidChangeNotification, enclosingScrollView.documentView ?? clip)] {
+                observing.append(NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in self?.report() })
+            }
+            for name in [NSScrollView.didLiveScrollNotification, NSScrollView.didEndLiveScrollNotification] {
+                observing.append(NotificationCenter.default.addObserver(forName: name, object: enclosingScrollView, queue: .main) { [weak self] _ in
+                    guard let self, let scroll = self.scroll else { return }
+                    self.userScrolled?(LogScrollPosition(scroll: scroll)); self.report()
+                })
+            }
+            report()
+        }
+        private func report() {
+            guard !queued else { return }; queued = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }; self.queued = false
+                if let scroll = self.scroll { self.changed?(LogScrollPosition(scroll: scroll)) }
+            }
+        }
+        deinit { observing.forEach(NotificationCenter.default.removeObserver) }
+    }
+}

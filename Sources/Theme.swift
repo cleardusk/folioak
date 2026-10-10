@@ -67,17 +67,17 @@ enum AppTheme: String, CaseIterable {
 
 struct PrimaryActionStyle: ButtonStyle {
     let palette: ThemePalette
-    var prominent = true
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(ThemePalette.color(enabled ? (prominent ? palette.onAction : palette.text) : palette.secondary))
-            .padding(.horizontal, 12).frame(maxWidth: .infinity).frame(height: 40)
-            .background(ThemePalette.color(enabled && prominent ? palette.action : palette.surface).opacity(configuration.isPressed ? 0.85 : 1))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(enabled && prominent ? Color.clear : ThemePalette.color(palette.border), lineWidth: 1))
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(ThemePalette.color(enabled ? palette.onAction : palette.secondary).opacity(enabled ? 1 : 0.5))
+            .frame(width: 40, height: 40)
+            .background(ThemePalette.color(enabled ? palette.action : palette.border).opacity(enabled ? 1 : 0.4), in: Circle())
+            .contentShape(Circle())
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.95 : 1)
     }
 }
 

@@ -97,6 +97,8 @@ struct CoreTests {
                 try filterRenderingTests()
                 try logGroupingTests()
                 try await settingsLayoutTests()
+                try await logScrollTests()
+                try await inputColorTransitionTests()
                 try await listFocusTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
@@ -137,6 +139,8 @@ struct CoreTests {
             try filterRenderingTests()
             try logGroupingTests()
             try await settingsLayoutTests()
+            try await logScrollTests()
+            try await inputColorTransitionTests()
             try await listFocusTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
             if CommandLine.arguments.contains("--stress") {
@@ -862,7 +866,7 @@ struct CoreTests {
             let size = NSSize(width: CGFloat(width), height: height.map { CGFloat($0) } ?? view.fittingSize.height)
             let style: NSWindow.StyleMask = title == "设置" ? [.titled, .closable] : [.titled, .closable, .miniaturizable, .resizable]
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: style, backing: .buffered, defer: false)
-            let chrome = WindowChrome(window: window, model: model, title: title, workspace: title != "设置")
+            let chrome = WindowChrome(window: window, model: model, title: title, workspace: true)
             let headerHeight = window.frame.height - window.contentLayoutRect.height
             window.setContentSize(NSSize(width: size.width, height: size.height + (height == nil ? headerHeight : 0)))
             window.contentView = view
@@ -907,7 +911,7 @@ struct CoreTests {
                             DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"), state: .queued)
                         ]
                         try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "busy-\(suffix)-\(width)")
-                        if theme == .midnight && scheme == .dark && width == 820 {
+                        if theme == .midnight && width == 820 {
                             model.cancelling = true
                             try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "cancelling-\(suffix)-\(width)")
                             model.cancelling = false

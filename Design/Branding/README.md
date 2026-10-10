@@ -1,10 +1,10 @@
 # Leafpick 图标
 
-用户最终选择最初的「绿叶落入托盘」版本。
+保留用户选定的「叶片落入托盘」轮廓。2.3.3 按新反馈改为鲜明玉绿色，简化表面细节。
 
-- 最终源图：../../Resources/LeafpickIcon.png
+- 当前源图：../../Resources/LeafpickIcon.png
 - macOS 图标：../../Resources/AppIcon.icns
-- 生成提示词：selected-prompt.txt
-- A/B/C 仅为未采用的候选，不用于发布。
+- 最初深绿版本：Original-leaf-tray.png（设计存档，不打包）
+- A/B/C 是未采用的候选，不用于发布。
 
-Tools/MakeIcon.swift 仅将确认的原图按 macOS 所需尺寸缩放，不重绘图形。
+Tools/MakeIcon.swift 仅将源图缩放为 macOS 所需尺寸，保留透明背景。

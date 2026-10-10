@@ -751,6 +751,53 @@ final class LinkTextView: NSTextView {
     private let placeholderLayout = NSLayoutManager()
     private let placeholderContainer = NSTextContainer()
 
+    private struct InputColors: Equatable {
+        let text: NSColor
+        let accent: NSColor
+        let placeholder: NSColor
+    }
+    private final class ColorTransition: NSAnimation {
+        var apply: ((CGFloat) -> Void)?
+        override var runLoopModesForAnimating: [RunLoop.Mode]? { [.common, .eventTracking] }
+        override var currentProgress: NSAnimation.Progress {
+            didSet { apply?(CGFloat(currentValue)) }
+        }
+    }
+    private var colorTransition: ColorTransition?
+    private var colorTarget: InputColors?
+    private var currentColors: InputColors?
+    private var underlineLinks = false
+
+    func updateColors(text: NSColor, accent: NSColor, placeholder: NSColor, underline: Bool, animated: Bool) {
+        let target = InputColors(text: text, accent: accent, placeholder: placeholder)
+        underlineLinks = underline
+        guard colorTarget != target else {
+            if !animated { colorTransition?.stop(); colorTransition = nil; renderColors(target) }
+            else if let currentColors { renderColors(currentColors) }
+            return
+        }
+        let start = currentColors
+        colorTransition?.stop(); colorTransition = nil
+        colorTarget = target
+        guard animated, let start else { renderColors(target); return }
+        let transition = ColorTransition(duration: 0.24, animationCurve: .easeInOut)
+        transition.animationBlockingMode = .nonblocking
+        transition.frameRate = 60
+        transition.apply = { [weak self] progress in
+            func blend(_ a: NSColor, _ b: NSColor) -> NSColor { a.blended(withFraction: progress, of: b) ?? b }
+            self?.renderColors(InputColors(text: blend(start.text, target.text), accent: blend(start.accent, target.accent), placeholder: blend(start.placeholder, target.placeholder)))
+        }
+        colorTransition = transition
+        transition.start()
+    }
+    private func renderColors(_ colors: InputColors) {
+        currentColors = colors
+        placeholderColor = colors.placeholder
+        insertionPointColor = colors.accent
+        styleReferences(textColor: colors.text, accentColor: colors.accent, underlineRecognized: underlineLinks)
+    }
+    deinit { colorTransition?.stop() }
+
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
         registerForDraggedTypes([.string, .URL])
@@ -852,6 +899,7 @@ final class LinkTextView: NSTextView {
 
 struct LinkInput: NSViewRepresentable {
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: DownloadModel
     @Binding var focused: Bool
     let palette: ThemePalette
@@ -913,15 +961,15 @@ struct LinkInput: NSViewRepresentable {
         editor.isEditable = !model.busy
         let textColor = ThemePalette.nativeColor(palette.text)
         let accentColor = ThemePalette.nativeColor(palette.accent)
-        if editor.insertionPointColor != accentColor { editor.insertionPointColor = accentColor }
-        editor.placeholderColor = ThemePalette.nativeColor(palette.secondary).blended(withFraction: scheme == .dark ? 0.18 : 0, of: ThemePalette.nativeColor(palette.surface)) ?? ThemePalette.nativeColor(palette.secondary)
+        let placeholderColor = ThemePalette.nativeColor(palette.secondary).blended(withFraction: scheme == .dark ? 0.34 : 0.12, of: ThemePalette.nativeColor(palette.surface)) ?? ThemePalette.nativeColor(palette.secondary)
         if editor.string != model.input {
             editor.string = model.input
             editor.undoManager?.removeAllActions()
             editor.sizeToFit()
             editor.needsDisplay = true
         }
-        editor.styleReferences(textColor: textColor, accentColor: accentColor, underlineRecognized: model.theme == .graphite)
+        editor.updateColors(text: textColor, accent: accentColor, placeholder: placeholderColor, underline: model.theme == .graphite,
+                            animated: !reduceMotion && editor.window?.isVisible == true)
         let selectToken = context.coordinator.selectionRequest != model.editRequest
         context.coordinator.selectionRequest = model.editRequest
         if !model.busy && (selectToken || (focused && editor.window?.firstResponder !== editor)) {
@@ -978,15 +1026,19 @@ final class LinkScrollView: NSScrollView {
     }
 }
 
-private struct SettingsTabs: View {
-    @Binding var selection: String
+struct SlidingSegments<Selection: Hashable>: View {
+    @Binding var selection: Selection
+    let options: [Selection]
+    let title: (Selection) -> String
+    var segmentWidth: CGFloat = 80
+    var accessibilityName = "设置分类"
     let palette: ThemePalette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @FocusState private var focusedTab: String?
+    @FocusState private var focusedTab: Selection?
 
     private var selectionShape: some View {
-        RoundedRectangle(cornerRadius: 7).frame(width: 80, height: 24)
-            .offset(x: selection == "通用" ? 2 : 82)
+        RoundedRectangle(cornerRadius: 7).frame(width: segmentWidth, height: 24)
+            .offset(x: 2 + CGFloat(options.firstIndex(of: selection) ?? 0) * segmentWidth)
             .animation(reduceMotion ? nil : .interactiveSpring(response: 0.28, dampingFraction: 0.9, blendDuration: 0.08), value: selection)
     }
 
@@ -994,29 +1046,30 @@ private struct SettingsTabs: View {
         ZStack(alignment: .leading) {
             selectionShape.foregroundStyle(ThemePalette.color(palette.action)).allowsHitTesting(false)
             HStack(spacing: 0) {
-                ForEach(["通用", "快捷键"], id: \.self) { tab in
+                ForEach(options, id: \.self) { tab in
                     Button { selection = tab } label: {
-                        Text(tab).font(.system(size: 12, weight: .medium))
+                        Text(title(tab)).font(.system(size: 12, weight: .medium))
                             .foregroundStyle(ThemePalette.color(palette.secondary))
-                            .frame(width: 80, height: 28).contentShape(Rectangle())
+                            .frame(width: segmentWidth, height: 28).contentShape(Rectangle())
                     }.buttonStyle(.plain).focused($focusedTab, equals: tab)
                         .accessibilityAddTraits(selection == tab ? .isSelected : [])
                 }
             }.padding(.horizontal, 2)
             // Keep text contrast tied to the moving thumb, including interrupted reversals.
             HStack(spacing: 0) {
-                ForEach(["通用", "快捷键"], id: \.self) { tab in
-                    Text(tab).font(.system(size: 12, weight: .medium)).frame(width: 80, height: 28)
+                ForEach(options, id: \.self) { tab in
+                    Text(title(tab)).font(.system(size: 12, weight: .medium)).frame(width: segmentWidth, height: 28)
                 }
             }.padding(.horizontal, 2).foregroundStyle(ThemePalette.color(palette.onAction))
                 .mask(alignment: .leading) { selectionShape }
                 .allowsHitTesting(false).accessibilityHidden(true)
-        }.frame(width: 164, height: 28)
+        }.frame(width: segmentWidth * CGFloat(options.count) + 4, height: 28)
             .background(ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: 9))
-            .accessibilityElement(children: .contain).accessibilityLabel("设置分类")
+            .accessibilityElement(children: .contain).accessibilityLabel(accessibilityName)
             .onMoveCommand { direction in
-                if direction == .left { selection = "通用"; focusedTab = selection }
-                if direction == .right { selection = "快捷键"; focusedTab = selection }
+                let index = options.firstIndex(of: selection) ?? 0
+                if direction == .left { selection = options[max(0, index - 1)]; focusedTab = selection }
+                if direction == .right { selection = options[min(options.count - 1, index + 1)]; focusedTab = selection }
             }
     }
 }
@@ -1026,10 +1079,11 @@ struct SettingsView: View {
     @Environment(\.colorScheme) private var scheme
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     @ViewState var tab = "通用"
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 16) {
-            SettingsTabs(selection: $tab, palette: palette)
+            SlidingSegments(selection: $tab, options: ["通用", "快捷键"], title: { $0 }, palette: palette)
             Group {
                 if tab == "通用" { general } else { ShortcutSettingsView(shortcuts: model.shortcuts, palette: palette) }
             }.frame(width: 422, height: 380, alignment: .top)
@@ -1037,6 +1091,8 @@ struct SettingsView: View {
             .frame(width: 470, height: 456, alignment: .top)
             .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))
             .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
     }
     private var general: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1068,9 +1124,8 @@ struct SettingsView: View {
             Divider()
             HStack(spacing: 16) {
                 settingLabel("外观")
-                Picker("外观", selection: $model.appearance) {
-                    ForEach(AppAppearance.allCases, id: \.self) { Text($0.label).tag($0) }
-                }.pickerStyle(.segmented).labelsHidden()
+                SlidingSegments(selection: $model.appearance, options: AppAppearance.allCases, title: { $0.label },
+                                segmentWidth: 118, accessibilityName: "外观", palette: palette)
             }
             HStack(alignment: .top, spacing: 16) {
                 settingLabel("主题").frame(height: ThemeChoice.previewHeight)
@@ -1238,7 +1293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let contentSize = view.fittingSize
             let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             panel.title = "拾取设置"
-            settingsChrome = WindowChrome(window: panel, model: model, title: "设置")
+            settingsChrome = WindowChrome(window: panel, model: model, title: "设置", workspace: true)
             panel.contentView = view
             panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
             panel.isReleasedWhenClosed = false

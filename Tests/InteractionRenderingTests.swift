@@ -224,3 +224,98 @@ extension CoreTests {
         print("PASS rendered filter motion: intermediate frames and rapid parent reversal stay aligned")
     }
 }
+
+
+@MainActor private final class LogRegressionProbe: ObservableObject {
+    @Published var query = ""
+    @Published var level: ActivityLevel?
+    @Published var entries: [ActivityEntry] = []
+}
+private struct LogRegressionView: View {
+    @ObservedObject var probe: LogRegressionProbe
+    var body: some View {
+        LogContent(entries: probe.entries.filter { (probe.query.isEmpty || $0.message.contains(probe.query)) && (probe.level == nil || $0.level == probe.level) },
+                   hasLogs: !probe.entries.isEmpty, query: probe.query, level: $probe.level, palette: AppTheme.graphite.palette(dark: false))
+    }
+}
+extension CoreTests {
+    @MainActor static func logScrollTests() async throws {
+        let probe = LogRegressionProbe()
+        let task = UUID()
+        probe.entries = (0..<1500).map { i in
+            ActivityEntry(level: i % 9 == 0 ? .warning : .info, message: "日志 \(i) · " + String(repeating: "较长的消息，检查实际滚动边界。", count: i % 5), subject: "回归检查", itemID: task)
+        }
+        let view = NSHostingView(rootView: LogRegressionView(probe: probe))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { window.orderOut(nil) }
+        func settle() async {
+            view.layoutSubtreeIfNeeded()
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            view.layoutSubtreeIfNeeded()
+        }
+        func observer(_ root: NSView) -> LogScrollObserver.Observer? {
+            (root as? LogScrollObserver.Observer) ?? root.subviews.lazy.compactMap(observer).first
+        }
+        func userScroll(_ scroll: NSScrollView, y: CGFloat) {
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
+        }
+        await settle()
+        guard let scroll = observer(view)?.scroll else { throw TestFailure.failed("logs expose native clip bounds") }
+        try expect(LogScrollPosition(scroll: scroll).canScroll && LogScrollPosition(scroll: scroll).atBottom, "long variable-height logs start at latest entry")
+        userScroll(scroll, y: scroll.contentView.bounds.minY - 200)
+        await settle()
+        let readingY = scroll.contentView.bounds.minY
+        probe.entries.append(ActivityEntry(level: .info, message: "手动上滚后不拉回", subject: nil, itemID: nil))
+        await settle()
+        try expect(abs(scroll.contentView.bounds.minY - readingY) < 2, "new log preserves historical reading position")
+        userScroll(scroll, y: scroll.documentView!.bounds.maxY - scroll.contentView.bounds.height)
+        await settle()
+        probe.entries.append(ActivityEntry(level: .info, message: "尾部继续跟随", subject: nil, itemID: nil))
+        await settle()
+        try expect(LogScrollPosition(scroll: scroll).atBottom, "new logs follow at actual tail")
+        for byLevel in [false, true] {
+            let current = observer(view)!.scroll!
+            userScroll(current, y: current.contentView.bounds.minY - 200)
+            await settle()
+            if byLevel { probe.level = .error } else { probe.query = "no-match" }
+            await settle()
+            try expect(observer(view)?.scroll == nil, "empty filter removes scroll content")
+            if byLevel { probe.level = nil } else { probe.query = "" }
+            await settle()
+            guard let returned = observer(view)?.scroll else { throw TestFailure.failed("filtered log content restored") }
+            try expect(LogScrollPosition(scroll: returned).atBottom, "clearing empty search/filter returns to tail")
+            probe.entries.append(ActivityEntry(level: .info, message: "恢复筛选后继续跟随", subject: nil, itemID: nil))
+            await settle()
+            try expect(LogScrollPosition(scroll: returned).atBottom, "clearing empty search/filter restores following latest")
+        }
+        probe.entries = [ActivityEntry(level: .info, message: "短日志", subject: nil, itemID: nil)]
+        await settle()
+        try expect(observer(view).flatMap(\.scroll).map { !LogScrollPosition(scroll: $0).canScroll } == true, "short list needs no scroll control")
+        print("PASS logs: 1500 variable-height rows, tail following, manual reading, empty-search/filter restoration, short list")
+    }
+
+    @MainActor static func inputColorTransitionTests() async throws {
+        let storage = NSTextStorage(), layout = NSLayoutManager()
+        let container = NSTextContainer(containerSize: NSSize(width: 500, height: 120))
+        storage.addLayoutManager(layout); layout.addTextContainer(container)
+        let editor = LinkTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 120), textContainer: container)
+        editor.string = "https://arxiv.org/abs/1706.03762 test"
+        editor.setSelectedRange(NSRange(location: 2, length: 5))
+        editor.updateColors(text: .white, accent: .white, placeholder: .white, underline: true, animated: false)
+        editor.updateColors(text: .black, accent: .black, placeholder: .black, underline: true, animated: true)
+        try await Task.sleep(nanoseconds: 90_000_000)
+        let halfway = editor.placeholderColor.usingColorSpace(.sRGB)!.redComponent
+        try expect(halfway > 0.05 && halfway < 0.95, "native placeholder interpolates instead of flashing")
+        try expect(abs(editor.insertionPointColor.usingColorSpace(.sRGB)!.redComponent - halfway) < 0.01, "caret and placeholder share transition progress")
+        editor.updateColors(text: .white, accent: .white, placeholder: .white, underline: true, animated: true)
+        let reversed = editor.placeholderColor.usingColorSpace(.sRGB)!.redComponent
+        try expect(abs(reversed - halfway) < 0.08, "rapid appearance reversal starts from displayed color")
+        editor.updateColors(text: .white, accent: .white, placeholder: .white, underline: true, animated: false)
+        try expect(editor.placeholderColor == .white, "reduced motion immediately reaches final color")
+        try expect(editor.string == "https://arxiv.org/abs/1706.03762 test" && editor.selectedRange() == NSRange(location: 2, length: 5), "color transition preserves text and selection")
+        print("PASS native colors: intermediate frame, synchronized caret, rapid reversal, reduced motion, text and selection")
+    }
+}

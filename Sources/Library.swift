@@ -285,8 +285,8 @@ struct LibraryRow: View {
                 else if paper.missing { Button("关联") { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else { Button("打开") { model.openPaper(paper) }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 if !paper.removed {
-                    Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 20, height: 32) }
-                        .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22).accessibilityLabel("\(paper.title)的更多操作")
+                    Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
+                        .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel("\(paper.title)的更多操作")
                 }
             }.padding(.top, 5)
         }.padding(20).background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
