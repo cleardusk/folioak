@@ -4,11 +4,13 @@ import SwiftUI
 struct PaperListKeyboard: NSViewRepresentable {
     enum Action { case up, down, preview, open, diagnostics }
     let request: UUID?
+    var detailsShortcut = AppShortcut(key: "i")
     let didFocus: (UUID) -> Void
     let action: (Action) -> Void
     func makeNSView(context: Context) -> KeyView { KeyView(request: request, didFocus: didFocus, action: action) }
     func updateNSView(_ view: KeyView, context: Context) {
         view.action = action
+        view.detailsShortcut = detailsShortcut
         view.didFocus = didFocus
         guard view.request != request else { return }
         view.request = request
@@ -16,6 +18,7 @@ struct PaperListKeyboard: NSViewRepresentable {
     }
     final class KeyView: NSView {
         var request: UUID?
+        var detailsShortcut = AppShortcut(key: "i")
         private var fulfilledRequest: UUID?
         var didFocus: (UUID) -> Void
         var action: (Action) -> Void
@@ -39,7 +42,7 @@ struct PaperListKeyboard: NSViewRepresentable {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func keyDown(with event: NSEvent) {
             let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-            if modifiers == .command, event.charactersIgnoringModifiers == "i" { action(.diagnostics); return }
+            if detailsShortcut.matches(event) { action(.diagnostics); return }
             guard modifiers.isEmpty else { super.keyDown(with: event); return }
             switch event.keyCode {
             case 126: action(.up)

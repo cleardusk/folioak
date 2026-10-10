@@ -42,6 +42,21 @@ enum DownloadSource: Hashable, Sendable {
             parts.percentEncodedPath = path.joined(separator: "/")
             parts.query = nil
         }
+        if ["openreview.net", "www.openreview.net"].contains(parts.host?.lowercased() ?? ""), ["/forum", "/pdf"].contains(parts.path) {
+            let ids = parts.queryItems?.filter { $0.name == "id" }.compactMap(\.value) ?? []
+            guard ids.count == 1, ids[0].range(of: #"^[A-Za-z0-9_-]{1,128}$"#, options: .regularExpression) != nil else { throw DownloadError.invalidLink(input) }
+            parts.host = "openreview.net"; parts.path = "/pdf"; parts.queryItems = [URLQueryItem(name: "id", value: ids[0])]
+        }
+        if parts.host?.lowercased() == "aclanthology.org" {
+            let identifier = parts.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if identifier.range(of: #"^(?:[0-9]{4}\.[A-Za-z0-9-]+\.[0-9]+|[A-Z][0-9]{2}-[0-9]{4})$"#, options: .regularExpression) != nil {
+                parts.path = "/" + identifier + ".pdf"; parts.query = nil
+            }
+        }
+        if parts.host?.lowercased() == "openaccess.thecvf.com", parts.path.contains("/html/"), parts.path.hasSuffix("_paper.html") {
+            parts.percentEncodedPath = String(parts.percentEncodedPath.replacingOccurrences(of: "/html/", with: "/papers/").dropLast(5)) + ".pdf"
+            parts.query = nil
+        }
         parts.fragment = nil; parts.scheme = "https"; parts.host = parts.host?.lowercased()
         if parts.port == 443 { parts.port = nil }
         guard let canonical = parts.url else { throw DownloadError.invalidLink(input) }

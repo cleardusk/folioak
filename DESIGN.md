@@ -127,3 +127,15 @@ Refero 在线查询返回 NO_SUBSCRIPTION，采用技能内附规范及上述用
 预览使用 Apple Quick Look；列表选择与菜单操作同步，关闭预览／详情后回到对应行。原生响应者处理方向键、空格、Return 与 ⌘I，避免全局键盘监听干扰文本编辑。⌘L 添加论文，⌘J 进入列表；菜单和帮助承担提示，主界面不增加说明。
 
 参考：[Zotero 输入](https://www.zotero.org/support/adding_items_to_zotero)、[Raycast 上下文操作](https://manual.raycast.com/action-panel)、[Apple Quick Look](https://developer.apple.com/documentation/swiftui/view/quicklookpreview(_:))。现有 FlClash 动效与减弱动态效果支持保持不变。
+
+## 2.2：独立资料库与来源调度
+
+沿用已确认的 FlClash 字级、间距、卡片及动画，不新增一级导航。资料库顶部只保留搜索、导入和更多；第二行使用全部／收藏／未读和一个筛选排序菜单。行内只保留论文信息、未读点、收藏标记和必要的新版本／文件缺失状态；标题、标签、恢复与版本操作放进行菜单。已移除视图提供直接返回入口，原 PDF 始终保留。
+
+组织方式参考 [Zotero 标签和集合](https://www.zotero.org/support/collections_and_tags)，仅采用独立记录、标签筛选和可恢复移除，暂不引入嵌套集合、引用编辑器或全文索引。本地导入引用原位置；资料库保留每个精确 arXiv 版本，下载新版继承收藏与标签但保持未读。手动版本检查共用 arXiv 原有 15.1 秒间隔与跨进程协调，不后台轮询。
+
+设置使用固定大小的通用／快捷键两页。四个动作的录制按钮等宽，错误只占固定一行区域；固定列表键在下方简要列出。参考 [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) 的录制与冲突提示模式，使用原生 AppKit 按钮和仅录制期间存在的本地事件监听，不增加依赖或全局快捷键。标准 ⌘W 通过窗口响应者链关闭当前窗口。
+
+来源转换遵循 [OpenReview PDF 接口](https://docs.openreview.net/how-to-guides/data/how-to-get-pdfs-from-submissions)、[ACL Anthology](https://aclanthology.org/2023.emnlp-main.1/) 及 [CVF 论文页](https://openaccess.thecvf.com/content/CVPR2024/html/Yang_Depth_Anything_Unleashing_the_Power_of_Large-Scale_Unlabeled_Data_CVPR_2024_paper.html) 的公开链接结构。不同输入来源最多三个并行、每来源一个任务；arXiv 策略不降低，外部文件保留 ETag／Last-Modified 复用、重定向验证、限流及 PDF 校验。
+
+实际操作发现并修复：下载与资料库的同 UUID 行被复用后保留旧菜单；已移除视图导入后结果不可见；菜单与详情快捷键对应到不同任务。回归覆盖独立迁移、600 条记录、只读损坏保护、超长作者、版本下载保留草稿／旧文件、部分版本检查失败以及来源并发上限。

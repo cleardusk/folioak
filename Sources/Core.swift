@@ -29,6 +29,7 @@ enum DownloadError: LocalizedError {
         case .invalidLink: return "无法识别：请输入 arXiv / HF 论文链接、编号或 HTTPS PDF 直链。"
         case .metadata(let message), .limit(let message), .coordination(let message): return message
         case .http(let code, _):
+            if code == 403 { return "下载站点拒绝访问（403），可能需要登录或浏览器验证。" }
             if code == 404 { return "下载站点未找到文件或指定版本（404）。" }
             if code == 429 { return "下载站点暂时限流（429），请稍后重试。" }
             return "下载站点返回 HTTP \(code)，请稍后重试。"
@@ -107,6 +108,7 @@ struct PaperMetadata: Sendable, Codable {
     let title: String
     let year: Int
     let month: Int
+    var authors: [String]? = nil
 
     var filename: String { filename(suffix: "") }
     func filename(style: NamingStyle = .dateTitle, suffix: String = "") -> String {
@@ -194,7 +196,8 @@ final class AtomParser: NSObject, XMLParserDelegate {
                   (1...12).contains(month), (1900...2199).contains(year) else {
                 throw DownloadError.metadata("arXiv 元数据缺少标题、首次提交日期或版本号，未下载。")
             }
-            return PaperMetadata(reference: reference, title: title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " "), year: year, month: month)
+            return PaperMetadata(reference: reference, title: title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " "), year: year, month: month,
+                                 authors: entry["authors"].map { $0.split(separator: "\n").map(String.init) })
         }
         throw DownloadError.metadata("arXiv 未返回这篇论文或指定版本的元数据。")
     }
@@ -204,10 +207,12 @@ final class AtomParser: NSObject, XMLParserDelegate {
         if elementName == "entry" { fields = [:] }
     }
     func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if path.suffix(3) == ["entry", "author", "name"] { fields["authors", default: ""] += string }
         if path.count >= 2, path[path.count - 2] == "entry", let field = path.last,
            ["id", "title", "published"].contains(field) { fields[field, default: ""] += string }
     }
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        if path.suffix(3) == ["entry", "author", "name"] { fields["authors", default: ""] += "\n" }
         if elementName == "entry" { entries.append(fields.mapValues { $0.trimmingCharacters(in: .whitespacesAndNewlines) }) }
         if !path.isEmpty { path.removeLast() }
     }
@@ -772,6 +777,23 @@ actor DownloadEngine {
         try Task.checkCancellation()
         event(.validating)
         return try PaperStorage.save(downloaded: local, metadata: metadata, directory: directory, naming: naming)
+    }
+
+    func latestReference(_ baseID: String) async throws -> ArxivReference {
+        let client = DownloadEngine(transport: transport, requestInterval: requestInterval, retryDelay: retryDelay,
+                                    rateLimitDelay: rateLimitDelay, cooldownPreferences: cooldownPreferences, coordinator: coordinator)
+        return try await client.lookupReference(ArxivReference(baseID: baseID, version: nil))
+    }
+    private func lookupReference(_ reference: ArxivReference) async throws -> ArxivReference {
+        defer { lease = nil }
+        try await acquire(event: { _ in })
+        var components = URLComponents(string: "https://export.arxiv.org/api/query")!
+        components.queryItems = [URLQueryItem(name: "id_list", value: reference.identifier), URLQueryItem(name: "max_results", value: "1")]
+        return try await retried(event: { _ in }) {
+            let (data, response) = try await self.transport.data(for: URLRequest(url: components.url!))
+            try self.check(response)
+            return try AtomParser.metadata(data, requested: reference).reference
+        }
     }
 
     func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {

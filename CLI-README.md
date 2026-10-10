@@ -21,6 +21,7 @@ arxiv-download https://arxiv.org/html/2605.18678
 ./arxiv-download https://arxiv.org/html/2605.18678 -o ~/Downloads/Papers
 ./arxiv-download https://huggingface.co/papers/2608.15763
 ./arxiv-download https://github.com/openai/math/blob/main/overview.pdf
+./arxiv-download https://aclanthology.org/2023.emnlp-main.1/
 ./arxiv-download 1706.03762v1 2609.22978v1 --naming id-title --json
 ```
 
@@ -46,6 +47,8 @@ arxiv-download https://mirros.ai/report/agent-garten.pdf
 ```
 
 通用 PDF 用 ETag / Last-Modified 条件请求检查更新，304 时复用内容未变的本地文件。没有可靠更新标记或发生重定向时重新下载校验；登录网页和 HTML 页面不能作为 PDF 保存。限流只暂停同一输入站点，其余站点可继续下载。
+
+2.2 支持将公开 OpenReview 讨论页、ACL Anthology 论文页和 CVF 论文页转换为 PDF 地址。不同输入来源最多三个并行，同一来源串行；arXiv 的共享请求间隔与限流策略保持不变。混合来源下载使用简短逐项结果，避免进度覆盖；`--json` 的结果保持输入顺序，普通 stdout 路径按完成顺序输出。
 
 退出码：0 全部成功；1 有失败或待重试项；2 参数或目录错误；130 SIGINT 取消；143 SIGTERM 取消。JSON 的结果状态为 saved、existing、failed、paused、cancelled；暂停项可能包含 retryAfter（ISO 8601）。
 

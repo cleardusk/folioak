@@ -111,6 +111,8 @@ struct CoreTests {
             try filenameStorageTests(root: root, pdf: pdf)
             try await cliTests(root: root, pdf: pdf)
             try await featureTests(root: root, pdf: pdf)
+            try await libraryTests(root: root, pdf: pdf)
+            try await sourceSchedulingTests()
             try await coordinatorTests(root: root, pdf: pdf)
             try await processTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)
@@ -951,6 +953,7 @@ struct CoreTests {
             try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "generic-settings-\(scheme == .light ? "light" : "dark")", title: "设置")
         }
         model.history = completedItems.filter { $0.savedURL != nil }
+        model.history.forEach { model.upsertPaper($0) }
         model.record(.info, "开始下载 · 2 项")
         model.record(.warning, "自动重试 1/3", item: completedItems[1])
         model.record(.success, "已保存", item: completedItems[0])

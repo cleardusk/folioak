@@ -1,6 +1,33 @@
 import Foundation
 import Darwin
 
+enum SourceScheduler {
+    static func groups<T>(_ items: [T], key: (T) -> String) -> [[T]] {
+        var indices: [String: Int] = [:]; var groups: [[T]] = []
+        for item in items {
+            let source = key(item)
+            if let index = indices[source] { groups[index].append(item) }
+            else { indices[source] = groups.count; groups.append([item]) }
+        }
+        return groups
+    }
+    static func run<T: Sendable, Result: Sendable>(_ groups: [[T]], operation: @escaping @Sendable ([T]) async -> Result) async -> [Result] {
+        await withTaskGroup(of: Result.self) { group in
+            var next = 0; var results: [Result] = []
+            func enqueue() {
+                let batch = groups[next]; next += 1
+                group.addTask { await operation(batch) }
+            }
+            for _ in 0..<min(3, groups.count) { enqueue() }
+            while let result = await group.next() {
+                results.append(result)
+                if next < groups.count && !Task.isCancelled { enqueue() }
+            }
+            return results
+        }
+    }
+}
+
 struct DownloadPreferences {
     static let domain = "local.paperrepo.arxiv-downloader"
     static var shared: UserDefaults {
@@ -116,8 +143,8 @@ struct TaskDiagnostics: Codable {
     static func time(_ seconds: Double) -> String { seconds < 0.1 ? "<0.1 秒" : seconds < 60 ? String(format: "%.1f 秒", seconds) : String(format: "%.0f 分 %.0f 秒", floor(seconds / 60), seconds.truncatingRemainder(dividingBy: 60)) }
 }
 
-struct BatchInput {
-    struct Entry {
+struct BatchInput: Sendable {
+    struct Entry: Sendable {
         let original: String
         let source: DownloadSource?
         var reference: ArxivReference? { source?.reference }

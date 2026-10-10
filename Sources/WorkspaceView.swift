@@ -73,16 +73,33 @@ struct DownloaderView: View {
     @WorkspaceViewState private var selectedID: UUID?
     @WorkspaceViewState private var listFocus: UUID?
     @WorkspaceViewState private var focusListOnArrival = false
+    @WorkspaceViewState private var libraryFilter = LibraryFilter.all
+    @WorkspaceViewState private var librarySort = LibrarySort.newest
+    @WorkspaceViewState private var libraryTag: String?
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var visibleItems: [DownloadItem] {
-        let source = page == .library ? model.library : model.items
+        if page == .library { return libraryPapers.map(\.downloadItem) }
+        let source = model.items
         return source.filter { item in
             (page == .library || filter.includes(item)) &&
             (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) || item.original.localizedCaseInsensitiveContains(query))
+        }
+    }
+    private var libraryPapers: [LibraryPaper] {
+        model.papers.filter { paper in
+            paper.removed == (libraryFilter == .removed) &&
+            (libraryFilter != .favorites || paper.favorite) && (libraryFilter != .unread || !paper.read) &&
+            (libraryTag == nil || paper.tags.contains(libraryTag!)) && paper.matches(query)
+        }.sorted { left, right in
+            switch librarySort {
+            case .newest: return left.addedAt > right.addedAt
+            case .title: return left.title.localizedStandardCompare(right.title) == .orderedAscending
+            case .year: return (left.metadata?.year ?? 0) == (right.metadata?.year ?? 0) ? left.addedAt > right.addedAt : (left.metadata?.year ?? 0) > (right.metadata?.year ?? 0)
+            }
         }
     }
     private var visibleLogs: [ActivityEntry] {
@@ -124,6 +141,7 @@ struct DownloaderView: View {
         }
         .quickLookPreview($model.previewURL)
         .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item) }
+        .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
         .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all }
     }
@@ -195,7 +213,23 @@ struct DownloaderView: View {
         HStack(spacing: 12) {
             Text(page.rawValue).font(.system(size: 23, weight: .medium))
             Spacer()
-            if page != .downloads && !(page == .logs ? model.logs.isEmpty : model.history.isEmpty) {
+            if page == .library {
+                if !model.papers.isEmpty { searchField }
+                Button { libraryFilter = .all; libraryTag = nil; query = ""; model.importPDFs() } label: { Image(systemName: "plus") }
+                    .buttonStyle(RoundButtonStyle(palette: palette)).help("导入本地 PDF").accessibilityLabel("导入 PDF").disabled(model.importingPDFs || !model.libraryWritable)
+                Menu {
+                    Button("导出资料库", action: model.exportLibrary).disabled(!model.papers.contains { !$0.removed })
+                    if model.checkingVersions.isEmpty {
+                        Button("检查论文新版本") { model.checkPaperVersions(libraryPapers.map(\.id)) }
+                            .disabled(!libraryPapers.contains { $0.reference != nil })
+                    } else { Button("停止检查版本", action: model.cancelVersionCheck) }
+                    Divider()
+                    Button(libraryFilter == .removed ? "返回资料库" : "已移除的论文") {
+                        libraryFilter = libraryFilter == .removed ? .all : .removed; query = ""; libraryTag = nil
+                    }
+                } label: { Image(systemName: "ellipsis").frame(width: 28, height: 32) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("资料库操作")
+            } else if page == .logs && !model.logs.isEmpty {
                 searchField
                 Button {
                     if page == .logs { model.exportLogs(visibleLogs) } else { model.exportLibrary() }
@@ -240,8 +274,8 @@ struct DownloaderView: View {
                 } else {
                     Button(action: model.start) { Label("开始下载", systemImage: "arrow.down") }
                         .buttonStyle(PrimaryActionStyle(palette: palette))
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(model.tokenCount == 0).frame(width: 128).help("开始下载（⌘ Return）")
+                        .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
+                        .disabled(model.tokenCount == 0).frame(width: 128).help("开始下载（\(model.shortcuts[.download].label)）")
                 }
             }.padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 18)
         }
@@ -282,9 +316,21 @@ struct DownloaderView: View {
                             .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("任务操作")
                     }
                 } else {
-                    Text("最近下载").font(.system(size: 13)).foregroundStyle(secondary)
+                    if libraryFilter == .removed {
+                        Button { libraryFilter = .all } label: { Label("已移除", systemImage: "chevron.left").font(.system(size: 13)) }
+                            .buttonStyle(.plain).foregroundStyle(secondary).help("返回资料库")
+                    }
+                    else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { $0.rawValue }, palette: palette) }
                     Spacer()
-                    Text("\(rows.count) 篇").font(.system(size: 12)).monospacedDigit().foregroundStyle(secondary)
+                    Menu {
+                        Picker("排序", selection: $librarySort) { ForEach(LibrarySort.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                        Divider()
+                        Button("全部标签") { libraryTag = nil }
+                        ForEach(Array(Set(model.papers.filter { !$0.removed }.flatMap(\.tags))).sorted(), id: \.self) { tag in
+                            Button { libraryTag = tag } label: { if libraryTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) } }
+                        }
+                    } label: { Label(libraryTag ?? librarySort.rawValue, systemImage: "line.3.horizontal.decrease").font(.system(size: 12)).lineLimit(1) }
+                        .menuStyle(.borderlessButton).frame(maxWidth: 155).accessibilityLabel("筛选与排序")
                 }
             }.frame(height: 36)
             }
@@ -295,14 +341,19 @@ struct DownloaderView: View {
                     ScrollView {
                         LazyVStack(spacing: 10) {
                             ForEach(rows) { item in
+                                if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
+                                    LibraryRow(paper: paper, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                        .id(item.id)
+                                } else {
                                 DownloadRow(item: item, model: model, inLibrary: page == .library, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                     .contentShape(RoundedRectangle(cornerRadius: 20))
                                     .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
                                     .id(item.id)
+                                }
                             }
                         }.padding(1)
                     }
-                    .background(PaperListKeyboard(request: listFocus, didFocus: { request in
+                    .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], didFocus: { request in
                         if listFocus == request { listFocus = nil }
                     }) { action in
                         guard !rows.isEmpty else { return }
@@ -312,12 +363,16 @@ struct DownloaderView: View {
                             selectedID = rows[next].id
                             scroll.scrollTo(rows[next].id)
                         } else if let item = rows.first(where: { $0.id == selectedID }) {
-                            if action == .preview { model.preview(item) }
+                            if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
+                                if action == .diagnostics { model.showPaperDetails(paper) }
+                                else if !paper.removed { model.openPaper(paper, preview: action == .preview) }
+                            }
+                            else if action == .preview { model.preview(item) }
                             else if action == .open { model.openFile(item) }
                             else if action == .diagnostics { model.diagnosticItem = item }
                         }
                     })
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }.id(page).frame(maxWidth: .infinity, maxHeight: .infinity)
 
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -325,7 +380,10 @@ struct DownloaderView: View {
 
     private var emptyMessage: String {
         if !query.isEmpty { return "没有匹配的结果" }
-        if page == .library { return "暂无论文" }
+        if page == .library {
+            if libraryTag != nil { return "没有匹配的结果" }
+            switch libraryFilter { case .all: return "暂无论文"; case .favorites: return "暂无收藏"; case .unread: return "暂无未读论文"; case .removed: return "暂无已移除论文" }
+        }
         if !model.items.isEmpty { return "暂无\(filter.rawValue)任务" }
         return "暂无下载"
     }
@@ -373,7 +431,7 @@ struct DownloaderView: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let error = model.directoryNotice ?? model.notice ?? model.persistenceNotice {
+            if let error = model.directoryNotice ?? model.notice ?? model.libraryNotice ?? model.persistenceNotice {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 12)).foregroundStyle(UIColors.error)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
@@ -387,7 +445,11 @@ struct DownloaderView: View {
                 } else if page == .logs {
                     Text("\(visibleLogs.count) 条").monospacedDigit()
                     Spacer()
-                } else { Spacer() }
+                } else {
+                    if model.importingPDFs { Text("正在导入…") }
+                    else if !model.checkingVersions.isEmpty { Text("正在检查版本 · 剩余 \(model.checkingVersions.count) 篇") }
+                    Spacer(); Text("\(libraryPapers.count) 篇").monospacedDigit()
+                }
             }.font(.system(size: 11)).foregroundStyle(secondary).frame(height: 18)
         }
     }
@@ -501,7 +563,7 @@ struct DownloadRow: View {
             Button("文件信息…") { model.fileInfo(item) }
             Divider()
         }
-        Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中论文后按 ⌘I")
+        Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中论文后按 \(model.shortcuts[.details].label)")
         if let source = item.source {
             Button("打开来源页面") { model.openSource(item) }
             Button("复制来源链接") {

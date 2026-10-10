@@ -38,6 +38,8 @@ git push origin v1.2.0
 
 Actions 会再次执行离线／资源测试，构建安装包，核验包的 SHA-256 后创建 Release，附上 UI DMG / ZIP、CLI ZIP、校验文件。任一检查失败都不会发布；tag 与应用版本不一致会失败。已发布的版本不会自动覆盖，修正内容应发布新版本。
 
+更新本机 `/Applications` 前，退出应用，备份旧 `.app`、偏好设置、`workspace.json` 及存在的 `library.json`。核验已发布 ZIP 的校验和、签名、版本和内置 CLI 后再替换；首次启动检查旧任务、草稿与独立资料库迁移，避免使用测试数据覆盖用户状态。
+
 普通 `main` 推送会测试、构建并保留安装包 artifact 7 天；PR 只测试、构建。在 Actions 页面手动运行也可获取安装包，手动运行不创建 Release。自动测试不访问 arXiv，以免真实服务故障影响发布。
 
 云端固定使用 Xcode 26.3 / macOS SDK 26.2，避免默认旧 SDK 改变新系统上的原生控件外观；最低系统版本仍为 macOS 13。该工具链来自 [GitHub 官方 macOS runner 镜像](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)，缺失或版本不符时构建直接失败。

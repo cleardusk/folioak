@@ -123,7 +123,8 @@ struct CLIOptions {
           \(accent("-h, --help"))           显示帮助
           \(accent("--version"))            显示版本
 
-        支持 arXiv、HF 论文页、GitHub PDF 和 HTTPS PDF，最多 200 条，自动去重。
+        支持 arXiv、HF、GitHub PDF、OpenReview、ACL、CVF 与 HTTPS PDF。
+        最多 200 条，自动去重；最多同时下载三个来源，同一来源串行。
         无链接参数时自动读取管道；支持 Markdown 与混合文本。
         默认沿用 UI 的目录与命名；选项仅影响本次运行。
         重定向输出文件路径；NO_COLOR=1 关闭颜色。
@@ -131,7 +132,7 @@ struct CLIOptions {
     }
 }
 
-struct CLIResult: Encodable {
+struct CLIResult: Encodable, Sendable {
     let input: String
     var identifier: String?
     var status: String
@@ -319,33 +320,42 @@ enum CLIRunner {
                     throw DownloadError.storage("保存目录不存在、不是文件夹或不可写，请检查权限或使用 -o 指定目录。")
                 }
             }
-            var results: [CLIResult] = []
-            var pauses: [String: Date] = [:]
             let human = interactive && !options.json
-            for entry in batch.entries {
-                var result = CLIResult(input: entry.original, identifier: entry.reference?.identifier, status: "failed", error: entry.error)
-                let console = CLIConsole(identifier: entry.source?.label ?? "", interactive: human, color: color, cursor: cursor, verbose: options.verbose, write: stderr)
-                defer { console.finish(result) }
-                guard let source = entry.source else { results.append(result); continue }
-                if Task.isCancelled { result.status = "cancelled"; results.append(result); continue }
-                if let pause = pauses[source.rateLimitKey] { result.status = "paused"; result.retryAfter = pause; results.append(result); continue }
-                do {
-                    let paper = try await engine.download(source, to: directory, naming: naming) { event in
-                        console.receive(event)
-                    }
-                    result.identifier = paper.metadata?.reference.identifier
-                    result.status = paper.alreadyExisted ? "existing" : "saved"
-                    result.path = paper.url.path
-                    result.pages = paper.pages
-                    if !options.json && !human { stdout(terminalText(paper.url.path) + "\n") }
-                } catch is CancellationError { result.status = "cancelled" }
-                catch DownloadError.cooldown(let seconds) {
-                    let pause = Date().addingTimeInterval(seconds)
-                    pauses[source.rateLimitKey] = pause
-                    result.status = "paused"; result.retryAfter = pause
-                    result.error = "下载站点要求暂停请求，可在 \(pause.formatted(date: .abbreviated, time: .standard)) 后重试。"
-                } catch { result.error = error.localizedDescription }
-                results.append(result)
+            let groups = SourceScheduler.groups(Array(batch.entries.indices)) { batch.entries[$0].source?.rateLimitKey ?? "invalid" }
+            let completed = await SourceScheduler.run(groups) { indices -> [(Int, CLIResult)] in
+                var results: [(Int, CLIResult)] = []
+                var pauses: [String: Date] = [:]
+                for index in indices {
+                    let entry = batch.entries[index]
+                    var result = CLIResult(input: entry.original, identifier: entry.reference?.identifier, status: "failed", error: entry.error)
+                    let console = CLIConsole(identifier: entry.source?.label ?? "", interactive: human, color: color, cursor: cursor && groups.count == 1, verbose: options.verbose, write: stderr)
+                    defer { console.finish(result) }
+                    guard let source = entry.source else { results.append((index, result)); continue }
+                    if Task.isCancelled { result.status = "cancelled"; results.append((index, result)); continue }
+                    if let pause = pauses[source.rateLimitKey] { result.status = "paused"; result.retryAfter = pause; results.append((index, result)); continue }
+                    do {
+                        let paper = try await engine.download(source, to: directory, naming: naming) { event in
+                            console.receive(event)
+                        }
+                        result.identifier = paper.metadata?.reference.identifier
+                        result.status = paper.alreadyExisted ? "existing" : "saved"
+                        result.path = paper.url.path
+                        result.pages = paper.pages
+                        if !options.json && !human { stdout(terminalText(paper.url.path) + "\n") }
+                    } catch is CancellationError { result.status = "cancelled" }
+                    catch DownloadError.cooldown(let seconds) {
+                        let pause = Date().addingTimeInterval(seconds)
+                        pauses[source.rateLimitKey] = pause
+                        result.status = "paused"; result.retryAfter = pause
+                        result.error = "下载站点要求暂停请求，可在 \(pause.formatted(date: .abbreviated, time: .standard)) 后重试。"
+                    } catch { result.error = error.localizedDescription }
+                    results.append((index, result))
+                }
+                return results
+            }
+            let byIndex = Dictionary(uniqueKeysWithValues: completed.flatMap { $0 })
+            let results = batch.entries.enumerated().map { index, entry in
+                byIndex[index] ?? CLIResult(input: entry.original, identifier: entry.reference?.identifier, status: "cancelled")
             }
             if options.json {
                 let encoder = JSONEncoder()

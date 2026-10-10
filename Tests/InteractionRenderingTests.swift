@@ -27,9 +27,10 @@ extension CoreTests {
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
         model.history = [
-            DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"), state: .saved, finishedAt: Date()),
-            DownloadItem(original: "2003.07733", reference: try ArxivReference.parse("2003.07733"), state: .saved, finishedAt: Date().addingTimeInterval(-1))
+            DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"), state: .saved, savedURL: URL(fileURLWithPath: "/tmp/focus-first.pdf"), finishedAt: Date()),
+            DownloadItem(original: "2003.07733", reference: try ArxivReference.parse("2003.07733"), state: .saved, savedURL: URL(fileURLWithPath: "/tmp/focus-second.pdf"), finishedAt: Date().addingTimeInterval(-1))
         ]
+        model.history.forEach { model.upsertPaper($0) }
         model.items = model.history
         model.record(.info, "下载中", item: model.history[1])
         let view = NSHostingView(rootView: DownloaderView(model: model, page: .logs))
