@@ -35,9 +35,9 @@ struct QuietButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(ThemePalette.color(palette.accent).opacity(enabled ? 1 : 0.4))
-            .padding(.horizontal, 10).frame(height: 28)
+            .padding(.horizontal, 10).frame(height: 32)
             .background(ThemePalette.color(palette.accent).opacity(configuration.isPressed ? 0.19 : 0.10))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -47,9 +47,9 @@ struct RoundButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.system(size: 15, weight: .medium))
             .foregroundStyle(ThemePalette.color(palette.text).opacity(enabled ? 1 : 0.35))
-            .frame(width: 28, height: 28)
+            .frame(width: 32, height: 32)
             .background(ThemePalette.color(palette.accent).opacity(configuration.isPressed ? 0.14 : 0))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -524,6 +524,7 @@ struct DownloadRow: View {
         busy = model.busy; theme = model.theme; self.selected = selected; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.displayScale) private var displayScale
     private var palette: ThemePalette { theme.palette(dark: scheme == .dark) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
 
@@ -571,11 +572,14 @@ struct DownloadRow: View {
                 Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                     .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
                     .accessibilityLabel("\(item.title)的更多操作")
-            }.padding(.top, 5)
+            }.padding(.top, 1)
         }.padding(.horizontal, 10).padding(.vertical, 13)
             .background(selected ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(alignment: .bottom) { Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 0.5) }
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
+                    .padding(.leading, 50).padding(.trailing, 10)
+            }
             .contextMenu { actions }
             .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityElement(children: .contain)
@@ -675,8 +679,16 @@ struct LogContent: View {
                             }
                             Color.clear.frame(height: 1).id("log-end")
                         }.background(LogScrollObserver(changed: { metrics in
+                            let layoutChanged = abs(position.contentHeight - metrics.contentHeight) > 0.5 || abs(position.viewportHeight - metrics.viewportHeight) > 0.5
                             position = metrics
                             if requestedBottom == true && metrics.atBottom || requestedBottom == false && metrics.atTop { requestedBottom = nil }
+                            // Lazy rows refine their height after the first scroll request.
+                            // Keep the tail aligned only while the user intends to follow it.
+                            if layoutChanged && followingLatest && !metrics.atBottom {
+                                withAnimation(requestedBottom == true && !reduceMotion ? .easeInOut(duration: 0.28) : nil) {
+                                    proxy.scrollTo("log-end", anchor: .bottom)
+                                }
+                            }
                         }, userScrolled: { metrics in
                             requestedBottom = nil
                             followingLatest = metrics.atBottom
@@ -694,7 +706,7 @@ struct LogContent: View {
         }
     }
     private func reset(_ proxy: ScrollViewProxy) {
-        followingLatest = true; requestedBottom = nil
+        followingLatest = true; requestedBottom = nil; position = LogScrollPosition()
         proxy.scrollTo("log-end", anchor: .bottom)
     }
     private func jump(toBottom: Bool, proxy: ScrollViewProxy) {
@@ -721,6 +733,8 @@ struct DirectoryMenu: View {
                 .font(.system(size: 12)).lineLimit(1).truncationMode(.middle).foregroundStyle(ThemePalette.color(palette.secondary))
         }.menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, showsChevron: true)).menuIndicator(.hidden)
             .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 300, alignment: .leading)
+            .padding(.leading, -12)
             .help("\(model.directoryLabel)\n自动归入 Papers、Videos、Audio、Images")
             .accessibilityLabel("保存位置：\(model.directoryLabel)，自动按类型归档")
     }
@@ -740,10 +754,12 @@ struct MenuTriggerStyle: ButtonStyle {
                     .foregroundStyle(ThemePalette.color(palette.secondary))
                     .rotationEffect(.degrees(configuration.isPressed ? 180 : 0))
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: configuration.isPressed)
+                    .accessibilityHidden(true)
             }
-        }.frame(minWidth: 32, minHeight: 32)
-            .contentShape(RoundedRectangle(cornerRadius: 8))
-            .background(ThemePalette.color(palette.accent).opacity(enabled ? (configuration.isPressed ? 0.18 : hovered ? 0.09 : 0) : 0), in: RoundedRectangle(cornerRadius: 8))
+        }.padding(.horizontal, showsChevron ? 12 : 0)
+            .frame(minWidth: 32, minHeight: 32)
+            .contentShape(RoundedRectangle(cornerRadius: showsChevron ? 16 : 8, style: .continuous))
+            .background(ThemePalette.color(palette.accent).opacity(enabled ? (configuration.isPressed ? 0.18 : hovered ? 0.09 : 0) : 0), in: RoundedRectangle(cornerRadius: showsChevron ? 16 : 8, style: .continuous))
             .onHover { hovered = $0 }
     }
 }

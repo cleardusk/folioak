@@ -248,6 +248,7 @@ extension CoreTests {
         let view = NSHostingView(rootView: LogRegressionView(probe: probe))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
+        window.orderFront(nil)
         defer { window.orderOut(nil) }
         func settle() async {
             view.layoutSubtreeIfNeeded()
@@ -264,7 +265,14 @@ extension CoreTests {
         }
         await settle()
         guard let scroll = observer(view)?.scroll else { throw TestFailure.failed("logs expose native clip bounds") }
-        try expect(LogScrollPosition(scroll: scroll).canScroll && LogScrollPosition(scroll: scroll).atBottom, "long variable-height logs start at latest entry")
+        for _ in 0..<10 where !LogScrollPosition(scroll: scroll).atBottom {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            view.layoutSubtreeIfNeeded()
+        }
+        try expect(LogScrollPosition(scroll: scroll).canScroll && LogScrollPosition(scroll: scroll).atBottom, "long variable-height logs start at latest entry; clip=\(scroll.contentView.bounds), content=\(String(describing: scroll.documentView?.bounds))")
+        window.setContentSize(NSSize(width: 420, height: 400))
+        await settle()
+        try expect(LogScrollPosition(scroll: scroll).atBottom, "tail stays aligned when wrapping changes row heights")
         userScroll(scroll, y: scroll.contentView.bounds.minY - 200)
         await settle()
         let readingY = scroll.contentView.bounds.minY

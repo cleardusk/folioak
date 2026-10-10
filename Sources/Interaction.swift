@@ -68,8 +68,8 @@ struct TaskDiagnosticView: View {
             HStack {
                 Text("任务详情").font(.system(size: 18, weight: .medium))
                 Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark").frame(width: 28, height: 28).contentShape(Rectangle()) }
-                    .buttonStyle(.plain).keyboardShortcut(.cancelAction).accessibilityLabel("关闭任务详情")
+                Button { dismiss() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(RoundButtonStyle(palette: palette)).keyboardShortcut(.cancelAction).accessibilityLabel("关闭任务详情")
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
@@ -155,10 +155,14 @@ struct LogScrollPosition: Equatable {
     var atTop = true
     var atBottom = false
     var canScroll = false
+    var contentHeight: CGFloat = 0
+    var viewportHeight: CGFloat = 0
     init() {}
     init(scroll: NSScrollView) {
         let visible = scroll.contentView.bounds
         let content = scroll.documentView?.bounds ?? .zero
+        contentHeight = content.height
+        viewportHeight = visible.height
         canScroll = content.height > visible.height + 2
         atTop = visible.minY <= content.minY + 2
         atBottom = visible.maxY >= content.maxY - 2

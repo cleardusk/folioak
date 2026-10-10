@@ -974,12 +974,27 @@ struct CoreTests {
         model.record(.warning, "自动重试 1/3", item: completedItems[1])
         model.record(.success, "已保存", item: completedItems[0])
         model.record(.error, "连接超时，自动重试后仍未成功。请检查网络后重试。", item: completedItems[1])
+        let mediaFixtures = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Tests/Fixtures/Media")
+        model.mediaLibrary = [
+            DownloadItem(original: "https://example.com/video.mp4", directURL: URL(string: "https://example.com/video.mp4"), state: .saved, savedURL: mediaFixtures.appendingPathComponent("video.mp4"), documentTitle: "A quiet afternoon — a longer video title to check line wrapping and action alignment", finishedAt: Date(), mediaFormat: .automatic),
+            DownloadItem(original: "https://example.com/audio.m4a", directURL: URL(string: "https://example.com/audio.m4a"), state: .saved, savedURL: mediaFixtures.appendingPathComponent("tone.m4a"), documentTitle: "声音片段", finishedAt: Date().addingTimeInterval(-1), mediaFormat: .audio)
+        ]
         for scheme in [ColorScheme.light, .dark] {
             model.theme = .native
             app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
-            for page in [WorkspacePage.library, .logs] {
+            for page in [WorkspacePage.library, .media, .logs] {
                 try capture(DownloaderView(model: model, page: page).environment(\.colorScheme, scheme), width: 960, height: 700, name: "workspace-\(page)-\(scheme == .light ? "light" : "dark")")
             }
+            let palette = model.theme.palette(dark: scheme == .dark)
+            try capture(VStack(spacing: 0) {
+                DownloadRow(item: model.mediaLibrary[0], model: model)
+                DownloadRow(item: completedItems[0], model: model, selected: true)
+                DownloadRow(item: model.mediaLibrary[1], model: model)
+            }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .background(ThemePalette.color(palette.canvas)).environment(\.colorScheme, scheme),
+                width: 580, height: 380, name: "row-alignment-\(scheme == .light ? "light" : "dark")")
+            try capture(TaskDiagnosticView(model: model, item: completedItems[1]).environment(\.colorScheme, scheme),
+                        width: 620, height: 600, name: "task-details-\(scheme == .light ? "light" : "dark")")
             model.items = completedItems
             try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 820, height: 600, name: "workspace-minimum-\(scheme == .light ? "light" : "dark")")
         }

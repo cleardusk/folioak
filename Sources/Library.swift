@@ -288,7 +288,7 @@ struct LibraryRow: View {
                     Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel("\(paper.title)的更多操作")
                 }
-            }.padding(.top, 5)
+            }.padding(.top, 6)
         }.padding(20).background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(selected ? ThemePalette.color(palette.accent).opacity(0.65) : ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 20)).onTapGesture(perform: select).contextMenu { actions }
