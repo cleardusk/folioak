@@ -125,10 +125,11 @@ struct CLIOptions {
           \(accent("-h, --help"))           显示帮助
           \(accent("--version"))            显示版本
 
-        支持论文、YouTube / Bilibili / X 视频，以及 HTTPS 图片、音频、视频直链。
+        支持论文、YouTube / Bilibili / X / 今日头条视频，以及 HTTPS 图片、音频、视频直链。
         最多 200 条，自动去重；最多同时下载三个来源，同一来源串行。
         无链接参数时自动读取管道；支持 Markdown 与混合文本。
-        默认沿用 UI 的目录与命名；选项仅影响本次运行。
+        默认沿用 UI 的保存位置，自动归入 Papers/Videos/Audio/Images。
+        -o 直接保存到指定目录，仅影响本次运行。
         重定向输出文件路径；NO_COLOR=1 关闭颜色。
         """ + "\n"
     }
@@ -309,19 +310,12 @@ enum CLIRunner {
             if options.action == .help { stdout(CLIOptions.help(version: version, color: interactive && color && !options.json)); return 0 }
             if options.action == .version { stdout(version + "\n"); return 0 }
             let defaults = DownloadPreferences(preferences)
-            let directory = options.output.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL } ?? defaults.directory
+            let override = options.output.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL }
             let naming = options.naming ?? defaults.naming
             if options.verbose && options.inputFiles.contains("-") { stderr("读取标准输入\n") }
             let batch = try BatchInput(try await options.resolvedInput())
-            if batch.entries.contains(where: { $0.source != nil }) {
-                var isDirectory: ObjCBool = false
-                if !FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), options.output != nil {
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                    isDirectory = true
-                }
-                guard isDirectory.boolValue, FileManager.default.isWritableFile(atPath: directory.path) else {
-                    throw DownloadError.storage("保存目录不存在、不是文件夹或不可写，请检查权限或使用 -o 指定目录。")
-                }
+            if let override, batch.entries.contains(where: { $0.source != nil }), !FileManager.default.fileExists(atPath: override.path) {
+                try FileManager.default.createDirectory(at: override, withIntermediateDirectories: true)
             }
             let human = interactive && !options.json
             let groups = SourceScheduler.groups(Array(batch.entries.indices)) { batch.entries[$0].source?.rateLimitKey ?? "invalid" }
@@ -337,7 +331,9 @@ enum CLIRunner {
                     if Task.isCancelled { result.status = "cancelled"; results.append((index, result)); continue }
                     if let pause = pauses[source.rateLimitKey] { result.status = "paused"; result.retryAfter = pause; results.append((index, result)); continue }
                     do {
-                        let paper = try await engine.download(source, to: directory, naming: naming, mediaFormat: options.mediaFormat) { event in
+                        let directory = override ?? defaults.directory
+                        if override != nil { try DownloadFolder.prepareRoot(directory) }
+                        let paper = try await engine.download(source, to: directory, naming: naming, mediaFormat: options.mediaFormat, organizeByType: override == nil) { event in
                             console.receive(event)
                         }
                         result.identifier = paper.metadata?.reference.identifier

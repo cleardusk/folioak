@@ -17,7 +17,7 @@ extension CoreTests {
         let prefs = UserDefaults(suiteName: suite)!
         defer { prefs.removePersistentDomain(forName: suite) }
         let original = root.appendingPathComponent("default-cli")
-        prefs.set(original.path, forKey: "saveDirectory")
+        prefs.set(original.path, forKey: "downloadRootDirectory")
         prefs.set(NamingStyle.titleOnly.rawValue, forKey: "namingStyle")
         prefs.set("iris", forKey: "theme")
         let before = prefs.dictionaryRepresentation()
@@ -228,7 +228,7 @@ extension CoreTests {
         let suite = "arxiv-ipc-prefs-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
-        preferences.set(root.appendingPathComponent("preferences-folder").path, forKey: "saveDirectory")
+        preferences.set(root.appendingPathComponent("preferences-folder").path, forKey: "downloadRootDirectory")
         preferences.set(NamingStyle.identifierTitle.rawValue, forKey: "namingStyle")
         preferences.synchronize() // Test barrier before starting an independent reader.
         let (reader, prefsOut) = try process(["preferences", suite]); reader.waitUntilExit()

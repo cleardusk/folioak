@@ -88,7 +88,7 @@ enum WorkspaceStore {
         result.directURL = source.directURL
         return result
     }
-    private static func validItem(_ item: DownloadItem) -> Bool {
+    static func validItem(_ item: DownloadItem) -> Bool {
         let references = [item.reference, item.restoreReference, item.metadata?.reference].compactMap { $0 }
         guard references.allSatisfy({ (try? ArxivReference.parse($0.identifier)) == $0 }),
               item.original.utf8.count <= ResourceLimits.inputBytes,
@@ -169,5 +169,35 @@ enum WorkspaceStore {
         try data.write(to: url, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         return retained
+    }
+}
+
+// Saved media has its own retention, independent of the download history.
+enum MediaLibraryStore {
+    struct Snapshot: Codable { var schema = 1; var items: [DownloadItem] }
+    static func valid(_ item: DownloadItem) -> Bool {
+        WorkspaceStore.validItem(item) && item.reference == nil && item.metadata == nil && item.source?.isPaper != true &&
+        [.saved, .existing, .missing].contains(item.state) &&
+        !item.localURLs.isEmpty && item.localURLs.allSatisfy { FileStorage.extensions.contains($0.pathExtension.lowercased()) }
+    }
+    static func read(_ url: URL) throws -> [DownloadItem]? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try PaperStorage.read(url, limit: LibraryStore.byteLimit, tooLarge: "媒体库超过 32 MB。")
+        let saved = try JSONDecoder().decode(Snapshot.self, from: data)
+        guard saved.schema == 1, saved.items.count <= LibraryStore.countLimit,
+              Set(saved.items.map(\.id)).count == saved.items.count, saved.items.allSatisfy(valid) else {
+            throw DownloadError.storage("媒体库格式无效。")
+        }
+        return saved.items
+    }
+    static func write(_ items: [DownloadItem], to url: URL) throws {
+        guard items.count <= LibraryStore.countLimit, Set(items.map(\.id)).count == items.count, items.allSatisfy(valid) else {
+            throw DownloadError.storage("媒体库格式无效或已满，已有文件保持不变。")
+        }
+        let data = try JSONEncoder().encode(Snapshot(items: items))
+        guard data.count <= LibraryStore.byteLimit else { throw DownloadError.limit("媒体库超过 32 MB，已有文件保持不变。") }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }

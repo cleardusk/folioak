@@ -18,6 +18,14 @@ extension CoreTests {
         for url in ["https://x.com/user", "https://www.youtube.com/playlist?list=123", "https://youtube.com.evil.invalid/watch?v=1"] {
             try rejects({ _ = try DownloadSource.parse(url) }, "unsupported media path rejected")
         }
+        let toutiao = try DownloadSource.parse("https://toutiao.com/video/7505382061495176511/?from=share")
+        try expect(toutiao.isMedia && toutiao.directURL?.host == "www.toutiao.com", "Toutiao video normalizes to bundled extractor host")
+        for url in ["https://www.toutiao.com/", "https://www.toutiao.com/article/7505382061495176511/", "https://v.toutiao.com/abc/", "https://www.toutiao.com/video/not-a-number/"] {
+            try rejects({ _ = try DownloadSource.parse(url) }, "Toutiao non-video pages never route to PDF")
+        }
+        for ext in ["png", "mp3", "mp4"] {
+            try expect(try DownloadSource.parse("https://example.com/file." + ext).isPaper == false, "all native media types use media destination")
+        }
         let source = try DownloadSource.parse("https://example.com/photo.png?token=abc")
         try expect(!source.isPaper && !source.isMedia && source.directURL?.query == "token=abc", "signed image URL stays intact")
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -95,14 +103,169 @@ extension CoreTests {
         try await waitForQueue(retryModel)
         try expect(retryModel.history.contains { $0.id == audioItem.id && $0.mediaFormat == .audio && $0.canRetry }, "failed audio task remains retryable after starting another batch")
         try expect(try CLIOptions.parse([source.webURL.absoluteString, "--audio"]).mediaFormat == .audio, "CLI audio option")
+        try await categoryDestinationTests(root: root, image: image)
+        try await mediaLibraryTests(root: root, image: image)
         print("PASS media: routing, native transfer, reuse, invalid response, atomic group rollback, safe process arguments, child cancellation, restoration and paper isolation")
+    }
+
+    @MainActor static func categoryDestinationTests(root: URL, image: URL) async throws {
+        let suite = "leafpick-destinations-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let legacyFolder = root.appendingPathComponent("legacy-papers")
+        preferences.set(legacyFolder.path, forKey: "saveDirectory")
+        preferences.set(root.appendingPathComponent("legacy-media").path, forKey: "mediaSaveDirectory")
+        let defaults = DownloadPreferences(preferences)
+        try expect(defaults.directory.path.hasSuffix("/Downloads/Leafpick") && preferences.string(forKey: "saveDirectory") == legacyFolder.path,
+                   "one new default root does not reinterpret or overwrite legacy paths")
+        let folder = root.appendingPathComponent("organized", isDirectory: true), next = root.appendingPathComponent("next-organized", isDirectory: true)
+        let pdf = root.appendingPathComponent("category.pdf"); try createPDF(at: pdf)
+        let engine = DownloadEngine(transport: MockTransport(sourcePDF: pdf), pdfTransport: MockTransport(sourcePDF: image), requestInterval: 0, retryDelay: 0)
+        let model = DownloadModel(engine: engine, preferences: preferences, stateURL: root.appendingPathComponent("category-workspace.json"))
+        model.directory = folder
+        try expect(!FileManager.default.fileExists(atPath: folder.path), "choosing root does not eagerly create folders")
+        model.input = "bad-link"; model.start()
+        try expect(!FileManager.default.fileExists(atPath: folder.path), "invalid input creates no root")
+        model.input = "2501.12345v2\nhttps://example.com/photo.png"
+        model.start(); model.directory = next
+        try await waitForQueue(model)
+        try expect(model.items.count == 2 && model.items.allSatisfy { $0.state == .saved }, "mixed paper/media batch succeeds")
+        try expect(model.items[0].savedURL?.deletingLastPathComponent() == folder.appendingPathComponent("Papers", isDirectory: true)
+                   && model.items[1].savedURL?.deletingLastPathComponent() == folder.appendingPathComponent("Images", isDirectory: true), "batch freezes root and creates type subfolders")
+        try expect(Set(try FileManager.default.contentsOfDirectory(atPath: folder.path)) == ["Papers", "Images"], "only used folders are created")
+        let oldURL = model.items[1].savedURL
+        model.persistWorkspace()
+        let restored = DownloadModel(preferences: preferences, stateURL: root.appendingPathComponent("category-workspace.json"))
+        try expect(restored.directory == next && restored.items[1].savedURL == oldURL, "new root persists without changing previous saved paths")
+        try FileManager.default.createDirectory(at: next, withIntermediateDirectories: true)
+        try Data("blocked".utf8).write(to: next.appendingPathComponent("Papers"))
+        model.input = "2501.12345v2\nhttps://example.com/second.png"
+        model.start(); try await waitForQueue(model)
+        try expect(model.items[0].state == .failed && model.items[0].error?.contains("Papers") == true && model.items[1].state == .saved, "blocked Papers does not block Images")
+        model.directory = folder
+        model.retry(model.items[0].id); try await waitForQueue(model)
+        try expect(model.items[0].savedURL?.deletingLastPathComponent() == folder.appendingPathComponent("Papers", isDirectory: true) && model.items[0].state == .existing, "retry uses current root and reuses existing file")
+        model.mediaFormat = .audio; model.input = "https://example.com/third.PNG?download=1"
+        model.start(); try await waitForQueue(model)
+        try expect(model.items[0].savedURL?.deletingLastPathComponent().lastPathComponent == "Images", "audio mode cannot reclassify image direct links")
+        let console = CapturedConsole()
+        let options = try CLIOptions.parse(["2501.12345v2", "https://example.com/cli.png", "--json"])
+        let code = await CLIRunner.run(options, version: "test", engine: engine, preferences: preferences, stdout: { console.stdout($0) }, stderr: { console.stderr($0) })
+        let rows = (try JSONSerialization.jsonObject(with: Data(console.output.utf8)) as! [String: Any])["results"] as! [[String: Any]]
+        try expect(code == 0 && URL(fileURLWithPath: rows[0]["path"] as! String).deletingLastPathComponent().lastPathComponent == "Papers"
+                   && URL(fileURLWithPath: rows[1]["path"] as! String).deletingLastPathComponent().lastPathComponent == "Images", "CLI follows automatic folders")
+        let explicit = root.appendingPathComponent("exact-output")
+        let explicitOptions = try CLIOptions.parse(["https://example.com/cli.png", "-o", explicit.path, "--json"])
+        let explicitConsole = CapturedConsole()
+        let explicitCode = await CLIRunner.run(explicitOptions, version: "test", engine: engine, preferences: preferences, stdout: { explicitConsole.stdout($0) }, stderr: { explicitConsole.stderr($0) })
+        let explicitRows = (try JSONSerialization.jsonObject(with: Data(explicitConsole.output.utf8)) as! [String: Any])["results"] as! [[String: Any]]
+        try expect(explicitCode == 0 && URL(fileURLWithPath: explicitRows[0]["path"] as! String).deletingLastPathComponent().path == explicit.path
+                   && DownloadPreferences(preferences).directory == folder, "CLI -o remains exact and does not change root preference")
+        let tools = try MediaTools.installed(), audio = root.appendingPathComponent("sample.wav"), video = root.appendingPathComponent("sample.mp4")
+        let pcm = root.appendingPathComponent("silence.pcm"), frame = root.appendingPathComponent("frame.yuv")
+        try Data(repeating: 0, count: 800).write(to: pcm)
+        try Data(repeating: 128, count: 384).write(to: frame)
+        let audioStatus = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: ["-v", "error", "-f", "s16le", "-ar", "8000", "-ac", "1", "-i", pcm.path, audio.path]) { _ in }
+        let videoStatus = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: ["-v", "error", "-f", "rawvideo", "-pixel_format", "yuv420p", "-video_size", "16x16", "-i", frame.path, "-frames:v", "1", "-c:v", "mpeg4", video.path]) { _ in }
+        try expect(audioStatus == 0 && videoStatus == 0, "valid media fixtures created")
+        let published = try await FileStorage.publish([image, audio, video], title: nil, to: folder, organizeByType: true)
+        try expect(([published.url] + published.additionalURLs).map { $0.deletingLastPathComponent().lastPathComponent } == ["Images", "Audio", "Videos"], "actual media outputs route by final type including mixed groups")
+        let blocked = root.appendingPathComponent("blocked-group")
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+        try Data("blocked".utf8).write(to: blocked.appendingPathComponent("Audio"))
+        do { _ = try await FileStorage.publish([image, audio], title: nil, to: blocked, organizeByType: true); throw TestFailure.failed("blocked audio folder was accepted") }
+        catch let error as TestFailure { throw error } catch {}
+        try expect(try FileManager.default.contentsOfDirectory(atPath: blocked.appendingPathComponent("Images").path).isEmpty, "cross-folder group failure rolls back newly saved outputs")
+        print("PASS destinations: single root, lazy folders, mixed routing, frozen root, isolated failures, retry, restart, CLI override and cross-folder rollback")
+    }
+
+    @MainActor static func mediaLibraryTests(root: URL, image: URL) async throws {
+        let suite = "leafpick-library-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let state = root.appendingPathComponent("saved-media.json")
+        let source = URL(string: "https://example.com/photo.png")!
+        let file = root.appendingPathComponent("library-photo.png")
+        try FileManager.default.copyItem(at: image, to: file)
+        let media = DownloadItem(original: source.absoluteString, directURL: source, state: .saved, savedURL: file, documentTitle: "Forest")
+        try WorkspaceStore.write(WorkspaceSnapshot(input: "draft", items: [media], history: [media], logs: []), to: state)
+        let engine = DownloadEngine(pdfTransport: MockTransport(sourcePDF: image), requestInterval: 0, retryDelay: 0)
+        let model = DownloadModel(engine: engine, preferences: preferences, stateURL: state)
+        try expect(model.mediaLibrary.count == 1 && model.papers.isEmpty, "media migration deduplicates current and history without polluting paper library")
+        model.items = []; model.history = []; model.persistWorkspace()
+        let restored = DownloadModel(preferences: preferences, stateURL: state)
+        try expect(restored.mediaLibrary.count == 1 && restored.downloads.isEmpty && restored.input == "draft", "media library survives history removal and restart")
+        var alternate = media; alternate.id = UUID(); alternate.mediaFormat = .audio
+        alternate.savedURL = root.appendingPathComponent("audio.m4a")
+        model.upsertMedia(alternate)
+        model.upsertMedia(alternate)
+        try expect(model.mediaLibrary.count == 2, "same source with separate audio output is preserved and repeated insertion deduplicates")
+        let other = root.appendingPathComponent("second-library-photo.png")
+        try FileManager.default.copyItem(at: image, to: other)
+        var group = media; group.id = UUID(); group.additionalURLs = [other]
+        model.upsertMedia(group)
+        try FileManager.default.removeItem(at: file)
+        model.preview(group)
+        let missingGroup = model.mediaLibrary.first { $0.id == group.id }!
+        try expect(model.previewURL == other && missingGroup.state == .missing && missingGroup.localURLs.count == 2,
+                   "library partial loss preserves complete file collection and opens remaining file without history")
+        var pruned = missingGroup; pruned.savedURL = other; pruned.additionalURLs = nil
+        model.preview(pruned)
+        try expect(model.mediaLibrary.first { $0.id == group.id }?.state == .missing, "opening pruned history does not hide missing library attachments")
+        try FileManager.default.copyItem(at: image, to: file)
+        model.preview(missingGroup)
+        try expect(model.mediaLibrary.first { $0.id == group.id }?.state == .saved, "restored local files recover library state on open")
+        let target = root.appendingPathComponent("library-retry", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        model.directory = target
+        try FileManager.default.removeItem(at: file)
+        model.preview(media)
+        let missing = model.mediaLibrary.first { $0.id == media.id }!
+        model.retryFromLibrary(missing); try await waitForQueue(model)
+        try expect(model.mediaLibrary.first { $0.id == media.id }?.savedURL?.deletingLastPathComponent() == target.appendingPathComponent("Images", isDirectory: true) && model.input == "draft",
+                   "library-only retry uses current media destination without replacing draft")
+        let failed = DownloadModel(engine: DownloadEngine(pdfTransport: MockTransport(sourcePDF: image, pdf: [.failure(.metadata("test failure"))]), requestInterval: 0, retryDelay: 0), preferences: preferences)
+        failed.upsertMedia(media)
+        failed.retryFromLibrary(media); try await waitForQueue(failed)
+        try expect(failed.items.first?.state == .failed && failed.mediaLibrary.first?.savedURL == media.savedURL && failed.mediaLibrary.first?.state == .saved,
+                   "failed retry never overwrites prior library record")
+        let replayState = root.appendingPathComponent("media-replay.json")
+        var older = media; older.finishedAt = Date(timeIntervalSince1970: 100)
+        var newer = older; newer.savedURL = other; newer.finishedAt = Date(timeIntervalSince1970: 200)
+        try WorkspaceStore.write(WorkspaceSnapshot(input: "", items: [older], history: [], logs: []), to: replayState)
+        try MediaLibraryStore.write([newer], to: root.appendingPathComponent("media-media-replay.json.library.json"))
+        let replayed = DownloadModel(preferences: preferences, stateURL: replayState)
+        try expect(replayed.mediaLibrary.first?.savedURL == other, "old workspace cannot roll back newer media-library path after interruption")
+        let partialState = root.appendingPathComponent("partial-migration.json")
+        var partial = group; partial.state = .missing; partial.savedURL = other; partial.additionalURLs = nil
+        try WorkspaceStore.write(WorkspaceSnapshot(input: "", items: [partial], history: [], logs: []), to: partialState)
+        let migrated = DownloadModel(preferences: preferences, stateURL: partialState)
+        try expect(migrated.mediaLibrary.count == 1 && migrated.mediaLibrary[0].state == .missing, "older partial-media records migrate with surviving files")
+        migrated.preview(migrated.mediaLibrary[0])
+        try expect(migrated.mediaLibrary[0].state == .missing && migrated.mediaLibrary[0].canRetry && migrated.previewURL == other,
+                   "legacy incomplete attachment list remains retryable after opening surviving file")
+        var retained = (0..<501).map { index -> DownloadItem in
+            var copy = media; copy.id = UUID(); copy.savedURL = root.appendingPathComponent("retained-\(index).png"); return copy
+        }
+        let store = root.appendingPathComponent("retained-media.json")
+        try MediaLibraryStore.write(retained, to: store)
+        try expect(try MediaLibraryStore.read(store)?.count == 501, "media library exceeds download-history retention")
+        retained[0].savedURL = root.appendingPathComponent("not-media.pdf")
+        try rejects({ try MediaLibraryStore.write(retained, to: store) }, "paper file cannot be stored in media library")
+        let badState = root.appendingPathComponent("damaged-media-workspace.json")
+        let badLibrary = root.appendingPathComponent("media-damaged-media-workspace.json.library.json")
+        let damaged = Data("{\"schema\":99,\"items\":[]}".utf8)
+        try damaged.write(to: badLibrary)
+        let protected = DownloadModel(preferences: preferences, stateURL: badState)
+        protected.upsertMedia(media); protected.persistWorkspace()
+        try expect(!protected.mediaLibraryWritable && protected.mediaLibraryNotice != nil && (try Data(contentsOf: badLibrary)) == damaged,
+                   "future media library is preserved read-only")
+        print("PASS media library: migration, retention, deduplication, audio variants, partial loss, recovery, standalone retry and damaged-state protection")
     }
 
     @MainActor static func renderMediaSnapshots() throws {
         let suite = "leafpick-preview-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
-        model.directory = URL(fileURLWithPath: "/Users/you/Downloads")
+        model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Leafpick")
         let video = URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc")!
         model.input = video.absoluteString
         model.items = [
@@ -111,23 +274,36 @@ extension CoreTests {
             DownloadItem(original: "https://example.com/forest.jpg", directURL: URL(string: "https://example.com/forest.jpg"), state: .saved, savedURL: URL(fileURLWithPath: "/tmp/forest.jpg"), documentTitle: "Forest — morning light"),
             DownloadItem(original: "https://x.com/demo/status/123", directURL: URL(string: "https://x.com/demo/status/123"), state: .failed, error: "此内容需要登录或站点验证。请换一个公开链接。", documentTitle: "X 视频")
         ]
-        model.busy = true
-        let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/qa-230")
+        var savedVideo = model.items[0]
+        savedVideo.state = .saved; savedVideo.progress = nil; savedVideo.savedURL = URL(fileURLWithPath: "/tmp/Designing.mp4")
+        let activeVideo = model.items[0]
+        var savedAudio = savedVideo; savedAudio.id = UUID(); savedAudio.mediaFormat = .audio
+        savedAudio.savedURL = URL(fileURLWithPath: "/tmp/Designing.m4a")
+        model.mediaLibrary = [savedVideo, savedAudio, model.items[2]]
+        let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/qa-231")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let app = NSApplication.shared; app.setActivationPolicy(.prohibited)
         for scheme in [ColorScheme.light, .dark] {
             for width in [780, 1000] {
-                app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
-                let view = NSHostingView(rootView: DownloaderView(model: model).environment(\.colorScheme, scheme).environment(\.controlActiveState, .key))
-                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: width == 780 ? 540 : 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-                let chrome = WindowChrome(window: window, model: model, title: "拾取 · Leafpick", workspace: true)
-                window.contentView = view
-                let rendered = view.superview ?? view
-                rendered.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.15)); window.displayIfNeeded()
-                let bitmap = rendered.bitmapImageRepForCachingDisplay(in: rendered.bounds)!
-                rendered.cacheDisplay(in: rendered.bounds, to: bitmap)
-                try bitmap.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("mixed-\(scheme == .light ? "light" : "dark")-\(width).png"))
-                window.orderOut(nil); withExtendedLifetime(chrome) {}
+                for scene in ["active", "idle", "audio", "media", "long-path"] {
+                    let page: WorkspacePage = scene == "media" ? .media : .downloads
+                    model.busy = scene == "active"
+                    model.items[0] = model.busy ? activeVideo : savedVideo
+                    model.input = scene == "idle" || scene == "long-path" ? "" : video.absoluteString
+                    model.mediaFormat = scene == "audio" ? .audio : .automatic
+                    model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/" + (scene == "long-path" ? String(repeating: "Long Download Folder ", count: 6) : "Leafpick"))
+                    app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+                    let view = NSHostingView(rootView: DownloaderView(model: model, page: page).environment(\.colorScheme, scheme).environment(\.controlActiveState, .key))
+                    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: width == 780 ? 540 : 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+                    let chrome = WindowChrome(window: window, model: model, title: "拾取 · Leafpick", workspace: true)
+                    window.contentView = view
+                    let rendered = view.superview ?? view
+                    rendered.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.15)); window.displayIfNeeded()
+                    let bitmap = rendered.bitmapImageRepForCachingDisplay(in: rendered.bounds)!
+                    rendered.cacheDisplay(in: rendered.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("\(scene)-\(scheme == .light ? "light" : "dark")-\(width).png"))
+                    window.orderOut(nil); withExtendedLifetime(chrome) {}
+                }
             }
         }
         print("Leafpick previews: \(output.path)")

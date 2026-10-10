@@ -458,7 +458,7 @@ struct CoreTests {
         try expect(model.successes == 2 && model.failures == 1, "retry did not preserve successful or invalid items")
         try expect(model.input == "bad-link", "successful retry clears all equivalent input links")
         try expect(model.items[0].savedURL == model.items[2].savedURL, "queue duplicate file reused")
-        try expect(preferences.string(forKey: "saveDirectory") == output.path, "directory preference")
+        try expect(preferences.string(forKey: "downloadRootDirectory") == output.path, "directory preference")
         model.naming = .identifierTitle
         model.appearance = .dark
         model.theme = .iris
@@ -509,16 +509,18 @@ struct CoreTests {
         frozen.naming = .titleOnly
         frozen.directory = root.appendingPathComponent("another-folder")
         try await waitForQueue(frozen)
-        try expect(frozen.items[0].savedURL?.deletingLastPathComponent() == output && frozen.items[0].savedURL?.lastPathComponent.hasPrefix("[2501.12345v2]") == true, "active batch freezes directory and naming")
+        try expect(frozen.items[0].savedURL?.deletingLastPathComponent() == output.appendingPathComponent("Papers", isDirectory: true) && frozen.items[0].savedURL?.lastPathComponent.hasPrefix("[2501.12345v2]") == true, "active batch freezes directory and naming")
         try expect(frozen.input.isEmpty, "all successful inputs cleared")
         let completedItem = frozen.items[0].id
         frozen.start()
         try expect(frozen.items.count == 1 && frozen.items[0].id == completedItem && frozen.successes == 1, "empty start preserves completed results")
 
-        model.directory = root.appendingPathComponent("missing-folder", isDirectory: true)
+        model.directory = root.appendingPathComponent("blocked-folder", isDirectory: true)
+        try Data("blocked".utf8).write(to: model.directory)
         model.input = "2501.12345"
         model.start()
-        try expect(!model.busy && model.directoryNotice != nil && model.items.first?.state == .failed && model.items.first?.error == nil, "missing directory feedback appears once")
+        try await waitForQueue(model)
+        try expect(!model.busy && model.items.first?.state == .failed && model.items.first?.error?.contains("Papers") == true, "blocked root identifies affected folder")
         try expect(model.input == "2501.12345", "unwritable destination preserves input")
 
         let throttled = MockTransport(sourcePDF: pdf, metadata: [.status(429, "600"), .status(200)])

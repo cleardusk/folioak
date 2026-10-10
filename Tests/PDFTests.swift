@@ -37,7 +37,7 @@ extension CoreTests {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let suite = "arxiv-github-tests-\(UUID().uuidString)"; let prefs = UserDefaults(suiteName: suite)!
         defer { prefs.removePersistentDomain(forName: suite) }
-        prefs.set(folder.path, forKey: "saveDirectory")
+        prefs.set(folder.path, forKey: "downloadRootDirectory")
         let path = "/openai/math/main/overview.pdf"
         FixtureProtocol.install(.init(headers: ["Content-Type": "application/octet-stream", "ETag": "\"github-1\""], body: try Data(contentsOf: pdf)), path: path)
         let model = DownloadModel(engine: engine, preferences: prefs)
@@ -96,7 +96,7 @@ extension CoreTests {
         defer { prefs.removePersistentDomain(forName: suite) }
         let folder = root.appendingPathComponent("hf-papers")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        prefs.set(folder.path, forKey: "saveDirectory")
+        prefs.set(folder.path, forKey: "downloadRootDirectory")
         let transport = MockTransport(sourcePDF: pdf, latestVersion: 1)
         let generic = MockTransport(sourcePDF: pdf, pdf: [.failure(.invalidPDF)])
         let engine = DownloadEngine(transport: transport, pdfTransport: generic, requestInterval: 0, retryDelay: 0)
@@ -247,7 +247,7 @@ extension CoreTests {
 
         let suite = "arxiv-generic-tests-\(UUID().uuidString)"; let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
-        preferences.set(folder.path, forKey: "saveDirectory")
+        preferences.set(folder.path, forKey: "downloadRootDirectory")
         FixtureProtocol.install(.init(status: 429, headers: ["Retry-After": "600"]), path: "/limited.pdf")
         FixtureProtocol.install(.init(body: body), path: "/ok.pdf")
         FixtureProtocol.install(.init(body: atom()), path: "/api/query")

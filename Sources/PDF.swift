@@ -68,11 +68,18 @@ enum DownloadSource: Hashable, Sendable {
             parts.percentEncodedPath = String(parts.percentEncodedPath.replacingOccurrences(of: "/html/", with: "/papers/").dropLast(5)) + ".pdf"
             parts.query = nil
         }
+        if ["toutiao.com", "m.toutiao.com"].contains(parts.host?.lowercased() ?? "") { parts.host = "www.toutiao.com" }
         parts.fragment = nil; parts.scheme = "https"; parts.host = parts.host?.lowercased()
         if parts.port == 443 { parts.port = nil }
         guard let canonical = parts.url else { throw DownloadError.invalidLink(input) }
         if MediaDownloader.hosts.contains(parts.host ?? "") {
-            guard MediaDownloader.accepts(canonical) else { throw DownloadError.metadata("请粘贴单个视频或 X 帖子的链接。") }
+            guard MediaDownloader.accepts(canonical) else {
+                let hint: String
+                if parts.host == "v.toutiao.com" { hint = "请先在浏览器打开头条分享短链，再复制视频详情页地址（/video/…）。" }
+                else if parts.host == "www.toutiao.com" { hint = "请粘贴今日头条的视频详情链接（/video/…）；文章和用户主页暂不支持。" }
+                else { hint = "请粘贴单个视频或 X 帖子的链接。" }
+                throw DownloadError.metadata(hint)
+            }
             return .media(canonical)
         }
         if FileStorage.extensions.contains(canonical.pathExtension.lowercased()) { return .file(canonical) }

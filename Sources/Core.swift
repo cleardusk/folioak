@@ -801,13 +801,18 @@ actor DownloadEngine {
         }
     }
 
-    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, mediaFormat: MediaFormat = .automatic, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
+    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, mediaFormat: MediaFormat = .automatic, organizeByType: Bool = false, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
+        try Task.checkCancellation()
+        let destination = organizeByType && !source.isMedia
+            ? try (source.isPaper ? DownloadFolder.papers : DownloadFolder.media(extension: source.webURL.pathExtension)).prepare(in: directory)
+            : directory
         switch source {
         case .arxiv(let reference):
-            let paper = try await download(reference, to: directory, naming: naming, event: event)
+            let paper = try await download(reference, to: destination, naming: naming, event: event)
             return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
         case .media(let url):
-            return try await MediaDownloader.download(url, to: directory, format: mediaFormat, event: event)
+            try DownloadFolder.prepareRoot(destination)
+            return try await MediaDownloader.download(url, to: destination, format: mediaFormat, organizeByType: organizeByType, event: event)
         case .pdf(let url), .file(let url):
             guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
             var shared: RequestCoordinator?
@@ -820,8 +825,8 @@ actor DownloadEngine {
             let native = pdfTransport ?? URLSessionTransport(policy: .externalPDF, fileLimit: source.isPaper ? ResourceLimits.pdfBytes : FileStorage.byteLimit)
             let client = DownloadEngine(transport: native, requestInterval: coordinator == nil ? min(1, requestInterval) : 1,
                 retryDelay: retryDelay, rateLimitDelay: rateLimitDelay, coordinator: shared)
-            if source.isPaper { return try await client.downloadPDF(url, to: directory, event: event) }
-            return try await client.downloadFile(url, to: directory, event: event)
+            if source.isPaper { return try await client.downloadPDF(url, to: destination, event: event) }
+            return try await client.downloadFile(url, to: destination, event: event)
         }
     }
 

@@ -28,6 +28,35 @@ enum SourceScheduler {
     }
 }
 
+enum DownloadFolder: String, Sendable {
+    case papers = "Papers", videos = "Videos", audio = "Audio", images = "Images"
+
+    static func media(extension ext: String) -> Self {
+        if FileStorage.imageExtensions.contains(ext.lowercased()) { return .images }
+        return FileStorage.videoExtensions.contains(ext.lowercased()) ? .videos : .audio
+    }
+
+    static func prepareRoot(_ root: URL) throws {
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue,
+                  FileManager.default.isWritableFile(atPath: root.path) else { throw CocoaError(.fileWriteNoPermission) }
+        } catch { throw DownloadError.storage("保存位置无法创建或不可写，请更改位置后重试。") }
+    }
+
+    func prepare(in root: URL) throws -> URL {
+        let target = root.appendingPathComponent(rawValue, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+            let values = try target.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true,
+                  FileManager.default.isWritableFile(atPath: target.path) else { throw CocoaError(.fileWriteNoPermission) }
+            return target
+        } catch { throw DownloadError.storage("\(rawValue) 文件夹无法创建或不可写，请检查保存位置与权限。") }
+    }
+}
+
 struct DownloadPreferences {
     static let domain = "local.paperrepo.arxiv-downloader"
     static var shared: UserDefaults {
@@ -40,9 +69,10 @@ struct DownloadPreferences {
     let naming: NamingStyle
     init(_ preferences: UserDefaults) {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let preferred = home.appendingPathComponent("Desktop/PhD/PapersRepo", isDirectory: true)
-        directory = preferences.string(forKey: "saveDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? (FileManager.default.fileExists(atPath: preferred.path) ? preferred : home.appendingPathComponent("Downloads", isDirectory: true))
+        // Keep legacy folder preferences and existing file URLs intact. Their
+        // meanings differ from the new root and cannot be safely inferred.
+        directory = preferences.string(forKey: "downloadRootDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? home.appendingPathComponent("Downloads/Leafpick", isDirectory: true)
         naming = NamingStyle(rawValue: preferences.string(forKey: "namingStyle") ?? "") ?? .dateTitle
     }
 }

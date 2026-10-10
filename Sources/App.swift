@@ -91,6 +91,7 @@ struct DownloadItem: Identifiable, Codable {
     var diagnostics: TaskDiagnostics?
     var mediaFormat: MediaFormat? = nil
     var additionalURLs: [URL]? = nil
+    var incompleteFileList: Bool? = nil
     var localURLs: [URL] { (savedURL.map { [$0] } ?? []) + (additionalURLs ?? []) }
     var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.flatMap { try? DownloadSource.parse($0.absoluteString) } }
     var title: String { metadata?.title ?? documentTitle ?? source?.label ?? original }
@@ -109,8 +110,14 @@ final class DownloadModel: ObservableObject {
         }
     }
     @Published var directory: URL {
-        didSet { preferences.set(directory.path, forKey: "saveDirectory"); directoryNotice = nil }
+        didSet { preferences.set(directory.path, forKey: "downloadRootDirectory"); directoryNotice = nil }
     }
+    var directoryLabel: String { (directory.path as NSString).abbreviatingWithTildeInPath }
+    var directoryExists: Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
     @Published var naming: NamingStyle {
         didSet { preferences.set(naming.rawValue, forKey: "namingStyle") }
     }
@@ -123,6 +130,10 @@ final class DownloadModel: ObservableObject {
     @Published var items: [DownloadItem] = []
     @Published var mediaFormat: MediaFormat = .automatic
     @Published var history: [DownloadItem] = []
+    @Published var mediaLibrary: [DownloadItem] = [] { didSet { mediaLibraryDirty = true; schedulePersistence() } }
+    @Published var mediaLibraryNotice: String?
+    private(set) var mediaLibraryWritable = true
+    private var mediaLibraryDirty = false
     @Published var papers: [LibraryPaper] = [] { didSet { libraryDirty = true; schedulePersistence() } }
     @Published var libraryNotice: String?
     @Published var importingPDFs = false
@@ -173,8 +184,10 @@ final class DownloadModel: ObservableObject {
         directory = downloadPreferences.directory
         restoreWorkspace()
         restoreLibrary()
+        restoreMediaLibrary()
         persistenceReady = true
         persistLibrary()
+        persistMediaLibrary()
         shortcutChanges = shortcuts.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
@@ -182,6 +195,42 @@ final class DownloadModel: ObservableObject {
     var downloads: [DownloadItem] {
         let current = Set(items.map(\.id))
         return items + history.filter { !current.contains($0.id) }
+    }
+
+    private var mediaLibraryURL: URL? { libraryURL.map { $0.deletingLastPathComponent().appendingPathComponent("media-" + $0.lastPathComponent) } }
+    private func restoreMediaLibrary() {
+        do {
+            if let mediaLibraryURL, let saved = try MediaLibraryStore.read(mediaLibraryURL) {
+                mediaLibrary = saved; mediaLibraryDirty = false
+            }
+            // Merge retained history once on upgrade, and recover a library write
+            // that was interrupted after the workspace had already saved.
+            for var item in (history + items).reversed() {
+                // Older history may have discarded missing attachment paths.
+                // Only a successful re-download can complete that collection.
+                if item.state == .missing { item.incompleteFileList = true }
+                upsertMedia(item)
+            }
+        } catch { mediaLibraryWritable = false; mediaLibraryNotice = "媒体库无法读取，原文件已保留：\(error.localizedDescription)" }
+    }
+    private func persistMediaLibrary() {
+        guard mediaLibraryDirty, mediaLibraryWritable, let mediaLibraryURL else { return }
+        do { try MediaLibraryStore.write(mediaLibrary, to: mediaLibraryURL); mediaLibraryDirty = false; mediaLibraryNotice = nil }
+        catch { mediaLibraryNotice = "媒体库未能保存：\(error.localizedDescription)" }
+    }
+    func upsertMedia(_ item: DownloadItem) {
+        guard mediaLibraryWritable, MediaLibraryStore.valid(item) else { return }
+        if let index = mediaLibrary.firstIndex(where: { $0.id == item.id || Set($0.localURLs) == Set(item.localURLs) }) {
+            // Replaying older history must not roll back a newer save or
+            // replace a complete file collection with a pruned history entry.
+            let old = mediaLibrary[index]
+            if (item.finishedAt ?? item.createdAt) <= (old.finishedAt ?? old.createdAt) { return }
+            var saved = item; saved.id = mediaLibrary[index].id
+            mediaLibrary[index] = saved
+        } else {
+            guard mediaLibrary.count < LibraryStore.countLimit else { mediaLibraryNotice = "媒体库已满，下载文件仍已保存。"; return }
+            mediaLibrary.append(item)
+        }
     }
 
     private func restoreLibrary() {
@@ -303,6 +352,7 @@ final class DownloadModel: ObservableObject {
     func persistWorkspace() {
         saveWork?.cancel(); saveWork = nil
         persistLibrary()
+        persistMediaLibrary()
         guard persistenceReady, let stateURL else { return }
         do {
             if damagedState, FileManager.default.fileExists(atPath: stateURL.path) {
@@ -342,7 +392,6 @@ final class DownloadModel: ObservableObject {
     }
 
     func applyAppearance() { NSApplication.shared.appearance = appearance.native }
-    var directoryLabel: String { (directory.path as NSString).abbreviatingWithTildeInPath }
     var namingExample: String {
         PaperMetadata(reference: ArxivReference(baseID: "1706.03762", version: 1), title: "Attention Is All You Need", year: 2017, month: 6).filename(style: naming)
     }
@@ -403,7 +452,7 @@ final class DownloadModel: ObservableObject {
     func chooseDirectory() {
         guard !busy else { return }
         let panel = NSOpenPanel()
-        panel.title = "选择保存目录"
+        panel.title = "选择保存位置"
         panel.prompt = "选择"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -411,7 +460,9 @@ final class DownloadModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.directoryURL = directory
         present(panel) { [self] response in
-            if response == .OK, !busy, let url = panel.url { directory = url }
+            if response == .OK, !busy, let url = panel.url {
+                directory = url
+            }
         }
     }
 
@@ -476,13 +527,25 @@ final class DownloadModel: ObservableObject {
     func openDirectory() {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            directoryNotice = "保存目录不存在，请重新选择。"; return
+            directoryNotice = "保存位置不存在，请重新选择。"; return
         }
         if !opener(directory) { directoryNotice = "无法打开保存目录，请检查 Finder 或目录权限。" }
         else { directoryNotice = nil }
     }
 
     private func localFile(_ item: DownloadItem) -> URL? {
+        if let index = mediaLibrary.firstIndex(where: { $0.id == item.id }) {
+            // A download-history item can contain only the surviving attachments;
+            // the library retains and validates its full original collection.
+            let record = mediaLibrary[index]
+            let remaining = record.localURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+            if remaining.count < record.localURLs.count {
+                mediaLibrary[index].state = .missing
+                mediaLibrary[index].error = remaining.isEmpty ? "原位置的文件不存在，可重新下载。" : "部分文件已不在原位置，仍可打开其余文件，或重新下载。"
+            } else if record.state == .missing && record.incompleteFileList != true {
+                mediaLibrary[index].state = .saved; mediaLibrary[index].error = nil
+            }
+        }
         let files = item.localURLs
         guard !files.isEmpty else { return nil }
         let available = files.filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -499,11 +562,13 @@ final class DownloadModel: ObservableObject {
                 history[index].additionalURLs = available.count > 1 ? Array(available.dropFirst()) : nil
                 history[index].error = message
             }
+            notice = message
             record(.warning, "本地文件不存在", item: item)
             archiveResults()
             persistWorkspace()
             return available.first
         }
+        notice = nil
         return available.first
     }
 
@@ -589,7 +654,7 @@ final class DownloadModel: ObservableObject {
                 for await event in events { self?.receive(event, for: id, run: run) }
             }
             do {
-                let saved = try await engine.download(source, to: target, naming: namingStyle, mediaFormat: item.mediaFormat ?? .automatic) { event in sink.yield(event) }
+                let saved = try await engine.download(source, to: target, naming: namingStyle, mediaFormat: item.mediaFormat ?? .automatic, organizeByType: true) { event in sink.yield(event) }
                 sink.finish()
                 await listener.value
                 update(id) {
@@ -598,11 +663,12 @@ final class DownloadModel: ObservableObject {
                     $0.savedURL = saved.url
                     $0.pages = saved.pages > 0 ? saved.pages : nil
                     $0.additionalURLs = saved.additionalURLs.isEmpty ? nil : saved.additionalURLs
+                    $0.incompleteFileList = nil
                     $0.state = saved.alreadyExisted ? .existing : .saved
                     $0.progress = nil
                     $0.finishedAt = Date(); $0.diagnostics?.finish()
                 }
-                if let result = items.first(where: { $0.id == id }) { record(.success, result.state.label, item: result); upsertPaper(result) }
+                if let result = items.first(where: { $0.id == id }) { record(.success, result.state.label, item: result); upsertPaper(result); upsertMedia(result) }
                 input = DownloadSource.tokens(in: input)
                     .filter { (try? DownloadSource.parse($0)) != source }
                     .joined(separator: "\n")
@@ -645,18 +711,9 @@ final class DownloadModel: ObservableObject {
         notice = nil
         directoryNotice = nil
         guard !ids.isEmpty else { return }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue,
-              FileManager.default.isWritableFile(atPath: directory.path) else {
-            directoryNotice = "保存目录不存在或不可写，请重新选择后重试。"
-            for id in ids { update(id) { $0.state = .failed; $0.error = nil } }
-            record(.error, directoryNotice!)
-            persistWorkspace()
-            return
-        }
+        let target = directory
         busy = true
         cancelling = false
-        let target = directory
         let namingStyle = naming
         let run = UUID()
         runID = run
@@ -683,7 +740,7 @@ final class DownloadModel: ObservableObject {
 // Placeholder glyphs use the same TextKit layout and origin as editable text.
 // SwiftUI Text over TextEditor has a different first-line baseline on macOS.
 final class LinkTextView: NSTextView {
-    static let example = "粘贴论文、视频或文件链接"
+    static let example = "粘贴论文或媒体链接"
     var placeholderColor = NSColor.secondaryLabelColor { didSet { if placeholderColor != oldValue { needsDisplay = true } } }
     var focusChanged: ((Bool) -> Void)?
     private var styledInput: String?
@@ -794,6 +851,7 @@ final class LinkTextView: NSTextView {
 }
 
 struct LinkInput: NSViewRepresentable {
+    @Environment(\.colorScheme) private var scheme
     @ObservedObject var model: DownloadModel
     @Binding var focused: Bool
     let palette: ThemePalette
@@ -856,7 +914,7 @@ struct LinkInput: NSViewRepresentable {
         let textColor = ThemePalette.nativeColor(palette.text)
         let accentColor = ThemePalette.nativeColor(palette.accent)
         if editor.insertionPointColor != accentColor { editor.insertionPointColor = accentColor }
-        editor.placeholderColor = ThemePalette.nativeColor(palette.secondary)
+        editor.placeholderColor = ThemePalette.nativeColor(palette.secondary).blended(withFraction: scheme == .dark ? 0.18 : 0, of: ThemePalette.nativeColor(palette.surface)) ?? ThemePalette.nativeColor(palette.secondary)
         if editor.string != model.input {
             editor.string = model.input
             editor.undoManager?.removeAllActions()
@@ -983,27 +1041,28 @@ struct SettingsView: View {
     private var general: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 16) {
-                settingLabel("保存目录")
+                settingLabel("保存位置")
                 HStack(spacing: 12) {
                     Text(model.directoryLabel).font(.system(size: 12)).lineLimit(1)
                         .truncationMode(.middle).help(model.directory.path).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Button("更改…", action: model.chooseDirectory).controlSize(.small).disabled(model.busy)
+                        .accessibilityLabel("更改保存位置")
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
+                .help("自动归入 Papers、Videos、Audio、Images；首次下载时创建。")
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 16) {
-                    settingLabel("文件命名")
+                    settingLabel("论文命名")
                     Picker("文件命名", selection: $model.naming) {
                         ForEach(NamingStyle.allCases, id: \.self) { Text($0.label).tag($0) }
                     }.labelsHidden().disabled(model.busy).frame(maxWidth: .infinity, alignment: .leading)
+                        .help("arXiv 使用所选命名，年月取首次提交日期；其他 PDF 使用标题或原文件名。")
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.namingExample).font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(ThemePalette.color(palette.secondary)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    Text(model.naming == .dateTitle ? "arXiv 年月取首次提交日期；通用 PDF 使用标题或原文件名。" : "arXiv 使用所选命名；通用 PDF 使用标题或原文件名。")
-                        .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).fixedSize(horizontal: false, vertical: true)
                 }.padding(.leading, 64).frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()

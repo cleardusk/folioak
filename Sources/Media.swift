@@ -16,7 +16,7 @@ struct MediaTools: Sendable {
                           executable.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources/media-tools"),
                           executable.deletingLastPathComponent().appendingPathComponent("media-tools")].compactMap { $0 }
         guard let folder = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.appendingPathComponent("yt-dlp").path) }) else {
-            throw DownloadError.metadata("媒体下载组件缺失，请重新安装完整的 2.3.0 应用。论文下载仍可使用。")
+            throw DownloadError.metadata("媒体下载组件缺失，请重新安装完整应用。论文下载仍可使用。")
         }
         return Self(directory: folder)
     }
@@ -219,15 +219,16 @@ enum FileStorage {
         throw DownloadError.storage("同名文件过多，请选择其他目录。")
     }
 
-    static func publish(_ files: [URL], title: String?, to directory: URL) async throws -> SavedDocument {
+    static func publish(_ files: [URL], title: String?, to directory: URL, organizeByType: Bool = false) async throws -> SavedDocument {
         guard !files.isEmpty else { throw DownloadError.metadata("没有媒体输出文件。") }
         // Validate the entire result before exposing any of it in the destination.
         for file in files { try await validate(file, extension: file.pathExtension.lowercased()) }
         var saved: [SavedDocument] = []
         do {
             for file in files {
+                let destination = organizeByType ? try DownloadFolder.media(extension: file.pathExtension).prepare(in: directory) : directory
                 saved.append(try save(file, title: files.count == 1 ? (title ?? file.deletingPathExtension().lastPathComponent) : file.deletingPathExtension().lastPathComponent,
-                                      extension: file.pathExtension.lowercased(), to: directory))
+                                      extension: file.pathExtension.lowercased(), to: destination))
             }
         } catch {
             // Never roll back a pre-existing file reused by content hash.
@@ -251,9 +252,11 @@ enum MediaDownloader {
         }
     }
 
-    static let hosts: Set<String> = ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv", "x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"]
+    static let hosts: Set<String> = ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv", "x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com", "www.toutiao.com", "v.toutiao.com"]
     static func accepts(_ url: URL) -> Bool {
         guard PublicHTTPS.allows(url), let host = url.host, hosts.contains(host) else { return false }
+        if host == "v.toutiao.com" { return false }
+        if host == "www.toutiao.com" { return url.path.range(of: #"^/video/[0-9]+/?$"#, options: .regularExpression) != nil }
         if host == "youtu.be" || host == "b23.tv" { return url.path.count > 1 }
         if host.contains("youtube.com") { return url.path == "/watch" || url.path.hasPrefix("/shorts/") || url.path.hasPrefix("/live/") }
         if host.contains("bilibili.com") { return url.path.hasPrefix("/video/") }
@@ -275,7 +278,7 @@ enum MediaDownloader {
         return args + ["--", url.absoluteString]
     }
 
-    static func download(_ url: URL, to directory: URL, format: MediaFormat,
+    static func download(_ url: URL, to directory: URL, format: MediaFormat, organizeByType: Bool = false,
                          event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
         let tools = try MediaTools.installed()
@@ -296,7 +299,7 @@ enum MediaDownloader {
         guard status == 0, !output.files.isEmpty else { throw DownloadError.metadata(failure(output.error)) }
         event(.validating)
         let files = try validatedOutputs(output.files, in: folder)
-        let result = try await FileStorage.publish(files, title: output.title, to: directory)
+        let result = try await FileStorage.publish(files, title: output.title, to: directory, organizeByType: organizeByType)
         // Keep the coordination inode; remove only our completed media files.
         for file in output.files { try? FileManager.default.removeItem(at: file) }
         return result
@@ -309,10 +312,10 @@ enum MediaDownloader {
             return "此内容当前不可访问，可能已被删除或设为非公开。"
         }
         if lower.contains("sign in") || lower.contains("login") || lower.contains("cookies") || lower.contains("403") || lower.contains("authentication") {
-            return "此内容需要登录或站点验证。当前支持公开可访问的视频，请换一个链接后重试。"
+            return "此内容需要登录或站点验证，当前无法直接下载。请在浏览器中确认链接可访问，或换一个公开链接。"
         }
         if lower.contains("429") || lower.contains("rate limit") { return "视频站点暂时限流，请稍后重试。" }
-        if lower.contains("no video") || lower.contains("does not contain") { return "链接中没有可下载的视频；X 图片帖子暂不支持。" }
+        if lower.contains("no video") || lower.contains("does not contain") { return "链接中没有可下载的视频。若是图片，请使用图片文件的直链。" }
         if lower.contains("unsupported url") { return "该链接暂不支持，请使用单个视频或帖子链接。" }
         if lower.contains("requested format") { return "当前视频没有可用的下载格式，请稍后重试。" }
         if lower.contains("space left") { return "磁盘空间不足，请释放空间后重试。" }

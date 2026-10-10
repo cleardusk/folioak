@@ -6,13 +6,13 @@ import UniformTypeIdentifiers
 typealias WorkspaceViewState<Value> = SwiftUI.State<Value>
 
 enum WorkspacePage: String, CaseIterable {
-    case downloads = "下载", library = "论文资料库", logs = "日志"
-    static let navigation: [Self] = [.downloads, .library]
+    case downloads = "下载", library = "论文库", media = "媒体库", logs = "日志"
+    static let navigation: [Self] = [.downloads, .library, .media]
     var icon: String {
-        switch self { case .downloads: return "arrow.down.circle"; case .library: return "books.vertical"; case .logs: return "text.alignleft" }
+        switch self { case .downloads: return "arrow.down.circle"; case .library: return "books.vertical"; case .media: return "photo.on.rectangle"; case .logs: return "text.alignleft" }
     }
     var filledIcon: String {
-        switch self { case .downloads: return "arrow.down.circle.fill"; case .library: return "books.vertical.fill"; case .logs: return icon }
+        switch self { case .downloads: return "arrow.down.circle.fill"; case .library: return "books.vertical.fill"; case .media: return "photo.on.rectangle.fill"; case .logs: return icon }
     }
 }
 
@@ -86,6 +86,10 @@ struct DownloaderView: View {
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var visibleItems: [DownloadItem] {
         if page == .library { return libraryPapers.map(\.downloadItem) }
+        if page == .media {
+            return model.mediaLibrary.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || $0.original.localizedCaseInsensitiveContains(query) }
+                .sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) }
+        }
         return model.downloads.filter { item in
             filter.includes(item) &&
             (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) || item.original.localizedCaseInsensitiveContains(query))
@@ -113,7 +117,8 @@ struct DownloaderView: View {
             sidebar
             Rectangle().fill(ThemePalette.color(palette.border).opacity(0.55)).frame(width: 1)
             VStack(alignment: .leading, spacing: 0) {
-                header
+                if page == .downloads { Color.clear.frame(height: 44) }
+                else { header }
                 VStack(alignment: .leading, spacing: 16) {
                     if page == .downloads { composer }
                     if page == .logs { logContent } else { papers }
@@ -217,7 +222,7 @@ struct DownloaderView: View {
                 Button { page = .downloads } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(RoundButtonStyle(palette: palette)).help("返回下载").accessibilityLabel("返回下载")
             }
-            Text(page.rawValue).font(.system(size: 20, weight: .semibold))
+            if page != .downloads { Text(page.rawValue).font(.system(size: 20, weight: .semibold)) }
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty { searchField }
@@ -235,49 +240,66 @@ struct DownloaderView: View {
                     }
                 } label: { Image(systemName: "ellipsis").frame(width: 28, height: 32) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("资料库操作")
+            } else if page == .media {
+                if !model.mediaLibrary.isEmpty { searchField }
             } else if page == .logs && !model.logs.isEmpty {
                 searchField
                 Button { model.exportLogs(visibleLogs) } label: { Image(systemName: "square.and.arrow.up") }
                     .buttonStyle(RoundButtonStyle(palette: palette))
                     .disabled(visibleLogs.isEmpty).help("导出当前筛选的日志").accessibilityLabel("导出日志")
-            } else if page == .downloads {
-                if !model.downloads.isEmpty { searchField }
-                Button(action: model.openDirectory) { Image(systemName: "folder") }
-                    .buttonStyle(RoundButtonStyle(palette: palette)).help("打开保存目录").accessibilityLabel("打开保存目录")
-                Menu {
-                    Button("查看日志") { page = .logs }
-                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 28) }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 24).accessibilityLabel("下载操作")
             }
         }.frame(height: 76)
+    }
+
+    private var downloadActions: some View {
+        Menu {
+            Button("从文本文件导入链接…", action: model.importLinks).disabled(model.busy)
+            if model.hasMediaInput {
+                Toggle("视频仅下载音频", isOn: Binding(get: { model.mediaFormat == .audio }, set: { model.mediaFormat = $0 ? .audio : .automatic }))
+                    .disabled(model.busy)
+            }
+            if model.downloads.contains(where: { $0.canRetry || $0.source == nil }) {
+                Button("复制未完成链接", action: model.copyUnfinished)
+            }
+            Divider()
+            Button("查看日志") { page = .logs }
+        } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32).contentShape(Rectangle()) }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 32)
+            .help("更多下载操作").accessibilityLabel("下载操作")
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 9) {
-                Image(systemName: "link").font(.system(size: 15, weight: .medium))
                 Text("添加链接").font(.system(size: 14, weight: .medium))
                 Spacer()
-                if model.hasMediaInput {
-                    Picker("媒体格式", selection: $model.mediaFormat) {
-                        ForEach(MediaFormat.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }.labelsHidden().pickerStyle(.menu).buttonStyle(.automatic).frame(width: 132)
+                if model.hasMediaInput && model.mediaFormat == .audio {
+                    Button { model.mediaFormat = .automatic } label: {
+                        Label("仅音频", systemImage: "waveform").font(.system(size: 12)).foregroundStyle(secondary)
+                    }.help("视频链接仅保存音频，点按恢复下载视频").accessibilityLabel("仅音频模式，点按恢复视频").disabled(model.busy)
                 }
-                Button(action: model.importLinks) { Image(systemName: "square.and.arrow.down").frame(width: 32, height: 32).contentShape(Rectangle()) }
-                    .help("从文本文件导入链接").accessibilityLabel("导入链接")
                 Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
-                    .help("追加剪贴板中的链接").accessibilityLabel("粘贴链接")
-            }.buttonStyle(.plain).disabled(model.busy).padding(.horizontal, 20).padding(.top, 12)
+                    .help("追加剪贴板中的链接").accessibilityLabel("粘贴链接").disabled(model.busy)
+                downloadActions
+            }.buttonStyle(.plain).padding(.horizontal, 20).padding(.top, 12)
             LinkInput(model: model, focused: $inputFocused, palette: palette)
                 .frame(height: 104).padding(.horizontal, 8).padding(.top, 8)
             HStack(spacing: 12) {
-                Button(action: model.chooseDirectory) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "folder").font(.system(size: 14))
-                        Text(model.directoryLabel).lineLimit(1).truncationMode(.middle)
-                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .medium))
-                    }.font(.system(size: 12)).foregroundStyle(secondary).frame(height: 40).contentShape(Rectangle())
-                }.buttonStyle(.plain).disabled(model.busy).help(model.directory.path).accessibilityLabel("更改保存目录")
+                Menu {
+                    Text(model.directoryLabel)
+                    Text("自动归入 Papers、Videos、Audio、Images")
+                    if !model.directoryExists { Text("首次下载时创建文件夹") }
+                    Divider()
+                    Button("更改保存位置…", action: model.chooseDirectory).disabled(model.busy)
+                    Button("在访达中打开", action: model.openDirectory).disabled(!model.directoryExists)
+                } label: {
+                    Label(model.directory.lastPathComponent.isEmpty ? "/" : model.directory.lastPathComponent, systemImage: "folder")
+                        .font(.system(size: 12)).lineLimit(1).truncationMode(.middle).foregroundStyle(secondary)
+                }.menuStyle(.borderlessButton).menuIndicator(.visible)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                    .help("\(model.directoryLabel)\n自动归入 Papers、Videos、Audio、Images")
+                    .accessibilityLabel("保存位置：\(model.directoryLabel)，自动按类型归档")
                 Spacer(minLength: 8)
                 if model.busy {
                     Button(action: model.cancel) { Label(model.cancelling ? "正在取消" : "取消下载", systemImage: "stop.fill") }
@@ -301,30 +323,29 @@ struct DownloaderView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(secondary)
             TextField("搜索", text: $query).textFieldStyle(.plain).font(.system(size: 13))
-                .accessibilityLabel(page == .logs ? "搜索日志" : (page == .library ? "搜索论文" : "搜索下载"))
+                .accessibilityLabel(page == .logs ? "搜索日志" : (page == .library ? "搜索论文" : (page == .media ? "搜索媒体" : "搜索下载")))
             if !query.isEmpty {
                 Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary).frame(width: 24, height: 24).contentShape(Rectangle()) }
                     .buttonStyle(.plain).accessibilityLabel("清除搜索")
             }
-        }.padding(.horizontal, 13).frame(width: 178, height: 36)
+        }.padding(.horizontal, page == .downloads ? 10 : 13)
+            .frame(width: page == .downloads ? 140 : 178, height: page == .downloads ? 28 : 36)
             .background(ThemePalette.color(palette.surface)).clipShape(Capsule())
     }
 
     private var papers: some View {
         let rows = visibleItems
         return VStack(spacing: 14) {
-            if page == .library || !model.downloads.isEmpty {
+            if page == .library || (page == .downloads && !model.downloads.isEmpty) {
             HStack(spacing: 4) {
                 if page == .downloads {
                     FilterTabs(options: QueueFilter.allCases, selection: $filter, title: { $0.rawValue }, palette: palette)
                     Spacer(minLength: 0)
-                    if model.canRetry && !model.busy {
+                    if filter == .failed && query.isEmpty && model.retryCount > 1 && !model.busy {
                         Button("重试未完成") { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
+                            .padding(.trailing, 8)
                     }
-                    if model.downloads.contains(where: { $0.canRetry || $0.source == nil }) {
-                        Button(action: model.copyUnfinished) { Image(systemName: "doc.on.doc").frame(width: 28, height: 30).contentShape(Rectangle()) }
-                            .buttonStyle(.plain).foregroundStyle(secondary).help("复制未完成链接").accessibilityLabel("复制未完成链接")
-                    }
+                    searchField
                 } else {
                     if libraryFilter == .removed {
                         Button { libraryFilter = .all } label: { Label("已移除", systemImage: "chevron.left").font(.system(size: 13)) }
@@ -355,7 +376,7 @@ struct DownloaderView: View {
                                     LibraryRow(paper: paper, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                         .id(item.id)
                                 } else {
-                                DownloadRow(item: item, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
                                     .id(item.id)
@@ -390,6 +411,7 @@ struct DownloaderView: View {
 
     private var emptyMessage: String {
         if !query.isEmpty { return "没有匹配的结果" }
+        if page == .media { return "暂无媒体" }
         if page == .library {
             if libraryTag != nil { return "没有匹配的结果" }
             switch libraryFilter { case .all: return "暂无论文"; case .favorites: return "暂无收藏"; case .unread: return "暂无未读论文"; case .removed: return "暂无已移除论文" }
@@ -458,7 +480,7 @@ struct DownloaderView: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let error = model.directoryNotice ?? model.notice ?? model.libraryNotice ?? model.persistenceNotice {
+            if let error = model.directoryNotice ?? model.notice ?? model.libraryNotice ?? model.mediaLibraryNotice ?? model.persistenceNotice {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 12)).foregroundStyle(UIColors.error)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
@@ -472,6 +494,8 @@ struct DownloaderView: View {
                 } else if page == .logs {
                     Text("\(visibleLogs.count) 条").monospacedDigit()
                     Spacer()
+                } else if page == .media {
+                    Spacer(); Text("\(visibleItems.count) 项").monospacedDigit()
                 } else {
                     if model.importingPDFs { Text("正在导入…") }
                     else if !model.checkingVersions.isEmpty { Text("正在检查版本 · 剩余 \(model.checkingVersions.count) 篇") }
@@ -543,11 +567,12 @@ struct DownloadRow: View {
     let model: DownloadModel
     let busy: Bool
     let theme: AppTheme
+    let inMediaLibrary: Bool
     let selected: Bool
     let select: () -> Void
 
-    init(item: DownloadItem, model: DownloadModel, selected: Bool = false, select: @escaping () -> Void = {}) {
-        self.item = item; self.model = model
+    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, select: @escaping () -> Void = {}) {
+        self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
         busy = model.busy; theme = model.theme; self.selected = selected; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
@@ -566,10 +591,12 @@ struct DownloadRow: View {
                 HStack(spacing: 10) {
                     if let metadata = item.metadata { Text(metadata.reference.identifier).font(.system(size: 11, design: .monospaced)) }
                     else if let host = item.directURL?.host, item.documentTitle != nil { Text(host).lineLimit(1) }
+                    if !inMediaLibrary || item.state == .missing {
                     HStack(spacing: 4) {
                         Image(systemName: item.state.symbol).font(.system(size: 10))
                         Text(item.state.label)
                     }.foregroundStyle(item.state.color(palette)).lineLimit(1)
+                    }
                     if let files = item.additionalURLs, !files.isEmpty { Text("\(files.count + 1) 个文件") }
                 }.font(.system(size: 11)).foregroundStyle(secondary)
                 if let progress = item.progress, item.state == .downloading {
@@ -585,10 +612,10 @@ struct DownloadRow: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
             HStack(spacing: 6) {
-                if let url = item.savedURL {
+                if let url = item.savedURL, !inMediaLibrary || item.state != .missing || item.localURLs.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
                     Button("打开") { model.openFile(item) }.buttonStyle(QuietButtonStyle(palette: palette)).help(url.path)
                 } else if item.canRetry {
-                    Button("重试") { model.retry(item.id) }
+                    Button("重试", action: retry)
                         .buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
                 } else if item.source == nil {
                     Button("修改") { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
@@ -614,7 +641,7 @@ struct DownloadRow: View {
         }
         Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中文件后按 \(model.shortcuts[.details].label)")
         if item.canRetry && item.savedURL != nil {
-            Button("重新下载缺失文件") { model.retry(item.id) }.disabled(busy)
+            Button("重新下载缺失文件", action: retry).disabled(busy)
         }
         if let source = item.source {
             Button("打开来源页面") { model.openSource(item) }
@@ -625,6 +652,10 @@ struct DownloadRow: View {
         if let url = item.savedURL {
             Button("复制文件名") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
         }
+    }
+
+    private func retry() {
+        if inMediaLibrary { model.retryFromLibrary(item) } else { model.retry(item.id) }
     }
 
     private func progressText(_ progress: DownloadProgress) -> String {
