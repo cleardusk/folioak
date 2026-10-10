@@ -811,8 +811,15 @@ struct LinkInput: NSViewRepresentable {
         editor.setAccessibilityLabel("论文链接，每行一个")
         editor.delegate = context.coordinator
         editor.captureFailure = { [weak model] in model?.notice = $0 }
-        editor.focusChanged = { [weak coordinator = context.coordinator] value in
-            DispatchQueue.main.async { coordinator?.parent.focused = value }
+        editor.focusChanged = { [weak editor, weak coordinator = context.coordinator] value in
+            guard let coordinator else { return }
+            let editRequest = coordinator.parent.model.editRequest, listRequest = coordinator.parent.model.listRequest
+            DispatchQueue.main.async { [weak coordinator] in
+                guard let editor, let window = editor.window, let coordinator,
+                      coordinator.parent.model.editRequest == editRequest, coordinator.parent.model.listRequest == listRequest,
+                      (window.firstResponder === editor) == value else { return }
+                coordinator.parent.focused = value
+            }
         }
         scroll.documentView = editor
         return scroll
@@ -835,8 +842,11 @@ struct LinkInput: NSViewRepresentable {
         let selectToken = context.coordinator.selectionRequest != model.editRequest
         context.coordinator.selectionRequest = model.editRequest
         if !model.busy && (selectToken || (focused && editor.window?.firstResponder !== editor)) {
+            let editRequest = model.editRequest, listRequest = model.listRequest
             DispatchQueue.main.async { [weak editor, weak coordinator = context.coordinator] in
-                guard let editor, let coordinator, !coordinator.parent.model.busy, let window = editor.window else { return }
+                guard let editor, let coordinator, coordinator.parent.focused, !coordinator.parent.model.busy,
+                      coordinator.parent.model.editRequest == editRequest, coordinator.parent.model.listRequest == listRequest,
+                      let window = editor.window else { return }
                 window.makeFirstResponder(editor)
                 if selectToken, let range = DownloaderView.inputRange(of: coordinator.parent.model.editTarget, in: editor.string) {
                     editor.setSelectedRange(range)

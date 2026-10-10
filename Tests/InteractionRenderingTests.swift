@@ -20,6 +20,41 @@ private struct MovingFilterProbe: View {
 }
 
 extension CoreTests {
+    @MainActor static func inputFocusRaceTests() async throws {
+        let suite = "arxiv-input-focus-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        var focused = false
+        let view = NSHostingView(rootView: LinkInput(model: model, focused: Binding(get: { focused }, set: { focused = $0 }), palette: model.theme.palette(dark: false)))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 120), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { window.orderOut(nil) }
+        func settle() async {
+            view.layoutSubtreeIfNeeded()
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            view.layoutSubtreeIfNeeded()
+        }
+        func editor(_ root: NSView) -> LinkTextView? {
+            (root as? LinkTextView) ?? root.subviews.lazy.compactMap(editor).first
+        }
+        await settle()
+        guard let input = editor(view) else { throw TestFailure.failed("focus test input") }
+        window.makeFirstResponder(input)
+        await settle()
+        input.focusChanged?(true)
+        focused = false; model.listRequest = UUID()
+        await settle()
+        try expect(!focused, "queued input gain must not overwrite a newer list request before list focus arrives")
+        window.makeFirstResponder(nil)
+        await settle()
+        input.focusChanged?(false)
+        focused = true; model.focusInput()
+        await settle()
+        try expect(focused && window.firstResponder === input, "queued input loss must not overwrite a newer input request")
+        print("PASS input focus: stale gain and loss cannot supersede newer keyboard requests")
+    }
+
     @MainActor static func settingsLayoutTests() async throws {
         _ = NSApplication.shared
         let suite = "arxiv-settings-layout-\(UUID().uuidString)"
@@ -98,9 +133,11 @@ extension CoreTests {
         model.listRequest = UUID()
         await settle()
         for _ in 0..<10 where !(window.firstResponder is PaperListKeyboard.KeyView) { await settle() }
+        var keyStep = 0
         func key(_ code: UInt16, _ text: String, _ modifiers: NSEvent.ModifierFlags = []) throws {
+            keyStep += 1
             guard let keys = window.firstResponder as? PaperListKeyboard.KeyView else {
-                throw TestFailure.failed("paper list must be first responder, got \(String(describing: window.firstResponder))")
+                throw TestFailure.failed("paper list must be first responder at key step \(keyStep), got \(String(describing: window.firstResponder))")
             }
             keys.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!)
         }
