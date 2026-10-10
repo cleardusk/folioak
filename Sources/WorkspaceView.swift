@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 typealias WorkspaceViewState<Value> = SwiftUI.State<Value>
 
 enum WorkspacePage: String, CaseIterable {
-    case downloads = "下载", library = "论文库", media = "媒体库", logs = "日志"
+    case downloads = "下载", library = "文档库", media = "媒体库", logs = "日志"
     static let navigation: [Self] = [.downloads, .library, .media]
     var icon: String {
         switch self { case .downloads: return "arrow.down.circle"; case .library: return "books.vertical"; case .media: return "photo.on.rectangle"; case .logs: return "text.alignleft" }
@@ -229,17 +229,17 @@ struct DownloaderView: View {
                 Button { libraryFilter = .all; libraryTag = nil; query = ""; model.importPDFs() } label: { Image(systemName: "plus") }
                     .buttonStyle(RoundButtonStyle(palette: palette)).help("导入本地 PDF").accessibilityLabel("导入 PDF").disabled(model.importingPDFs || !model.libraryWritable)
                 Menu {
-                    Button("导出资料库", action: model.exportLibrary).disabled(!model.papers.contains { !$0.removed })
+                    Button("导出文档库", action: model.exportLibrary).disabled(!model.papers.contains { !$0.removed })
                     if model.checkingVersions.isEmpty {
                         Button("检查论文新版本") { model.checkPaperVersions(libraryPapers.map(\.id)) }
                             .disabled(!libraryPapers.contains { $0.reference != nil })
                     } else { Button("停止检查版本", action: model.cancelVersionCheck) }
                     Divider()
-                    Button(libraryFilter == .removed ? "返回资料库" : "已移除的论文") {
+                    Button(libraryFilter == .removed ? "返回文档库" : "已移除的文档") {
                         libraryFilter = libraryFilter == .removed ? .all : .removed; query = ""; libraryTag = nil
                     }
                 } label: { Image(systemName: "ellipsis").frame(width: 28, height: 32) }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("资料库操作")
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28).accessibilityLabel("文档库操作")
             } else if page == .media {
                 if !model.mediaLibrary.isEmpty { searchField }
             } else if page == .logs && !model.logs.isEmpty {
@@ -323,7 +323,7 @@ struct DownloaderView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(secondary)
             TextField("搜索", text: $query).textFieldStyle(.plain).font(.system(size: 13))
-                .accessibilityLabel(page == .logs ? "搜索日志" : (page == .library ? "搜索论文" : (page == .media ? "搜索媒体" : "搜索下载")))
+                .accessibilityLabel(page == .logs ? "搜索日志" : (page == .library ? "搜索文档" : (page == .media ? "搜索媒体" : "搜索下载")))
             if !query.isEmpty {
                 Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary).frame(width: 24, height: 24).contentShape(Rectangle()) }
                     .buttonStyle(.plain).accessibilityLabel("清除搜索")
@@ -349,7 +349,7 @@ struct DownloaderView: View {
                 } else {
                     if libraryFilter == .removed {
                         Button { libraryFilter = .all } label: { Label("已移除", systemImage: "chevron.left").font(.system(size: 13)) }
-                            .buttonStyle(.plain).foregroundStyle(secondary).help("返回资料库")
+                            .buttonStyle(.plain).foregroundStyle(secondary).help("返回文档库")
                     }
                     else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { $0.rawValue }, palette: palette) }
                     Spacer()
@@ -414,7 +414,7 @@ struct DownloaderView: View {
         if page == .media { return "暂无媒体" }
         if page == .library {
             if libraryTag != nil { return "没有匹配的结果" }
-            switch libraryFilter { case .all: return "暂无论文"; case .favorites: return "暂无收藏"; case .unread: return "暂无未读论文"; case .removed: return "暂无已移除论文" }
+            switch libraryFilter { case .all: return "暂无文档"; case .favorites: return "暂无收藏"; case .unread: return "暂无未读文档"; case .removed: return "暂无已移除文档" }
         }
         if !model.downloads.isEmpty { return "暂无\(filter.rawValue)任务" }
         return "粘贴链接，开始拾取"

@@ -66,11 +66,11 @@ enum LibraryStore {
     struct Snapshot: Codable { var schema = 1; var papers: [LibraryPaper] }
     static func read(_ url: URL) throws -> [LibraryPaper]? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let data = try PaperStorage.read(url, limit: byteLimit, tooLarge: "资料库超过 32 MB。")
+        let data = try PaperStorage.read(url, limit: byteLimit, tooLarge: "文档库超过 32 MB。")
         let snapshot = try JSONDecoder().decode(Snapshot.self, from: data)
         guard snapshot.schema == 1, snapshot.papers.count <= countLimit,
               Set(snapshot.papers.map(\.id)).count == snapshot.papers.count,
-              snapshot.papers.allSatisfy(valid) else { throw DownloadError.storage("资料库格式无效。") }
+              snapshot.papers.allSatisfy(valid) else { throw DownloadError.storage("文档库格式无效。") }
         return snapshot.papers
     }
     static func valid(_ paper: LibraryPaper) -> Bool {
@@ -83,10 +83,10 @@ enum LibraryStore {
         (paper.latest.map { $0.baseID == paper.reference?.baseID } ?? true)
     }
     static func write(_ papers: [LibraryPaper], to url: URL) throws {
-        guard papers.count <= countLimit else { throw DownloadError.limit("资料库最多保存 20,000 篇，已有论文不会被自动移除。") }
-        guard Set(papers.map(\.id)).count == papers.count, papers.allSatisfy(valid) else { throw DownloadError.storage("资料库格式无效，已有文件保持不变。") }
+        guard papers.count <= countLimit else { throw DownloadError.limit("文档库最多保存 20,000 篇，已有文档不会被自动移除。") }
+        guard Set(papers.map(\.id)).count == papers.count, papers.allSatisfy(valid) else { throw DownloadError.storage("文档库格式无效，已有文件保持不变。") }
         let data = try JSONEncoder().encode(Snapshot(papers: papers))
-        guard data.count <= byteLimit else { throw DownloadError.limit("资料库超过 32 MB，已有文件保持不变。") }
+        guard data.count <= byteLimit else { throw DownloadError.limit("文档库超过 32 MB，已有文件保持不变。") }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -105,7 +105,7 @@ enum LibraryStore {
 
 extension DownloadModel {
     private func canChangeLibrary() -> Bool {
-        if !libraryWritable { notice = "资料库只读，无法保存新增或修改；原文件已保留。" }
+        if !libraryWritable { notice = "文档库只读，无法保存新增或修改；原文件已保留。" }
         return libraryWritable
     }
     func upsertPaper(_ item: DownloadItem) {
@@ -121,7 +121,7 @@ extension DownloadModel {
             updated.latest = old.latest; updated.checkedAt = old.checkedAt
             papers[index] = updated
         } else {
-            guard papers.count < LibraryStore.countLimit else { libraryNotice = "资料库已满，下载文件仍已保存。"; return }
+            guard papers.count < LibraryStore.countLimit else { libraryNotice = "文档库已满，下载文件仍已保存。"; return }
             var added = incoming
             if let base = incoming.reference?.baseID, let old = papers.first(where: { !$0.removed && $0.reference?.baseID == base }) {
                 added.tags = old.tags; added.favorite = old.favorite
@@ -155,7 +155,7 @@ extension DownloadModel {
             }.value
             guard let self else { return }
             for paper in result.0 where !self.papers.contains(where: { $0.file == paper.file }) {
-                guard self.papers.count < LibraryStore.countLimit else { self.notice = "资料库已满，原 PDF 保持不变。"; break }
+                guard self.papers.count < LibraryStore.countLimit else { self.notice = "文档库已满，原 PDF 保持不变。"; break }
                 self.papers.append(paper)
             }
             self.importingPDFs = false
@@ -183,7 +183,7 @@ extension DownloadModel {
         let wanted = Set(ids)
         let selected = papers.filter { wanted.contains($0.id) && !$0.removed && $0.reference != nil }
         guard !selected.isEmpty else { return }
-        guard selected.count <= ResourceLimits.batchCount else { notice = "每次最多检查 200 篇，请先筛选资料库。"; return }
+        guard selected.count <= ResourceLimits.batchCount else { notice = "每次最多检查 200 篇，请先筛选文档库。"; return }
         checkingVersions = Set(selected.map(\.id))
         notice = nil
         versionWorker = Task { [weak self, engine] in
@@ -239,7 +239,7 @@ struct LibraryEditView: View {
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("整理论文").font(.system(size: 18, weight: .medium))
+            Text("整理文档").font(.system(size: 18, weight: .medium))
             VStack(alignment: .leading, spacing: 8) { Text("标题"); TextField("标题", text: $title) }
             VStack(alignment: .leading, spacing: 8) { Text("标签"); TextField("用逗号分隔", text: $tags) }
             HStack { Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -265,7 +265,7 @@ struct LibraryRow: View {
             Image(systemName: paper.favorite ? "star.fill" : "doc.text")
                 .font(.system(size: 21, weight: .light)).foregroundStyle(ThemePalette.color(palette.accent))
                 .frame(width: 44, height: 44).background(ThemePalette.color(palette.accent).opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 13))
-                .accessibilityLabel(paper.favorite ? "已收藏" : "论文")
+                .accessibilityLabel(paper.favorite ? "已收藏" : "文档")
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     if !paper.read { Circle().fill(ThemePalette.color(palette.accent)).frame(width: 5, height: 5).accessibilityLabel("未读") }
@@ -299,7 +299,7 @@ struct LibraryRow: View {
             Button("快速预览") { select(); model.openPaper(paper, preview: true) }.disabled(paper.missing)
             Button(paper.favorite ? "取消收藏" : "收藏") { model.changePaper(paper.id) { $0.favorite.toggle() } }
             Button(paper.read ? "标为未读" : "标为已读") { model.changePaper(paper.id) { $0.read.toggle() } }
-            Button("整理论文…") { select(); model.editingPaper = paper }
+            Button("整理文档…") { select(); model.editingPaper = paper }
             Divider()
             if paper.reference != nil {
                 Button("检查新版本") { model.checkPaperVersions([paper.id]) }.disabled(!model.checkingVersions.isEmpty)
@@ -317,7 +317,7 @@ struct LibraryRow: View {
                 Button("下载详情…") { select(); model.showPaperDetails(paper) }
             }
             Divider()
-            Button("移出资料库") { model.changePaper(paper.id) { $0.removed = true } }.help("保留 PDF，可从已移除的论文中恢复")
-        } else { Button("恢复到资料库") { model.changePaper(paper.id) { $0.removed = false } } }
+            Button("移出文档库") { model.changePaper(paper.id) { $0.removed = true } }.help("保留 PDF，可从已移除的文档中恢复")
+        } else { Button("恢复到文档库") { model.changePaper(paper.id) { $0.removed = false } } }
     }
 }

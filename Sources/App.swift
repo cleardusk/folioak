@@ -237,12 +237,12 @@ final class DownloadModel: ObservableObject {
         do {
             if let libraryURL, let saved = try LibraryStore.read(libraryURL) { papers = saved; libraryDirty = false; return }
             for item in (history + items).reversed() { upsertPaper(item) }
-        } catch { libraryWritable = false; libraryNotice = "资料库无法读取，原文件已保留：\(error.localizedDescription)" }
+        } catch { libraryWritable = false; libraryNotice = "文档库无法读取，原文件已保留：\(error.localizedDescription)" }
     }
     private func persistLibrary() {
         guard libraryDirty, libraryWritable, let libraryURL else { return }
         do { try LibraryStore.write(papers, to: libraryURL); libraryDirty = false; libraryNotice = nil }
-        catch { libraryNotice = "资料库未能保存：\(error.localizedDescription)" }
+        catch { libraryNotice = "文档库未能保存：\(error.localizedDescription)" }
     }
 
     func appendInput(_ capturedText: String) {
@@ -287,7 +287,7 @@ final class DownloadModel: ObservableObject {
 
     private func exportData(_ data: Data, name: String) {
         let panel = NSOpenPanel()
-        panel.title = name.hasSuffix(".txt") ? "导出日志" : "导出资料库"
+        panel.title = name.hasSuffix(".txt") ? "导出日志" : "导出文档库"
         panel.prompt = "导出"
         panel.canChooseFiles = false; panel.canChooseDirectories = true
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
