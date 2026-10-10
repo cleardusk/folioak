@@ -22,7 +22,7 @@ python3 Tools/prepare-media.py # 首次准备；后续校验并复用缓存
 
 yt-dlp、QuickJS-NG、FFmpeg 的版本、源码和校验值在 `Tools/prepare-media.py`，许可说明在 `Resources/MediaComponents.md`。QuickJS-NG 使用不暴露文件、网络、进程或模块加载接口的最小 JS host，无 JIT entitlement；PyInstaller yt-dlp 和 FFmpeg / ffprobe 仅有加载各自私有库所需的 library-validation entitlement（ad-hoc 签名没有 Team ID）。应用主程序不继承这些例外。组件更新必须修改固定版本／校验值并重新验证，不在用户运行时自更新。
 
-yt-dlp 使用官方目录版，仅保留 arm64 二进制，恢复 Python.framework 的标准相对符号链接；所有 Python 模块、站点解析器、EJS 和许可证均保留。运行时直接读取应用内的文件，不再每次展开单文件压缩包。
+yt-dlp 使用官方目录版，仅保留 arm64 二进制，恢复 Python.framework 的标准相对符号链接；所有 Python 模块、站点解析器、EJS 和许可证均保留。运行时直接读取应用内的文件，不再每次展开单文件压缩包。Python 库仅剥离本地符号，保留导出符号；PYZ 模块改用 zlib level 0 存储以避免嵌套压缩，每个模块的字节逐一核对不变，之后重新签名。安装后占用可能略增，换取更小的 DMG。
 
 FFmpeg / ffprobe 共用安装包内的动态库，保留原有输入解码能力，移除未使用的编码器和特效；不依赖 Homebrew。离线测试会搬移完整组件目录，在隔离 PATH 下验证合并、M4A 提取、HLS 修复、签名和动态库路径。DMG 使用 macOS 10.15 起支持的 ULMO（LZMA）压缩；应用最低系统版本仍为 macOS 13。
 
@@ -49,7 +49,7 @@ Actions 会再次执行离线／资源测试，构建安装包，核验包的 SH
 
 普通 `main` 推送会测试、构建并保留安装包 artifact 7 天；PR 只测试、构建。在 Actions 页面手动运行也可获取安装包，手动运行不创建 Release。自动测试不访问 arXiv，以免真实服务故障影响发布。
 
-云端使用固定提交的 `actions/cache` 缓存 `build/media-tools/`，包含媒体可执行文件、完整 Python 运行时、私有动态库、校验清单和许可文件。缓存键包含系统／架构、Xcode／SDK，以及 `Tools/prepare-media.py`、`Tools/QuickJSHost.c`、媒体说明和媒体库加载 entitlement 的内容哈希；普通 UI 改动和应用版本号不使缓存失效。`main` 成功构建产生的缓存可供之后的版本标签复用，详见 [GitHub 缓存作用域](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)。
+云端使用固定提交的 `actions/cache` 缓存 `build/media-tools/`，包含媒体可执行文件、完整 Python 运行时、私有动态库、校验清单和许可文件。缓存键包含系统／架构、Xcode／SDK，以及 `Tools/prepare-media.py`、`Tools/repack_python.py`、`Tools/QuickJSHost.c`、媒体说明和媒体库加载 entitlement 的内容哈希；普通 UI 改动和应用版本号不使缓存失效。`main` 成功构建产生的缓存可供之后的版本标签复用，详见 [GitHub 缓存作用域](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)。
 
 不使用跨版本回退键。缓存命中后仍由准备脚本逐个校验全部文件 SHA-256 和相对符号链接目标，应用的签名与安装包校验照常执行。首次构建、组件／编译配置／工具链变化、媒体二进制校验不符或缓存被 GitHub 清理时会重新构建；长期保留缓存不是发布的前提。仅缓存组件，不缓存 `.app` 或已签名的安装包。
 

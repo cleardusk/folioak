@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import urllib.request
 import tempfile
@@ -15,7 +16,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / 'build/media-sources'
 OUTPUT = ROOT / 'build/media-tools'
-VERSIONS = {'yt-dlp': '2026.08.19', 'quickjs': '0.17.0', 'ffmpeg': '8.0.1', 'recipe': 3}
+VERSIONS = {'yt-dlp': '2026.08.19', 'quickjs': '0.17.0', 'ffmpeg': '8.0.1', 'recipe': 4}
 FFMPEG_LIBRARIES = ['libavcodec.62.dylib', 'libavfilter.11.dylib', 'libavformat.62.dylib',
                     'libavutil.60.dylib', 'libswresample.6.dylib', 'libswscale.9.dylib']
 BINARIES = ['yt-dlp', 'qjs', 'ffmpeg', 'ffprobe', *FFMPEG_LIBRARIES]
@@ -96,6 +97,11 @@ def prepare(output):
         if architectures != ['arm64']:
             subprocess.run(['xcrun', 'lipo', str(path), '-thin', 'arm64', '-output', str(path)], check=True)
         path.chmod(0o755)
+        if path.name == 'yt-dlp':
+            subprocess.run([sys.executable, str(ROOT / 'Tools/repack_python.py'), str(path)], check=True)
+        else:
+            # Keep exported symbols used by Python/dlopen; remove local symbols only.
+            subprocess.run(['strip', '-x', str(path)], check=True)
         if path != canonical:
             sign(path, private_libraries=path.name == 'yt-dlp')
     sign(framework)
@@ -164,7 +170,7 @@ def prepare(output):
 def main():
     CACHE.mkdir(parents=True, exist_ok=True)
     manifest = OUTPUT / 'versions.json'
-    inputs = {name: digest(ROOT / name) for name in ['Tools/prepare-media.py', 'Tools/QuickJSHost.c',
+    inputs = {name: digest(ROOT / name) for name in ['Tools/prepare-media.py', 'Tools/repack_python.py', 'Tools/QuickJSHost.c',
                'Resources/Downloader.entitlements', 'Resources/MediaComponents.md']}
     if manifest.exists():
         saved = json.loads(manifest.read_text())

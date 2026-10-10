@@ -19,6 +19,7 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   -framework AppKit -framework SwiftUI -framework PDFKit \
   Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Shared.swift Sources/Theme.swift Sources/Workspace.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/SidebarMotion.swift Sources/App.swift \
   -o "$staged_app/Contents/MacOS/LeafpickApp"
+strip "$staged_app/Contents/MacOS/LeafpickApp"
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 cp -R Resources/en.lproj Resources/zh-Hans.lproj "$staged_app/Contents/Resources/"
 cp -R build/media-tools "$staged_app/Contents/Resources/media-tools"
@@ -34,6 +35,7 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 -framework PDFKit \
   Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Shared.swift Sources/CLI.swift "$staging_dir/Version.swift" \
   -o "$staging_dir/arxiv-download"
+strip "$staging_dir/arxiv-download"
 codesign --force --options runtime --timestamp=none --sign - "$staging_dir/arxiv-download"
 codesign --verify --strict "$staging_dir/arxiv-download"
 xcrun lipo "$staging_dir/arxiv-download" -verify_arch arm64
