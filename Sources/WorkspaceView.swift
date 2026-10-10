@@ -728,7 +728,6 @@ struct MenuTriggerStyle: ButtonStyle {
     let palette: ThemePalette
     var showsChevron = false
     @WorkspaceViewState private var hovered = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 6) {
@@ -737,7 +736,8 @@ struct MenuTriggerStyle: ButtonStyle {
                 Image(systemName: "chevron.down").font(.system(size: 10, weight: .medium))
                     .foregroundStyle(ThemePalette.color(palette.secondary))
                     .rotationEffect(.degrees(configuration.isPressed ? 180 : 0))
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: configuration.isPressed)
+                    // Native menu tracking suspends SwiftUI interpolation; show its state immediately.
+                    .transaction { $0.animation = nil }
                     .accessibilityHidden(true)
             }
         }.padding(.horizontal, showsChevron ? 12 : 0)
