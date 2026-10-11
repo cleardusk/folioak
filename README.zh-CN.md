@@ -4,7 +4,7 @@
 <h1 align="center">Leafpeak</h1>
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
-原生 macOS 下载器。粘贴链接，保存论文、视频、图片和音频。
+**原生 macOS 下载器，保存论文与媒体。**
 
 - **文档**：arXiv、Hugging Face 论文页、OpenReview、ACL、CVF、GitHub PDF 和公开 PDF 直链。
 - **媒体**：YouTube、Bilibili、X、今日头条的单个公开视频，以及图片／音视频直链。

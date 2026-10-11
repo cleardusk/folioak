@@ -4,7 +4,7 @@
 <h1 align="center">Leafpeak</h1>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
-A minimal native macOS downloader for papers, videos, images, and audio.
+**A native macOS downloader for papers and media.**
 
 - **Documents** — arXiv, Hugging Face papers, OpenReview, ACL, CVF, GitHub PDFs, and public PDF links.
 - **Media** — individual public videos from YouTube, Bilibili, X, and Toutiao, plus direct image, audio, and video links.
