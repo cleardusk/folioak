@@ -96,13 +96,19 @@ struct PaperListKeyboard: NSViewRepresentable {
     enum Action { case up, down, preview, open, diagnostics }
     let request: UUID?
     var detailsShortcut = AppShortcut(key: "i")
+    var focusChanged: (Bool) -> Void = { _ in }
     let didFocus: (UUID) -> Void
     let action: (Action) -> Void
-    func makeNSView(context: Context) -> KeyView { KeyView(request: request, didFocus: didFocus, action: action) }
+    func makeNSView(context: Context) -> KeyView {
+        let view = KeyView(request: request, didFocus: didFocus, action: action)
+        view.focusChanged = focusChanged
+        return view
+    }
     func updateNSView(_ view: KeyView, context: Context) {
         view.action = action
         view.detailsShortcut = detailsShortcut
         view.didFocus = didFocus
+        view.focusChanged = focusChanged
         guard view.request != request else { return }
         view.request = request
         view.focusIfRequested()
@@ -113,13 +119,44 @@ struct PaperListKeyboard: NSViewRepresentable {
         private var fulfilledRequest: UUID?
         var didFocus: (UUID) -> Void
         var action: (Action) -> Void
+        var focusChanged: (Bool) -> Void = { _ in }
+        private var focusRevision = 0
+        private var windowObservers: [NSObjectProtocol] = []
         init(request: UUID?, didFocus: @escaping (UUID) -> Void, action: @escaping (Action) -> Void) {
             self.request = request; self.didFocus = didFocus; self.action = action
             super.init(frame: .zero)
             setAccessibilityLabel("文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情")
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
-        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); focusIfRequested() }
+        deinit { windowObservers.forEach(NotificationCenter.default.removeObserver) }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            windowObservers.forEach(NotificationCenter.default.removeObserver); windowObservers = []
+            if let window {
+                for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+                    windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: nil) { [weak self] _ in self?.publishFocus() })
+                }
+            }
+            publishFocus(); focusIfRequested()
+        }
+        private func publishFocus() {
+            focusRevision += 1
+            let revision = focusRevision
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.focusRevision == revision else { return }
+                self.focusChanged(self.window?.isKeyWindow == true && self.window?.firstResponder === self)
+            }
+        }
+        override func becomeFirstResponder() -> Bool {
+            let accepted = super.becomeFirstResponder()
+            if accepted { publishFocus() }
+            return accepted
+        }
+        override func resignFirstResponder() -> Bool {
+            let accepted = super.resignFirstResponder()
+            if accepted { publishFocus() }
+            return accepted
+        }
         func focusIfRequested() {
             guard let request, request != fulfilledRequest else { return }
             DispatchQueue.main.async { [weak self] in
@@ -149,64 +186,129 @@ struct PaperListKeyboard: NSViewRepresentable {
 struct TaskDiagnosticView: View {
     @ObservedObject var model: DownloadModel
     let item: DownloadItem
+    var libraryPaperID: UUID? = nil
+    var fromMediaLibrary = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
-    private var current: DownloadItem { model.items.first { $0.id == item.id } ?? model.history.first { $0.id == item.id } ?? item }
-    private var entries: [ActivityEntry] { model.logs.filter { $0.itemID == item.id } }
+    @WorkspaceViewState private var files: [FileInformation] = []
+    @WorkspaceViewState private var loading = false
+    @WorkspaceViewState private var showingDiagnostics = false
+    private var paper: LibraryPaper? { libraryPaperID.flatMap { id in model.papers.first { $0.id == id } } }
+    var current: DownloadItem {
+        if let paper {
+            var record = paper.downloadItem
+            record.savedURL = paper.file // Keep missing paths visible, too.
+            return record
+        }
+        if fromMediaLibrary { return model.mediaLibrary.first { $0.id == item.id } ?? item }
+        return model.items.first { $0.id == item.id } ?? model.history.first { $0.id == item.id } ?? item
+    }
+    var diagnosticTask: DownloadItem? {
+        let id = libraryPaperID == nil ? item.id : paper?.taskID
+        guard let id else { return nil }
+        return model.items.first { $0.id == id } ?? model.history.first { $0.id == id } ?? (libraryPaperID == nil ? current : nil)
+    }
+    func retry() {
+        let id = diagnosticTask?.id
+        if let task = (model.items + model.history).first(where: { $0.id == id && $0.canRetry }) { model.retry(task.id) }
+        else { model.retryFromLibrary(current); dismiss() }
+    }
+    private var entries: [ActivityEntry] { model.logs.filter { $0.itemID == (paper?.taskID ?? item.id) } }
+    private var hasDiagnostics: Bool { diagnosticTask?.diagnostics != nil || diagnosticTask?.error != nil || !entries.isEmpty }
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
-                Text("任务详情").font(.system(size: 18, weight: .medium))
+                Text("详情").font(.system(size: 18, weight: .medium))
                 Spacer()
                 Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(RoundButtonStyle(palette: palette)).keyboardShortcut(.cancelAction).accessibilityLabel("关闭任务详情")
+                    .buttonStyle(RoundButtonStyle(palette: palette)).keyboardShortcut(.cancelAction).accessibilityLabel("关闭详情")
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(current.title).font(.system(size: 14, weight: .medium)).lineLimit(3)
+                        Text(current.title).font(.system(size: 14, weight: .medium)).lineLimit(3).textSelection(.enabled)
                         Text(current.state.label).font(.system(size: 12)).foregroundStyle(current.state.color(palette))
-                        if let file = current.savedURL {
-                            Text(file.path).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
-                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                            Text([current.pages.map { "\($0) 页" }, current.metadata?.reference.identifier ?? current.source?.label].compactMap { $0 }.joined(separator: " · "))
-                                .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).textSelection(.enabled)
+                    }
+                    ForEach(Array(files.enumerated()), id: \.offset) { index, information in
+                        if index > 0 { Divider() }
+                        ForEach(Array(information.groups.enumerated()), id: \.offset) { _, group in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(group.title).font(.system(size: 12, weight: .medium))
+                                ForEach(Array(group.fields.enumerated()), id: \.offset) { _, field in
+                                    HStack(alignment: .top, spacing: 12) {
+                                        Text(field.name).foregroundStyle(ThemePalette.color(palette.secondary)).frame(width: 72, alignment: .leading)
+                                        Text(field.value).frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                                    }.font(.system(size: 12))
+                                }
+                            }
+                        }
+                        if let issue = information.issue {
+                            Text(issue).font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
                         }
                     }
-                    if let trace = current.diagnostics, trace.finishedAt != nil {
-                        timings(trace, now: trace.finishedAt!)
-                    } else if let trace = current.diagnostics {
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            timings(trace, now: trace.finishedAt ?? context.date)
-                        }.transaction { $0.animation = nil }
+                    if loading {
+                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在读取文件信息…").font(.system(size: 12)) }
+                            .foregroundStyle(ThemePalette.color(palette.secondary))
                     }
-                    if let error = current.error {
-                        Text(ActivityEntry.redacted(error)).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
+                    if hasDiagnostics {
+                        if current.localURLs.isEmpty { diagnosticContent }
+                        else {
+                            Divider()
+                            DisclosureGroup("下载记录", isExpanded: $showingDiagnostics) { diagnosticContent.padding(.top, 12) }
+                                .font(.system(size: 12))
+                        }
                     }
-                    Divider()
-                    VStack(alignment: .leading, spacing: 0) {
-                        if entries.isEmpty { Text("暂无记录").foregroundStyle(ThemePalette.color(palette.secondary)) }
-                        ForEach(entries.suffix(80)) { LogRow(entry: $0, palette: palette, horizontalInset: 0) }
-                    }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack {
-                Button("复制诊断") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(report, forType: .string)
-                }.buttonStyle(QuietButtonStyle(palette: palette))
-                Spacer()
-                if current.canRetry && !model.busy {
-                    Button("重试") {
-                        if model.items.contains(where: { $0.id == item.id }) || model.history.contains(where: { $0.id == item.id }) { model.retry(item.id) }
-                        else { model.retryFromLibrary(current); dismiss() }
-                    }.buttonStyle(QuietButtonStyle(palette: palette))
+            if hasDiagnostics || (current.canRetry && !model.busy) {
+                HStack {
+                    if hasDiagnostics {
+                        Button("复制诊断") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(report, forType: .string)
+                        }.buttonStyle(QuietButtonStyle(palette: palette))
+                    }
+                    Spacer()
+                    if current.canRetry && !model.busy {
+                        Button("重试", action: retry).buttonStyle(QuietButtonStyle(palette: palette))
+                    }
                 }
             }
-        }.padding(24).frame(width: 460, height: 480)
+        }.padding(24).frame(width: 500, height: 540)
             .foregroundStyle(ThemePalette.color(palette.text))
             .background(ThemePalette.color(palette.canvas))
+            .task(id: current.localURLs) {
+                files = []; loading = !current.localURLs.isEmpty
+                let record = current, author = paper?.authors ?? current.metadata?.authors?.joined(separator: ", ")
+                do {
+                    for url in record.localURLs {
+                        let information = try await FileInformation.read(url, title: record.title, author: author)
+                        try Task.checkCancellation()
+                        files.append(information)
+                    }
+                    loading = false
+                } catch { /* Dismissal or a new file selection cancels the old read. */ }
+            }
+    }
+    private var diagnosticContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let trace = diagnosticTask?.diagnostics, trace.finishedAt != nil {
+                timings(trace, now: trace.finishedAt!)
+            } else if let trace = diagnosticTask?.diagnostics {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    timings(trace, now: trace.finishedAt ?? context.date)
+                }.transaction { $0.animation = nil }
+            }
+            if let error = diagnosticTask?.error {
+                Text(ActivityEntry.redacted(error)).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
+            }
+            if !entries.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(entries.suffix(80)) { LogRow(entry: $0, palette: palette, horizontalInset: 0) }
+                }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            }
+        }
     }
     private func timings(_ trace: TaskDiagnostics, now: Date) -> some View {
         VStack(spacing: 9) {
@@ -230,13 +332,13 @@ struct TaskDiagnosticView: View {
     private var report: String {
         var lines = [current.title, current.state.label]
         if let source = current.source { lines.append(ActivityEntry.redacted(source.webURL.absoluteString)) }
-        if let trace = current.diagnostics {
+        if let trace = diagnosticTask?.diagnostics {
             lines.append("本次耗时 \(TaskDiagnostics.time(trace.elapsed())) · 重试 \(trace.retries) 次")
             for phase in TaskDiagnostics.Phase.allCases where trace.duration(phase) > 0 {
                 lines.append("\(phase.label) \(TaskDiagnostics.time(trace.duration(phase)))")
             }
         }
-        if let error = current.error { lines.append(ActivityEntry.redacted(error)) }
+        if let error = diagnosticTask?.error { lines.append(ActivityEntry.redacted(error)) }
         lines.append(contentsOf: entries.map(\.line))
         return lines.map(ActivityEntry.redacted).joined(separator: "\n")
     }

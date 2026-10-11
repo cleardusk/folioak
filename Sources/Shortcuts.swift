@@ -4,7 +4,7 @@ private typealias ShortcutViewState<Value> = SwiftUI.State<Value>
 
 enum ShortcutAction: String, CaseIterable, Codable {
     case input, list, download, details
-    var title: String { switch self { case .input: return "添加链接"; case .list: return "文件列表"; case .download: return "开始下载"; case .details: return "任务详情" } }
+    var title: String { switch self { case .input: return "添加链接"; case .list: return "文件列表"; case .download: return "开始下载"; case .details: return "详情" } }
     var defaultKey: String { switch self { case .input: return "l"; case .list: return "j"; case .download: return "\r"; case .details: return "i" } }
 }
 struct AppShortcut: Codable, Equatable {

@@ -13,6 +13,14 @@ private final class ProcessProbe: @unchecked Sendable {
 extension CoreTests {
     @MainActor static func mediaTests(root: URL) async throws {
         try mediaRetryPolicyTests(root: root)
+        let bv = try DownloadSource.parse("BV1MaHp6KENU")
+        let bvURL = try DownloadSource.parse("https://www.bilibili.com/video/BV1MaHp6KENU/")
+        try expect(bv == bvURL && bv.isMedia && bv.rateLimitKey == "media:bilibili", "complete bare BV identifier routes to the existing Bilibili pipeline")
+        try expect(try DownloadSource.parse("  BV1MaHp6KENU\n") == bv, "BV parsing preserves identifier case and trims surrounding whitespace")
+        for invalid in ["BV1", "BV1MaHp6KEN", "BV1MaHp6KENUx", "bv1MaHp6KENU", "BV1MaHp6KEN0", "BV1MaHp6KENI", "BV1MaHp6KENl", "prefixBV1MaHp6KENU", "BV1MaHp6KENU.txt"] {
+            try rejects({ _ = try DownloadSource.parse(invalid) }, "ambiguous or malformed BV input keeps its existing rejection: \(invalid)")
+        }
+        try expect(try DownloadSource.tokens(in: "BV1MaHp6KENU\n1706.03762").map(DownloadSource.parse).map(\.isMedia) == [true, false], "BV identifiers coexist with paper inputs in a batch")
         for url in ["https://youtu.be/BaW_jenozKc", "https://www.youtube.com/watch?v=BaW_jenozKc", "https://www.bilibili.com/video/BV1xx411c7mD", "https://x.com/user/status/123/video/2"] {
             try expect(try DownloadSource.parse(url).isMedia, "media source routing")
         }

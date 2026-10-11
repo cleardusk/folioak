@@ -42,6 +42,11 @@ enum DownloadSource: Hashable, Sendable {
     static func parse(_ input: String) throws -> Self {
         if let reference = try? ArxivReference.parse(input) { return .arxiv(reference) }
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "<>\"'“”"))
+        // Only a complete, case-preserving BV identifier has an unambiguous
+        // media destination. Short or arbitrary strings keep the existing path.
+        if value.range(of: #"^BV1[1-9A-HJ-NP-Za-km-z]{9}$"#, options: .regularExpression) != nil {
+            return .media(URL(string: "https://www.bilibili.com/video/" + value + "/")!)
+        }
         guard value.utf8.count <= 2048, var parts = URLComponents(string: value), let url = parts.url,
               PublicHTTPS.allows(url), !["arxiv.org", "www.arxiv.org", "export.arxiv.org"].contains(parts.host?.lowercased() ?? "") else {
             throw DownloadError.invalidLink(input)

@@ -71,6 +71,7 @@ struct DownloaderView: View {
     @WorkspaceViewState private var dropTargeted = false
     @WorkspaceViewState private var selectedID: UUID?
     @WorkspaceViewState private var listFocus: UUID?
+    @WorkspaceViewState private var listFocused = false
     @WorkspaceViewState private var focusListOnArrival = false
     @WorkspaceViewState private var confirmingClearDownloads = false
     @WorkspaceViewState private var libraryFilter = LibraryFilter.all
@@ -81,6 +82,7 @@ struct DownloaderView: View {
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
+    private var listSelectionActive: Bool { listFocused && !inputFocused && !searchFocused }
     private var visibleItems: [DownloadItem] {
         if page == .library { return libraryPapers.map(\.downloadItem) }
         if page == .media {
@@ -159,7 +161,7 @@ struct DownloaderView: View {
         } message: {
             Text("将移除全部下载记录，包括失败和取消的任务。\n已下载文件、文档库和媒体库都会保留。")
         }
-        .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item) }
+        .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item, libraryPaperID: page == .library ? item.id : nil, fromMediaLibrary: page == .media) }
         .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
         .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selectedID = nil; listFocus = nil }
@@ -404,6 +406,7 @@ struct DownloaderView: View {
     }
 
     private var papers: some View {
+        let listPage = page
         let rows = visibleItems
         return VStack(spacing: 14) {
             if page == .library || (page == .downloads && !model.downloads.isEmpty) {
@@ -455,10 +458,10 @@ struct DownloaderView: View {
                         LazyVStack(spacing: page == .library ? 8 : 0) {
                             ForEach(rows) { item in
                                 if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
-                                    LibraryRow(paper: paper, model: model, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                    LibraryRow(paper: paper, model: model, selected: selectedID == item.id, selectionActive: listSelectionActive, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                         .id(item.id)
                                 } else {
-                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, selectionActive: listSelectionActive, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
                                     .id(item.id)
@@ -471,7 +474,7 @@ struct DownloaderView: View {
                                 dismissEditing()
                             })
                     }
-                    .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], didFocus: { request in
+                    .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], focusChanged: { if page == listPage { listFocused = $0 } }, didFocus: { request in
                         if listFocus == request { listFocus = nil }
                     }) { action in
                         guard !rows.isEmpty else { return }
@@ -611,11 +614,12 @@ struct DownloadRow: View {
     let theme: AppTheme
     let inMediaLibrary: Bool
     let selected: Bool
+    let selectionActive: Bool
     let select: () -> Void
 
-    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, select: @escaping () -> Void = {}) {
+    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, selectionActive: Bool = true, select: @escaping () -> Void = {}) {
         self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
-        busy = model.busy; theme = model.theme; self.selected = selected; self.select = select
+        busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
     @Environment(\.displayScale) private var displayScale
@@ -668,8 +672,8 @@ struct DownloadRow: View {
                     .accessibilityLabel("\(item.title)的更多操作")
             }.padding(.top, 1)
         }.padding(.horizontal, 10).padding(.vertical, 13)
-            .background(selected ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(alignment: .bottom) {
                 Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
                     .padding(.leading, 50).padding(.trailing, 10)
@@ -685,7 +689,7 @@ struct DownloadRow: View {
             Button("在 Finder 中显示") { model.openFile(item, reveal: true) }
             Divider()
         }
-        Button("任务详情…") { select(); model.diagnosticItem = item }.help("选中文件后按 \(model.shortcuts[.details].label)")
+        Button("详情…") { select(); model.diagnosticItem = item }.help("选中文件后按 \(model.shortcuts[.details].label)")
         if item.canRetry && item.savedURL != nil {
             Button("重新下载缺失文件", action: retry).disabled(busy)
         }

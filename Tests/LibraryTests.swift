@@ -117,10 +117,20 @@ extension CoreTests {
         try expect(versionModel.papers.contains { $0.reference == ref && $0.file == pdf } && FileManager.default.fileExists(atPath: pdf.path), "downloading a new version preserves original record and PDF")
         let updated = versionModel.papers.first { $0.reference?.version == 3 }!
         versionModel.showPaperDetails(updated)
-        try expect(versionModel.diagnosticItem?.id == versionModel.items[0].id, "library details resolve the latest real task, even when record ID differs")
+        try expect(versionModel.diagnosticItem?.id == updated.id, "library details retain the library record identity")
+        let details = TaskDiagnosticView(model: versionModel, item: updated.downloadItem, libraryPaperID: updated.id)
+        try expect(details.diagnosticTask?.id == versionModel.items[0].id && details.current.savedURL == updated.file, "library details resolve download diagnostics separately from the current file")
+        let relinked = root.appendingPathComponent("relinked.pdf")
+        versionModel.changePaper(updated.id) { $0.file = relinked }
+        try expect(details.current.savedURL == relinked && details.diagnosticTask?.savedURL != relinked, "relinked library paths take priority over older task paths, including missing files")
         versionModel.diagnosticItem = nil
+        versionModel.papers.append(imported)
         versionModel.showPaperDetails(imported)
-        try expect(versionModel.diagnosticItem == nil, "local imports do not open empty download diagnostics")
+        try expect(versionModel.diagnosticItem?.id == imported.id, "local imports open file details without a download task")
+        let localDetails = TaskDiagnosticView(model: versionModel, item: imported.downloadItem, libraryPaperID: imported.id)
+        try expect(localDetails.current.savedURL == imported.file && localDetails.diagnosticTask == nil, "imported PDF details use the local file without fabricated diagnostics")
+        versionModel.items = []; versionModel.history = []
+        try expect(details.current.savedURL == relinked && details.diagnosticTask == nil && localDetails.current.savedURL == imported.file, "library file information survives cleared download records")
         let partialTransport = MockTransport(sourcePDF: pdf, metadata: [.status(404), .status(200)], latestVersion: 3)
         let partial = DownloadModel(engine: DownloadEngine(transport: partialTransport, requestInterval: 0, retryDelay: 0), preferences: preferences)
         partial.upsertPaper(item)

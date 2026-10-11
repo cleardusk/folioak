@@ -103,6 +103,7 @@ struct CoreTests {
                 try await logScrollTests()
                 try await inputColorTransitionTests()
                 try await listFocusTests()
+                try await selectionFocusTests()
                 try await blankCanvasFocusTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
@@ -113,6 +114,7 @@ struct CoreTests {
             let pdf = root.appendingPathComponent("sample.pdf")
             try createPDF(at: pdf)
             try await mediaTests(root: root)
+            try await fileInformationTests(root: root, pdf: pdf)
             if CommandLine.arguments.contains("--media-only") { return }
             try parseTests()
             try await huggingFaceTests(root: root, pdf: pdf)
@@ -150,6 +152,7 @@ struct CoreTests {
             try await logScrollTests()
             try await inputColorTransitionTests()
             try await listFocusTests()
+            try await selectionFocusTests()
             try await blankCanvasFocusTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
             if CommandLine.arguments.contains("--stress") {

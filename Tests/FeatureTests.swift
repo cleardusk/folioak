@@ -13,6 +13,13 @@ extension CoreTests {
         let signed = "https://example.org/file.pdf?sig=a,b;c%2Bd&token=secret"
         try expect(try PaperInput.captured("[PDF](\(signed))") == signed, "capture preserves signed URL punctuation")
         try expect(try PaperInput.captured("bad-link") == "bad-link", "unrecognized input remains editable")
+        let bvInput = "BV1MaHp6KENU"
+        let bvSuite = "leafpeak-bv-capture-\(UUID().uuidString)", bvPreferences = UserDefaults(suiteName: bvSuite)!
+        defer { bvPreferences.removePersistentDomain(forName: bvSuite) }
+        let bvModel = DownloadModel(preferences: bvPreferences)
+        bvModel.appendInput(bvInput)
+        let bvBatch = try BatchInput(bvModel.input)
+        try expect(bvModel.hasMediaInput && bvBatch.entries.count == 1 && bvBatch.entries[0].source?.webURL.absoluteString == "https://www.bilibili.com/video/BV1MaHp6KENU/", "app capture and batch input recognize a complete BV identifier through the shared parser")
         try rejects({ _ = try PaperInput.captured(String(repeating: "1706.03762 ", count: 201)) }, "capture batch limit before dedup")
         try rejects({ _ = try PaperInput.captured(String(repeating: "x", count: ResourceLimits.inputBytes + 1)) }, "capture byte limit before extraction")
         try rejects({ _ = try PaperInput.decode(Data([0xff, 0xfe])) }, "non-UTF8 input rejected")

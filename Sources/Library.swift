@@ -216,9 +216,7 @@ extension DownloadModel {
         retryFromLibrary(DownloadItem(original: reference.identifier, reference: reference, state: .queued))
     }
     func showPaperDetails(_ paper: LibraryPaper) {
-        guard let taskID = paper.taskID else { return }
-        var fallback = paper.downloadItem; fallback.id = taskID
-        diagnosticItem = items.first { $0.id == taskID } ?? history.first { $0.id == taskID } ?? fallback
+        diagnosticItem = paper.downloadItem
     }
     func openPaper(_ paper: LibraryPaper, preview: Bool = false) {
         guard let file = paper.file, FileManager.default.isReadableFile(atPath: file.path) else {
@@ -259,6 +257,7 @@ struct LibraryRow: View {
     let paper: LibraryPaper
     @ObservedObject var model: DownloadModel
     let selected: Bool
+    var selectionActive = true
     let select: () -> Void
     @Environment(\.colorScheme) private var scheme
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
@@ -292,7 +291,7 @@ struct LibraryRow: View {
                 }
             }.padding(.top, 6)
         }.padding(20).background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(selected ? ThemePalette.color(palette.accent).opacity(0.65) : ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.65) : ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 20)).onTapGesture(perform: select).contextMenu { actions }
             .accessibilityElement(children: .contain).accessibilityAddTraits(selected ? .isSelected : [])
     }
@@ -315,9 +314,7 @@ struct LibraryRow: View {
             }
             if let file = paper.file { Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([file]) } }
             Button("重新关联 PDF…") { model.relinkPaper(paper.id) }
-            if paper.taskID != nil {
-                Button("下载详情…") { select(); model.showPaperDetails(paper) }
-            }
+            Button("详情…") { select(); model.showPaperDetails(paper) }
             Divider()
             Button("移出文档库") { model.changePaper(paper.id) { $0.removed = true } }.help("保留 PDF，可从已移除的文档中恢复")
         } else { Button("恢复到文档库") { model.changePaper(paper.id) { $0.removed = false } } }

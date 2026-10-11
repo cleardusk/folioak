@@ -17,7 +17,7 @@ mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 \
   -framework AppKit -framework SwiftUI -framework PDFKit \
-  Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Shared.swift Sources/Theme.swift Sources/Workspace.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/SidebarMotion.swift Sources/App.swift \
+  Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Shared.swift Sources/Theme.swift Sources/Workspace.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/SidebarMotion.swift Sources/App.swift \
   -o "$staged_app/Contents/MacOS/LeafpeakApp"
 strip "$staged_app/Contents/MacOS/LeafpeakApp"
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"

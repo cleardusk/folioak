@@ -6,6 +6,18 @@ private final class InteractionTestHost<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+private final class SelectionTestWindow: NSWindow {
+    // CI and background test processes cannot become the desktop's key app.
+    // Drive that external condition while retaining real responder transitions
+    // and SwiftUI rendering inside this window.
+    private var active = true
+    override var isKeyWindow: Bool { active }
+    func setActive(_ value: Bool) {
+        active = value
+        NotificationCenter.default.post(name: value ? NSWindow.didBecomeKeyNotification : NSWindow.didResignKeyNotification, object: self)
+    }
+}
+
 @MainActor private final class FilterLayoutProbe: ObservableObject {
     @Published var inset: CGFloat = 190
     @Published var selection = 0
@@ -25,6 +37,56 @@ private struct MovingFilterProbe: View {
 }
 
 extension CoreTests {
+    @MainActor static func selectionFocusTests() async throws {
+        _ = NSApplication.shared
+        let suite = "leafpeak-selection-focus-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        model.theme = .graphite
+        model.history = [DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"), state: .saved,
+                                      savedURL: URL(fileURLWithPath: "/tmp/selection.pdf"), documentTitle: "Selection fixture")]
+        let view = InteractionTestHost(rootView: DownloaderView(model: model).environment(\.colorScheme, .light))
+        let window = SelectionTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view; window.orderFront(nil); window.makeKey()
+        defer { window.close() }
+        func settle() async {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        }
+        func shade(_ keys: PaperListKeyboard.KeyView) throws -> CGFloat {
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("selection bitmap") }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let point = keys.convert(NSPoint(x: 400, y: keys.isFlipped ? 32 : keys.bounds.height - 32), to: view)
+            let scale = CGFloat(bitmap.pixelsWide) / view.bounds.width
+            let y = view.isFlipped ? point.y : view.bounds.height - point.y
+            return bitmap.colorAt(x: Int(point.x * scale), y: Int(y * scale))!.usingColorSpace(.deviceRGB)!.redComponent
+        }
+        await settle(); model.listRequest = UUID(); await settle()
+        for _ in 0..<10 where !(window.firstResponder is PaperListKeyboard.KeyView) { await settle() }
+        guard window.isKeyWindow, let keys = window.firstResponder as? PaperListKeyboard.KeyView else { throw TestFailure.failed("selection test active list: key=\(window.isKeyWindow), responder=\(String(describing: window.firstResponder))") }
+        let selected = try shade(keys)
+        model.focusInput(); await settle()
+        try expect(window.firstResponder is LinkTextView && (try shade(keys)) - selected > 0.03, "moving from selected row to input removes the row highlight")
+        model.listRequest = UUID(); await settle()
+        try expect(abs((try shade(keys)) - selected) < 0.01, "returning to list restores the selection highlight")
+        window.setActive(false); await settle()
+        try expect((try shade(keys)) - selected > 0.03, "inactive windows do not show the active list highlight")
+        window.setActive(true); await settle()
+        try expect(abs((try shade(keys)) - selected) < 0.01, "window activation restores a focused selection")
+        // Multiple native transitions in the same run loop must publish only
+        // the final responder, including a rapid return from the composer.
+        let input = LinkTextView(frame: .zero, textContainer: nil)
+        window.contentView?.addSubview(input)
+        window.makeFirstResponder(input); window.makeFirstResponder(keys); await settle()
+        try expect(abs((try shade(keys)) - selected) < 0.01, "stale focus loss cannot hide a newly focused selection")
+        keys.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "i", charactersIgnoringModifiers: "i", isARepeat: false, keyCode: 34)!)
+        try expect(model.diagnosticItem?.id == model.history[0].id, "logical selection survives input and window focus changes")
+        model.diagnosticItem = nil
+        print("PASS selection highlight: actual responder, input return, window activation, rapid transitions and remembered selection")
+    }
+
     @MainActor static func blankCanvasFocusTests() async throws {
         _ = NSApplication.shared
         let suite = "leafpeak-blank-focus-\(UUID().uuidString)"
