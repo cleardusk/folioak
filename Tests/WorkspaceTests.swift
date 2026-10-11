@@ -2,6 +2,108 @@ import Foundation
 import AppKit
 
 extension CoreTests {
+    @MainActor static func clearDownloadRecordsTests(root: URL, pdf: URL) async throws {
+        let suite = "leafpeak-clear-records-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let state = root.appendingPathComponent("clear-records/workspace.json")
+        let model = DownloadModel(preferences: preferences, stateURL: state)
+        let paper = DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"),
+                                 state: .saved, savedURL: pdf, pages: 1, documentTitle: "Keep this paper")
+        let mediaFile = root.appendingPathComponent("keep-this-media.m4a")
+        let mediaBytes = Data("saved media must remain untouched".utf8)
+        try mediaBytes.write(to: mediaFile)
+        let media = DownloadItem(original: "https://example.com/media.m4a", directURL: URL(string: "https://example.com/media.m4a"),
+                                 state: .saved, savedURL: mediaFile, documentTitle: "Keep this media")
+        let failed = DownloadItem(original: "invalid-input", reference: nil, state: .failed, error: "Invalid input")
+        model.items = [paper, media, failed]
+        model.history = [paper, DownloadItem(original: "2003.07733", reference: try ArxivReference.parse("2003.07733"), state: .cancelled)]
+        model.upsertPaper(paper); model.upsertMedia(media)
+        model.changePaper(model.papers[0].id) { $0.favorite = true; $0.read = true; $0.tags = ["keep"] }
+        model.input = "1706.03762\nunfinished draft"
+        model.duplicateCount = 2
+        model.record(.error, "Keep this diagnostic", item: failed)
+        model.persistWorkspace()
+        let libraryFile = state.deletingLastPathComponent().appendingPathComponent("library.json")
+        let mediaLibraryFile = state.deletingLastPathComponent().appendingPathComponent("media-library.json")
+        let paperBytes = try Data(contentsOf: pdf)
+        let libraryBytes = try Data(contentsOf: libraryFile)
+        let mediaLibraryBytes = try Data(contentsOf: mediaLibraryFile)
+        let oldBatch = model.batchID, directory = model.directory
+        let draft = model.input, logIDs = model.logs.map(\.id)
+        let recordIDs = model.downloads.map(\.id)
+        model.busy = true
+        try expect(!model.canClearDownloadRecords, "clearing is unavailable during downloads")
+        model.clearDownloadRecords()
+        try expect(model.downloads.map(\.id) == recordIDs && model.batchID == oldBatch, "model guard preserves active records even if confirmation was already open")
+        model.busy = false
+        try expect(model.canClearDownloadRecords, "saved and failed records can be cleared")
+        model.clearDownloadRecords()
+        try expect(model.items.isEmpty && model.history.isEmpty && !model.canClearDownloadRecords && model.duplicateCount == 0,
+                   "clear removes both current results and archived history")
+        try expect(model.batchID != oldBatch && model.input == draft && model.directory == directory && model.logs.map(\.id) == logIDs,
+                   "clear resets list state while preserving draft, directory and diagnostics")
+        try expect(try Data(contentsOf: pdf) == paperBytes && Data(contentsOf: mediaFile) == mediaBytes,
+                   "clear never modifies downloaded files")
+        try expect(try Data(contentsOf: libraryFile) == libraryBytes && Data(contentsOf: mediaLibraryFile) == mediaLibraryBytes,
+                   "clear preserves both independent library files, including favorite/read/tag state")
+        let restored = DownloadModel(preferences: preferences, stateURL: state)
+        try expect(restored.downloads.isEmpty && restored.input == draft && restored.logs.map(\.id) == logIDs,
+                   "cleared records stay absent after restart while draft and logs survive")
+        try expect(restored.papers.count == 1 && restored.papers[0].favorite && restored.papers[0].read && restored.papers[0].tags == ["keep"] && restored.mediaLibrary.count == 1,
+                   "both libraries survive restart after history removal")
+        let clearedBatch = model.batchID
+        model.clearDownloadRecords()
+        try expect(model.batchID == clearedBatch, "clearing an empty list is a no-op")
+        model.input = "new-invalid-input"; model.start()
+        try await waitForQueue(model)
+        try expect(model.downloads.count == 1 && model.downloads[0].original == "new-invalid-input",
+                   "starting another batch cannot resurrect cleared current results")
+
+        for blockedName in ["library.json", "media-library.json", "workspace.json"] {
+            let parent = root.appendingPathComponent("clear-blocked-" + blockedName)
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            let blockedState = parent.appendingPathComponent("workspace.json")
+            let blocked = DownloadModel(preferences: preferences, stateURL: blockedState)
+            blocked.items = [paper, media]; blocked.history = [failed]
+            blocked.upsertPaper(paper); blocked.upsertMedia(media)
+            try FileManager.default.createDirectory(at: parent.appendingPathComponent(blockedName), withIntermediateDirectories: true)
+            blocked.clearDownloadRecords()
+            try expect(blocked.items.count == 2 && blocked.history.count == 1 && (blocked.notice != nil || blocked.persistenceNotice != nil),
+                       "\(blockedName) save failure keeps recovery records visible")
+            try FileManager.default.removeItem(at: parent.appendingPathComponent(blockedName))
+            blocked.clearDownloadRecords()
+            try expect(blocked.downloads.isEmpty, "clearing can be retried after \(blockedName) becomes writable")
+            let recovered = DownloadModel(preferences: preferences, stateURL: blockedState)
+            try expect(recovered.papers.count == 1 && recovered.mediaLibrary.count == 1 && recovered.downloads.isEmpty,
+                       "recovering a save failure retains both libraries and the cleared state")
+        }
+        // A pending large draft must not cause the soon-to-be-removed history
+        // to evict logs before the empty candidate is written.
+        let pressureState = root.appendingPathComponent("clear-pressure/workspace.json")
+        let pressureLogs = (0..<WorkspaceStore.logLimit).map { _ in ActivityEntry(level: .info, message: String(repeating: "l", count: 2048), subject: nil, itemID: nil) }
+        func history(padding: Int, remainder: Int = 0) -> [DownloadItem] {
+            (0..<WorkspaceStore.historyLimit).map { n in
+                DownloadItem(original: String(repeating: "x", count: padding + (n < remainder ? 1 : 0)), reference: nil,
+                             state: .failed, createdAt: Date(timeIntervalSince1970: 0))
+            }
+        }
+        let overhead = try JSONEncoder().encode(WorkspaceSnapshot(input: "", items: [], history: history(padding: 0), logs: pressureLogs)).count
+        let padding = WorkspaceStore.byteLimit - 16 - overhead
+        let pressureSnapshot = WorkspaceSnapshot(input: "", items: [],
+            history: history(padding: padding / WorkspaceStore.historyLimit, remainder: padding % WorkspaceStore.historyLimit), logs: pressureLogs)
+        try WorkspaceStore.write(pressureSnapshot, to: pressureState)
+        try expect(try Data(contentsOf: pressureState).count == WorkspaceStore.byteLimit - 16, "pressure fixture fits just inside the existing storage budget")
+        let pressured = DownloadModel(preferences: preferences, stateURL: pressureState)
+        pressured.input = String(repeating: "d", count: ResourceLimits.inputBytes)
+        pressured.clearDownloadRecords()
+        let pressureRestored = DownloadModel(preferences: preferences, stateURL: pressureState)
+        try expect(pressured.downloads.isEmpty && pressureRestored.downloads.isEmpty &&
+                   pressured.logs.map(\.id) == pressureLogs.map(\.id) && pressureRestored.logs.map(\.id) == pressureLogs.map(\.id),
+                   "clear preserves all logs even when the old history and new draft would exceed the storage budget")
+        print("PASS clear download records: active guard, all records, preserved files/libraries/draft/logs, restart and save failures")
+    }
+
     static func logGroupingTests() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

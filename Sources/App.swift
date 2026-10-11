@@ -209,6 +209,31 @@ final class DownloadModel: ObservableObject {
         let current = Set(items.map(\.id))
         return items + history.filter { !current.contains($0.id) }
     }
+    var canClearDownloadRecords: Bool { !busy && (!items.isEmpty || !history.isEmpty) }
+
+    func clearDownloadRecords() {
+        guard canClearDownloadRecords else { return }
+        // Save independently retained libraries before discarding their recovery
+        // records. Do not save the old queue first: it may evict retained logs.
+        persistLibrary(); persistMediaLibrary()
+        guard stateURL == nil || (!libraryDirty && !mediaLibraryDirty) else {
+            notice = libraryNotice ?? mediaLibraryNotice ?? "资料库尚未保存，下载记录未清空。"
+            return
+        }
+        do {
+            if let stateURL {
+                try backupDamagedWorkspace()
+                let retained = try WorkspaceStore.write(WorkspaceSnapshot(input: input, items: [], history: [], logs: logs), to: stateURL)
+                logs = retained.logs
+            }
+            saveWork?.cancel(); saveWork = nil
+            items = []; history = []; duplicateCount = 0
+            notice = nil; persistenceNotice = nil
+            batchID = UUID()
+        } catch {
+            persistenceNotice = "下载记录未能清空：\(error.localizedDescription)"
+        }
+    }
 
     private var mediaLibraryURL: URL? { libraryURL.map { $0.deletingLastPathComponent().appendingPathComponent("media-" + $0.lastPathComponent) } }
     private func restoreMediaLibrary() {
@@ -362,17 +387,20 @@ final class DownloadModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
+    private func backupDamagedWorkspace() throws {
+        guard damagedState, let stateURL, FileManager.default.fileExists(atPath: stateURL.path) else { return }
+        // Preserve unreadable / future-schema files instead of overwriting them.
+        try FileManager.default.moveItem(at: stateURL, to: stateURL.appendingPathExtension("backup-\(UUID().uuidString)"))
+        damagedState = false
+    }
+
     func persistWorkspace() {
         saveWork?.cancel(); saveWork = nil
         persistLibrary()
         persistMediaLibrary()
         guard persistenceReady, let stateURL else { return }
         do {
-            if damagedState, FileManager.default.fileExists(atPath: stateURL.path) {
-                // Preserve unreadable / future-schema files instead of overwriting them.
-                try FileManager.default.moveItem(at: stateURL, to: stateURL.appendingPathExtension("backup-\(UUID().uuidString)"))
-                damagedState = false
-            }
+            try backupDamagedWorkspace()
             let retained = try WorkspaceStore.write(WorkspaceSnapshot(input: input, items: items, history: history, logs: logs), to: stateURL)
             if retained.history.count != history.count { history = retained.history }
             if retained.logs.count != logs.count { logs = retained.logs }

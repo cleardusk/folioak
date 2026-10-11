@@ -72,6 +72,7 @@ struct DownloaderView: View {
     @WorkspaceViewState private var selectedID: UUID?
     @WorkspaceViewState private var listFocus: UUID?
     @WorkspaceViewState private var focusListOnArrival = false
+    @WorkspaceViewState private var confirmingClearDownloads = false
     @WorkspaceViewState private var libraryFilter = LibraryFilter.all
     @WorkspaceViewState private var librarySort = LibrarySort.newest
     @WorkspaceViewState private var libraryTag: String?
@@ -151,6 +152,13 @@ struct DownloaderView: View {
             if let selectedID, !visibleItems.contains(where: { $0.id == selectedID }) { self.selectedID = nil }
         }
         .quickLookPreview($model.previewURL)
+        .alert("清空所有下载记录？", isPresented: $confirmingClearDownloads) {
+            Button("取消", role: .cancel) {}
+            Button("清空记录", role: .destructive, action: model.clearDownloadRecords)
+                .disabled(!model.canClearDownloadRecords)
+        } message: {
+            Text("将移除全部下载记录，包括失败和取消的任务。\n已下载文件、文档库和媒体库都会保留。")
+        }
         .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item) }
         .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
@@ -292,6 +300,9 @@ struct DownloaderView: View {
             }
             Divider()
             Button("查看日志") { page = .logs }
+            Divider()
+            Button("清空下载记录…", role: .destructive) { confirmingClearDownloads = true }
+                .disabled(!model.canClearDownloadRecords)
         } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32).contentShape(Rectangle()) }
             .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
             .help("更多下载操作").accessibilityLabel("下载操作")
