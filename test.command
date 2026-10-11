@@ -16,5 +16,5 @@ xcrun swiftc -parse-as-library -swift-version 5 -framework PDFKit \
 xcrun swiftc -parse-as-library -swift-version 5 -D TESTING \
   -framework AppKit -framework SwiftUI -framework PDFKit \
   Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Shared.swift Sources/CLI.swift Sources/Localization.swift Sources/Theme.swift Sources/Workspace.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/SidebarMotion.swift Sources/App.swift Tests/TestMain.swift Tests/TransportTests.swift Tests/SharedTests.swift Tests/FeatureTests.swift Tests/LibraryTests.swift Tests/PDFTests.swift Tests/WorkspaceTests.swift Tests/InteractionRenderingTests.swift \
-  Tests/MediaTests.swift Tests/FileInformationTests.swift Tests/LocalizationTests.swift -o build/CoreTests
+  Tests/MediaTests.swift Tests/FileInformationTests.swift Tests/LocalizationTests.swift Tests/PersistenceTests.swift -o build/CoreTests
 ./build/CoreTests "$@"

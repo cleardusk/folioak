@@ -147,6 +147,7 @@ struct CoreTests {
             try await completedInputTests(root: root, pdf: pdf)
             try await restoreVersionTests(root: root, pdf: pdf)
             try await workspaceTests(root: root, pdf: pdf)
+            try await backgroundPersistenceTests(root: root, pdf: pdf)
             try await clearDownloadRecordsTests(root: root, pdf: pdf)
             try menuChevronTests()
             try initialDirectoryTests()

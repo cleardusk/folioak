@@ -309,7 +309,7 @@ enum FileStorage {
     }
 
     static func save(_ file: URL, title: String, extension ext: String, to directory: URL) throws -> SavedDocument {
-        let hash = try hash(file), manager = FileManager.default
+        let manager = FileManager.default
         let staged = directory.appendingPathComponent(".download-\(UUID().uuidString).partial")
         defer { try? manager.removeItem(at: staged) }
         let descriptor = Darwin.open(staged.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
@@ -317,10 +317,15 @@ enum FileStorage {
         let destination = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         let source = try FileHandle(forReadingFrom: file)
         defer { try? source.close(); try? destination.close() }
+        var digest = SHA256(), bytes: Int64 = 0
         while let data = try source.read(upToCount: 1024 * 1024), !data.isEmpty {
             try Task.checkCancellation()
+            bytes += Int64(data.count)
+            guard bytes <= byteLimit else { throw DownloadError.limit("文件超过 16 GB，未保存。") }
+            digest.update(data: data)
             try destination.write(contentsOf: data)
         }
+        let hash = digest.finalize()
         try destination.synchronize()
         try destination.close()
         for index in 0..<1000 {

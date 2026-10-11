@@ -160,7 +160,7 @@ extension DownloadModel {
             }
             self.importingPDFs = false
             if result.1 > 0 { self.notice = "\(result.1) 个文件无法读取。" }
-            self.persistWorkspace()
+            self.saveWorkspace()
         }
     }
     func relinkPaper(_ id: UUID) {
@@ -173,7 +173,7 @@ extension DownloadModel {
                     let imported = try await Task.detached(priority: .userInitiated) { try LibraryStore.imported(url) }.value
                     self.changePaper(id) { $0.file = imported.file; $0.pages = imported.pages; $0.missing = false }
                     self.notice = nil
-                    self.persistWorkspace()
+                    self.saveWorkspace()
                 } catch { self.notice = error.localizedDescription }
             }
         }
@@ -207,7 +207,7 @@ extension DownloadModel {
                 self?.checkingVersions.remove(paper.id)
             }
             if failures > 0, self?.notice == nil { self?.notice = "\(failures) 篇未能检查，其余已完成。" }
-            self?.checkingVersions = []; self?.versionWorker = nil; self?.persistWorkspace()
+            self?.checkingVersions = []; self?.versionWorker = nil; self?.saveWorkspace()
         }
     }
     func cancelVersionCheck() { versionWorker?.cancel() }

@@ -11,7 +11,7 @@
 
 首次运行会下载并校验固定版本的媒体依赖，后续复用 `build/media-tools/`。测试默认不访问真实下载站点；`--live` 会联网，`--snapshots` 输出界面预览。测试使用隔离临时目录，截图等产物输出到 `build/`。
 
-打包产物在 `dist/`：完整内置 CLI 和媒体组件的应用 DMG、应用 ZIP、`SHA256SUMS.txt`。不单独发布 CLI 安装包。脚本检查解压后的签名、arm64 架构、版本与 CLI JSON；构建失败不替换已有应用。
+打包产物在 `dist/`：完整内置 CLI 和媒体组件的应用 DMG、应用 ZIP、`SHA256SUMS.txt`。DMG 先生成 HFS+ 只读镜像，再以 4 MiB 压缩块转换为 ULMO（LZMA），让完整媒体组件更有效地压缩，保持 macOS 13 最低要求。不单独发布 CLI 安装包。脚本检查解压后的签名、arm64 架构、版本与 CLI JSON；构建失败不替换已有应用。
 
 依赖版本、源码与哈希由 `Tools/prepare-media.py` 固定。压缩、运行时限制和各组件许可证见 [Media components](Resources/MediaComponents.md)；组件更新需重新验证，不在用户运行时自更新。
 

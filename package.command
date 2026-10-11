@@ -70,7 +70,10 @@ mkdir -p "$staging_dir/dmg"
 ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/Folioak.app"
 ln -s /Applications "$staging_dir/dmg/Applications"
 # LZMA disk images are supported since macOS 10.15; Folioak requires macOS 13.
-hdiutil create -volname 'Folioak' -srcfolder "$staging_dir/dmg" -format ULMO "$staging_dir/$asset_name.dmg"
+# Compress a completed image so hdiutil uses its conversion compressor.
+# Match Chromium's ULMO chunk size: 8192 sectors (4 MiB).
+hdiutil create -volname 'Folioak' -srcfolder "$staging_dir/dmg" -fs HFS+ -format UDRO "$staging_dir/uncompressed.dmg"
+hdiutil convert "$staging_dir/uncompressed.dmg" -format ULMO -imagekey udif-chunk-size=8192 -o "$staging_dir/$asset_name.dmg"
 hdiutil verify "$staging_dir/$asset_name.dmg"
 mv -f "$staging_dir/$asset_name.zip" "$project_dir/dist/$asset_name.zip"
 mv -f "$staging_dir/$asset_name.dmg" "$project_dir/dist/$asset_name.dmg"

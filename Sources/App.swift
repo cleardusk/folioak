@@ -125,6 +125,7 @@ final class DownloadModel: ObservableObject {
                 input = oldValue
                 notice = "输入超过 64 KB，请分批粘贴。"
             }
+            workspaceRevision += 1
             schedulePersistence()
         }
     }
@@ -158,20 +159,20 @@ final class DownloadModel: ObservableObject {
     @Published var language: AppLanguage {
         didSet { preferences.set(language.rawValue, forKey: "language"); AppLocalization.shared.language = language }
     }
-    @Published var items: [DownloadItem] = []
+    @Published var items: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
     @Published var mediaFormat: MediaFormat = .automatic
-    @Published var history: [DownloadItem] = []
-    @Published var mediaLibrary: [DownloadItem] = [] { didSet { mediaLibraryDirty = true; schedulePersistence() } }
+    @Published var history: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
+    @Published var mediaLibrary: [DownloadItem] = [] { didSet { mediaLibraryRevision += 1; mediaLibraryDirty = true; schedulePersistence() } }
     @Published var mediaLibraryNotice: String?
     private(set) var mediaLibraryWritable = true
     private var mediaLibraryDirty = false
-    @Published var papers: [LibraryPaper] = [] { didSet { libraryDirty = true; schedulePersistence() } }
+    @Published var papers: [LibraryPaper] = [] { didSet { libraryRevision += 1; libraryDirty = true; schedulePersistence() } }
     @Published var libraryNotice: String?
     @Published var importingPDFs = false
     @Published var checkingVersions = Set<UUID>()
     @Published var editingPaper: LibraryPaper?
     var versionWorker: Task<Void, Never>?
-    @Published var logs: [ActivityEntry] = []
+    @Published var logs: [ActivityEntry] = [] { didSet { workspaceRevision += 1 } }
     @Published var persistenceNotice: String?
     @Published var batchID = UUID()
     @Published var busy = false
@@ -193,6 +194,14 @@ final class DownloadModel: ObservableObject {
     private var runID = UUID()
     private let stateURL: URL?
     private var saveWork: DispatchWorkItem?
+    private let persistenceQueue = DispatchQueue(label: "local.paperrepo.workspace-save", qos: .utility)
+    private var workspaceRevision = 0
+    private var libraryRevision = 0
+    private var mediaLibraryRevision = 0
+    private var persistenceSequence = 0
+    private var appliedPersistenceSequence = 0
+    private var savingWorkspace = false
+    private var pendingWorkspaceSave = false
     private var persistenceReady = false
     private var damagedState = false
     private var activePanel: NSOpenPanel?
@@ -236,6 +245,9 @@ final class DownloadModel: ObservableObject {
 
     func clearDownloadRecords() {
         guard canClearDownloadRecords else { return }
+        saveWork?.cancel(); saveWork = nil
+        pendingWorkspaceSave = false
+        persistenceSequence += 1; appliedPersistenceSequence = persistenceSequence
         // Save independently retained libraries before discarding their recovery
         // records. Do not save the old queue first: it may evict retained logs.
         persistLibrary(); persistMediaLibrary()
@@ -246,7 +258,8 @@ final class DownloadModel: ObservableObject {
         do {
             if let stateURL {
                 try backupDamagedWorkspace()
-                let retained = try WorkspaceStore.write(WorkspaceSnapshot(input: input, items: [], history: [], logs: logs), to: stateURL)
+                let snapshot = WorkspaceSnapshot(input: input, items: [], history: [], logs: logs)
+                let retained = try persistenceQueue.sync { try WorkspaceStore.write(snapshot, to: stateURL) }
                 logs = retained.logs
             }
             saveWork?.cancel(); saveWork = nil
@@ -276,7 +289,8 @@ final class DownloadModel: ObservableObject {
     }
     private func persistMediaLibrary() {
         guard mediaLibraryDirty, mediaLibraryWritable, let mediaLibraryURL else { return }
-        do { try MediaLibraryStore.write(mediaLibrary, to: mediaLibraryURL); mediaLibraryDirty = false; mediaLibraryNotice = nil }
+        let snapshot = mediaLibrary
+        do { try persistenceQueue.sync { try MediaLibraryStore.write(snapshot, to: mediaLibraryURL) }; mediaLibraryDirty = false; mediaLibraryNotice = nil }
         catch { mediaLibraryNotice = "媒体库未能保存：\(error.localizedDescription)" }
     }
     func upsertMedia(_ item: DownloadItem) {
@@ -302,7 +316,8 @@ final class DownloadModel: ObservableObject {
     }
     private func persistLibrary() {
         guard libraryDirty, libraryWritable, let libraryURL else { return }
-        do { try LibraryStore.write(papers, to: libraryURL); libraryDirty = false; libraryNotice = nil }
+        let snapshot = papers
+        do { try persistenceQueue.sync { try LibraryStore.write(snapshot, to: libraryURL) }; libraryDirty = false; libraryNotice = nil }
         catch { libraryNotice = "文档库未能保存：\(error.localizedDescription)" }
     }
 
@@ -382,7 +397,7 @@ final class DownloadModel: ObservableObject {
         items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued, mediaFormat: item.mediaFormat)]
         duplicateCount = 0; batchID = UUID()
         record(.info, "重新下载", item: items[0])
-        persistWorkspace()
+        saveWorkspace()
         execute(items.map(\.id))
     }
 
@@ -405,7 +420,7 @@ final class DownloadModel: ObservableObject {
     private func schedulePersistence() {
         guard persistenceReady, stateURL != nil else { return }
         saveWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.persistWorkspace() }
+        let work = DispatchWorkItem { [weak self] in self?.saveWorkspace() }
         saveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
@@ -417,18 +432,102 @@ final class DownloadModel: ObservableObject {
         damagedState = false
     }
 
+    private struct PersistenceRequest {
+        let sequence: Int, revision: Int, libraryRevision: Int, mediaRevision: Int
+        let snapshot: WorkspaceSnapshot
+        let stateURL: URL, libraryURL: URL?, mediaURL: URL?
+        let papers: [LibraryPaper]?, media: [DownloadItem]?
+    }
+    private struct PersistenceResult {
+        let workspace: Result<WorkspaceSnapshot, Error>
+        let libraryError: String?, mediaError: String?
+    }
+
+    private func persistenceRequest() -> PersistenceRequest? {
+        guard persistenceReady, let stateURL else { return nil }
+        do { try backupDamagedWorkspace() }
+        catch { persistenceNotice = "历史记录未能保存：\(error.localizedDescription)"; return nil }
+        persistenceSequence += 1
+        return PersistenceRequest(sequence: persistenceSequence, revision: workspaceRevision,
+            libraryRevision: libraryRevision, mediaRevision: mediaLibraryRevision,
+            snapshot: WorkspaceSnapshot(input: input, items: items, history: history, logs: logs),
+            stateURL: stateURL, libraryURL: libraryURL, mediaURL: mediaLibraryURL,
+            papers: libraryDirty && libraryWritable ? papers : nil,
+            media: mediaLibraryDirty && mediaLibraryWritable ? mediaLibrary : nil)
+    }
+
+    private nonisolated static func writeWorkspace(_ request: PersistenceRequest) -> PersistenceResult {
+        var libraryError: String?, mediaError: String?
+        if let papers = request.papers, let url = request.libraryURL {
+            do { try LibraryStore.write(papers, to: url) }
+            catch { libraryError = "文档库未能保存：\(error.localizedDescription)" }
+        }
+        if let media = request.media, let url = request.mediaURL {
+            do { try MediaLibraryStore.write(media, to: url) }
+            catch { mediaError = "媒体库未能保存：\(error.localizedDescription)" }
+        }
+        return PersistenceResult(workspace: Result { try WorkspaceStore.write(request.snapshot, to: request.stateURL) },
+                                 libraryError: libraryError, mediaError: mediaError)
+    }
+
+    private func applyPersistence(_ result: PersistenceResult, request: PersistenceRequest) {
+        // A delayed completion cannot roll back an explicit flush or a newer edit.
+        guard request.sequence > appliedPersistenceSequence else { return }
+        appliedPersistenceSequence = request.sequence
+        if request.papers != nil, request.libraryRevision == libraryRevision {
+            libraryDirty = result.libraryError != nil; libraryNotice = result.libraryError
+        }
+        if request.media != nil, request.mediaRevision == mediaLibraryRevision {
+            mediaLibraryDirty = result.mediaError != nil; mediaLibraryNotice = result.mediaError
+        }
+        switch result.workspace {
+        case .success(let retained):
+            if request.revision == workspaceRevision {
+                if retained.history.count != history.count { history = retained.history }
+                if retained.logs.count != logs.count { logs = retained.logs }
+            }
+            persistenceNotice = nil
+        case .failure(let error): persistenceNotice = "历史记录未能保存：\(error.localizedDescription)"
+        }
+    }
+
+    // Coalesce automatic saves while encoding and disk writes run off the UI.
+    func saveWorkspace() {
+        saveWork?.cancel(); saveWork = nil
+        if savingWorkspace { pendingWorkspaceSave = true; return }
+        guard let request = persistenceRequest() else { return }
+        savingWorkspace = true
+        persistenceQueue.async { [weak self] in
+            let result = Self.writeWorkspace(request)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.applyPersistence(result, request: request)
+                self.savingWorkspace = false
+                if self.pendingWorkspaceSave {
+                    self.pendingWorkspaceSave = false
+                    self.saveWorkspace()
+                }
+            }
+        }
+    }
+
+    // Explicit saves and termination drain earlier writes before returning.
     func persistWorkspace() {
         saveWork?.cancel(); saveWork = nil
-        persistLibrary()
-        persistMediaLibrary()
-        guard persistenceReady, let stateURL else { return }
-        do {
-            try backupDamagedWorkspace()
-            let retained = try WorkspaceStore.write(WorkspaceSnapshot(input: input, items: items, history: history, logs: logs), to: stateURL)
-            if retained.history.count != history.count { history = retained.history }
-            if retained.logs.count != logs.count { logs = retained.logs }
-            persistenceNotice = nil
-        } catch { persistenceNotice = "历史记录未能保存：\(error.localizedDescription)" }
+        pendingWorkspaceSave = false
+        guard let request = persistenceRequest() else { return }
+        let result = persistenceQueue.sync { Self.writeWorkspace(request) }
+        applyPersistence(result, request: request)
+    }
+
+    func persistWorkspaceAndWait() async {
+        saveWork?.cancel(); saveWork = nil
+        pendingWorkspaceSave = false
+        guard let request = persistenceRequest() else { return }
+        let result = await withCheckedContinuation { continuation in
+            persistenceQueue.async { continuation.resume(returning: Self.writeWorkspace(request)) }
+        }
+        applyPersistence(result, request: request)
     }
 
     private func restoreWorkspace() {
@@ -544,7 +643,7 @@ final class DownloadModel: ObservableObject {
         guard !items.isEmpty else { notice = "请先粘贴至少一个链接。"; return }
         record(.info, "开始下载 · \(items.count) 项" + (duplicateCount > 0 ? " · 去重 \(duplicateCount) 条" : ""))
         for item in items where item.source == nil { record(.error, item.error ?? "无法识别链接", item: item) }
-        persistWorkspace()
+        saveWorkspace()
         execute(items.filter { $0.source != nil }.map(\.id))
     }
 
@@ -578,6 +677,7 @@ final class DownloadModel: ObservableObject {
         let task = worker
         cancel()
         await task?.value
+        await persistWorkspaceAndWait()
     }
 
     func focusInput() { editTarget = ""; editRequest = UUID() }
@@ -629,7 +729,7 @@ final class DownloadModel: ObservableObject {
             notice = message
             record(.warning, "本地文件不存在", item: item)
             archiveResults()
-            persistWorkspace()
+            saveWorkspace()
             return available.first
         }
         notice = nil
@@ -709,7 +809,7 @@ final class DownloadModel: ObservableObject {
             if let until = pausedSources[source.rateLimitKey] {
                 update(id) { $0.state = .paused; $0.error = "下载站点要求暂停请求，可在 \(until.formatted(date: .abbreviated, time: .standard)) 后重试。" }
                 if let paused = items.first(where: { $0.id == id }) { record(.warning, paused.error ?? "站点限流", item: paused) }
-                persistWorkspace()
+                saveWorkspace()
                 continue
             }
             update(id) { $0.state = source.reference == nil ? .checkingLocal : .metadata; $0.diagnostics = TaskDiagnostics() }
@@ -770,7 +870,7 @@ final class DownloadModel: ObservableObject {
                 if let cooldown { pausedSources[source.rateLimitKey] = cooldown }
             }
             archiveResults()
-            persistWorkspace()
+            saveWorkspace()
         }
     }
 
@@ -794,12 +894,12 @@ final class DownloadModel: ObservableObject {
             for id in ids {
                 update(id) { if !$0.state.terminal { $0.state = .cancelled; $0.progress = nil; $0.finishedAt = Date(); $0.diagnostics?.finish() } }
             }
+            archiveResults()
+            record(.info, "本批结束 · 已保存 \(successes) · 失败 \(failures)")
+            await persistWorkspaceAndWait()
             busy = false
             cancelling = false
             worker = nil
-            archiveResults()
-            record(.info, "本批结束 · 已保存 \(successes) · 失败 \(failures)")
-            persistWorkspace()
         }
     }
 }
