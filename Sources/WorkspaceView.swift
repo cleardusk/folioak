@@ -469,7 +469,7 @@ struct DownloaderView: View {
                                     .id(item.id)
                                 }
                             }
-                        }.padding(1)
+                        }.padding(1).padding(.trailing, 16)
                             .frame(minHeight: viewport.size.height, alignment: .top)
                             .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture {
                                 selectedID = nil; listFocus = nil

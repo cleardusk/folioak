@@ -82,6 +82,8 @@ extension CoreTests {
         protected.upsertPaper(item); protected.importPDFs([pdf])
         try expect(protected.papers.isEmpty && !protected.importingPDFs && protected.notice != nil, "read-only library rejects changes that cannot be saved")
 
+        try await githubLibraryMigrationTests(root: root, pdf: pdf, ordinary: LibraryPaper(item))
+
         let shortcuts = ShortcutSettings(preferences)
         try expect(!shortcuts.isCustomized, "default shortcuts have no reset operation")
         try expect(shortcuts.set(AppShortcut(key: "w"), for: .input) != nil, "window close shortcut is reserved")
@@ -155,5 +157,47 @@ extension CoreTests {
         try expect(results.reduce(0, +) == 7 && peak == 3 && !overlap, "at most three sources overlap and each source remains sequential")
         try expect(first != 0, "a waiting source does not block independent sources")
         print("PASS source scheduling: bounded cross-source concurrency and sequential per-source requests")
+    }
+}
+
+
+extension CoreTests {
+    @MainActor static func githubLibraryMigrationTests(root: URL, pdf: URL, ordinary: LibraryPaper) async throws {
+        FixtureProtocol.reset(); defer { FixtureProtocol.reset() }
+        let link = "https://github.com/Org/Repo/blob/main/actually-pdf.mp4?raw=true"
+        let raw = URL(string: "https://raw.githubusercontent.com/Org/Repo/main/actually-pdf.mp4")!
+        var legacy = LibraryPaper(DownloadItem(original: link, directURL: URL(string: link), state: .saved,
+                                               savedURL: pdf, pages: 1, documentTitle: "Historical PDF"))
+        legacy.favorite = true; legacy.read = true; legacy.tags = ["Keep", "旧资料"]
+        let state = root.appendingPathComponent("github-library-migration.json")
+        let library = state.deletingLastPathComponent().appendingPathComponent(state.lastPathComponent + ".library.json")
+        let original = try JSONEncoder().encode(LibraryStore.Snapshot(papers: [legacy, ordinary]))
+        try original.write(to: library)
+        let loaded = try LibraryStore.read(library)!
+        var expected = legacy; expected.directURL = raw
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        try expect(try encoder.encode(loaded[0]) == encoder.encode(expected), "old media-looking PDF keeps every library field while its source is normalized")
+        try expect(loaded.count == 2 && loaded[1].id == ordinary.id && loaded[1].reference == ordinary.reference && loaded[1].file == ordinary.file && (try Data(contentsOf: library)) == original, "mixed old library remains readable without rewriting the file on read")
+        let suite = "folioak-github-library-\(UUID().uuidString)", prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        prefs.set(root.appendingPathComponent(suite).path, forKey: "downloadRootDirectory")
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FixtureProtocol.self]
+        let engine = DownloadEngine(pdfTransport: URLSessionTransport(testConfiguration: config, policy: .externalPDF), requestInterval: 0, retryDelay: 0)
+        let path = "/Org/Repo/main/actually-pdf.mp4"
+        FixtureProtocol.install(.init(headers: ["Content-Type": "application/pdf"], body: try Data(contentsOf: pdf)), path: path)
+        let model = DownloadModel(engine: engine, preferences: prefs, stateURL: state)
+        try expect(model.libraryNotice == nil && model.papers.count == 2 && model.papers[0].directURL == raw, "upgraded model loads the mixed library")
+        model.retryFromLibrary(model.papers[0].downloadItem); try await waitForQueue(model)
+        try expect(model.successes == 1 && FixtureProtocol.lastRequest(path)?.url?.host == "raw.githubusercontent.com" && FixtureProtocol.count("/Org/Repo/blob/main/actually-pdf.mp4") == 0, "old library retry downloads the PDF through the raw route")
+        model.persistWorkspace()
+        let saved = try LibraryStore.read(library)!
+        try expect(saved.count == 2 && saved[0].id == legacy.id && saved[0].favorite && saved[0].read && saved[0].tags == legacy.tags && saved[0].directURL == raw, "retry and save preserve migrated library identity and organization")
+        var unsafe = legacy; unsafe.directURL = URL(string: "http://example.org/file.mp4")
+        let invalid = try JSONEncoder().encode(LibraryStore.Snapshot(papers: [unsafe, ordinary]))
+        let invalidURL = root.appendingPathComponent("github-invalid-library.json")
+        try invalid.write(to: invalidURL)
+        try rejects({ _ = try LibraryStore.read(invalidURL) }, "source migration still rejects unsafe old library URLs")
+        try expect(try Data(contentsOf: invalidURL) == invalid, "rejected library is not changed by migration")
+        print("PASS GitHub library migration: mixed historical PDFs, preserved metadata and identity, raw retry, safe validation and read-only loading")
     }
 }

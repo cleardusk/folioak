@@ -62,6 +62,7 @@ extension CoreTests {
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         let image = root.appendingPathComponent("photo.png")
         try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+        try await githubFileTests(root: root, image: image)
         try await directMediaRegressionTests(root: root, image: image)
         let folder = root.appendingPathComponent("media-output")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -564,5 +565,57 @@ extension CoreTests {
             }
         }
         print("Folioak previews: \(output.path)")
+    }
+}
+
+
+extension CoreTests {
+    @MainActor static func githubFileTests(root: URL, image: URL) async throws {
+        let example = "https://github.com/bytedance/Lance/blob/main/assets/logo/lance-logo.webp"
+        let rawExample = "https://raw.githubusercontent.com/bytedance/Lance/main/assets/logo/lance-logo.webp"
+        for suffix in ["", "?raw=true", "?raw=1&utm_source=a,b;c#preview"] {
+            try expect(try DownloadSource.parse(example + suffix) == .file(URL(string: rawExample)!), "GitHub WebP preview parameters share the raw file identity")
+        }
+        for ext in FileStorage.extensions {
+            let input = "https://WWW.GITHUB.COM:443/Org/Repo/blob/feature%2Fmedia/a%20b%23c%25." + ext.uppercased()
+            let expected = "https://raw.githubusercontent.com/Org/Repo/feature%2Fmedia/a%20b%23c%25." + ext.uppercased()
+            let source = try DownloadSource.parse(input)
+            try expect(source == .file(URL(string: expected)!) && (try DownloadSource.parse(expected)) == source, "GitHub supported file normalization is encoded, case-preserving and idempotent")
+        }
+        for input in [example.replacingOccurrences(of: "github.com", with: "github.com.evil.example"), example.replacingOccurrences(of: "/blob/", with: "/tree/"), example + "/", example + ".exe"] {
+            try expect(try DownloadSource.parse(input).directURL?.host != "raw.githubusercontent.com", "only supported GitHub blob files convert to raw")
+        }
+        for input in [example.replacingOccurrences(of: "https:", with: "http:"), example.replacingOccurrences(of: "github.com", with: "user@github.com"), example.replacingOccurrences(of: "github.com", with: "github.com:444")] {
+            try rejects({ _ = try DownloadSource.parse(input) }, "media GitHub conversion retains HTTPS safety checks")
+        }
+        let batch = try BatchInput(example + "\n" + example + "?raw=true\n" + rawExample)
+        try expect(batch.entries.count == 1 && batch.duplicates == 2, "GitHub preview, raw query and raw host deduplicate")
+        FixtureProtocol.reset(); defer { FixtureProtocol.reset() }
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FixtureProtocol.self]
+        let engine = DownloadEngine(pdfTransport: URLSessionTransport(testConfiguration: config, policy: .externalPDF), requestInterval: 0, retryDelay: 0)
+        let path = "/Org/Repo/main/photo.png", link = "https://github.com/Org/Repo/blob/main/photo.png"
+        FixtureProtocol.install(.init(headers: ["Content-Type": "image/png"], body: try Data(contentsOf: image)), path: path)
+        let suite = "folioak-github-files-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let folder = root.appendingPathComponent(suite)
+        preferences.set(folder.path, forKey: "downloadRootDirectory")
+        let model = DownloadModel(engine: engine, preferences: preferences)
+        model.input = link + "\n" + link + "?raw=true"
+        model.start(); try await waitForQueue(model)
+        try expect(model.successes == 1 && model.duplicateCount == 1 && model.input.isEmpty && model.mediaLibrary.count == 1, "UI downloads one GitHub image and keeps it in the media library")
+        try expect(FixtureProtocol.lastRequest(path)?.url?.host == "raw.githubusercontent.com" && FixtureProtocol.count("/Org/Repo/blob/main/photo.png") == 0, "GitHub media goes directly to the raw file")
+        let console = CapturedConsole()
+        let code = await CLIRunner.run(try CLIOptions.parse([link, "--json"]), version: "test", engine: engine, preferences: preferences, stdout: { console.stdout($0) }, stderr: { console.stderr($0) })
+        let report = try JSONSerialization.jsonObject(with: Data(console.output.utf8)) as! [String: Any]
+        let rows = report["results"] as! [[String: Any]]
+        try expect(code == 0 && rows.first?["status"] as? String == "existing" && rows.first?["input"] as? String == link, "CLI reuses the UI raw-file download and preserves user input")
+        let state = root.appendingPathComponent("github-media-legacy.json")
+        let legacy = DownloadItem(original: link, directURL: URL(string: link), state: .failed)
+        try WorkspaceStore.write(WorkspaceSnapshot(input: link, items: [legacy], history: [legacy], logs: []), to: state)
+        let restored = DownloadModel(engine: engine, preferences: preferences, stateURL: state)
+        try expect(restored.persistenceNotice == nil && restored.items.first?.id == legacy.id && restored.items.first?.directURL?.host == "raw.githubusercontent.com", "old GitHub media records normalize without losing their identity")
+        restored.retry(legacy.id); try await waitForQueue(restored)
+        try expect(restored.items.first?.state == .existing && restored.input.isEmpty && FixtureProtocol.count("/Org/Repo/blob/main/photo.png") == 0, "old GitHub media retry keeps the raw route and avoids duplicate saved files")
+        print("PASS GitHub files: user WebP case, all supported types, encoded refs, safety, deduplication, shared UI/CLI raw routing and legacy retry")
     }
 }

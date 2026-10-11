@@ -159,6 +159,9 @@ final class DownloadModel: ObservableObject {
     @Published var language: AppLanguage {
         didSet { preferences.set(language.rawValue, forKey: "language"); AppLocalization.shared.language = language }
     }
+    @Published var showsMenuBarIcon: Bool {
+        didSet { preferences.set(showsMenuBarIcon, forKey: "showsMenuBarIcon") }
+    }
     @Published var items: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
     @Published var mediaFormat: MediaFormat = .automatic
     @Published var history: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
@@ -223,6 +226,7 @@ final class DownloadModel: ObservableObject {
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
         language = AppLanguage(rawValue: preferences.string(forKey: "language") ?? "") ?? .system
+        showsMenuBarIcon = preferences.object(forKey: "showsMenuBarIcon") as? Bool ?? true
         directory = downloadPreferences.directory
         if preferences.string(forKey: "downloadRootDirectory") == nil {
             preferences.set(directory.path, forKey: "downloadRootDirectory")
@@ -1097,7 +1101,7 @@ struct LinkInput: NSViewRepresentable {
         editor.autoresizingMask = [.width]
         editor.minSize = NSSize(width: 0, height: 104)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        editor.textContainer?.widthTracksTextView = true
+        editor.textContainer?.widthTracksTextView = false
         editor.textContainer?.containerSize = NSSize(width: scroll.contentSize.width, height: .greatestFiniteMagnitude)
         editor.isAutomaticSpellingCorrectionEnabled = false
         editor.isContinuousSpellCheckingEnabled = false
@@ -1194,9 +1198,15 @@ final class LinkScrollView: NSScrollView {
         super.tile()
         guard let editor = documentView as? LinkTextView else { return }
         let width = contentSize.width
-        if width > 0 && editor.frame.width != width {
+        guard width > 0 else { return }
+        if editor.frame.width != width {
             editor.setFrameSize(NSSize(width: width, height: max(editor.frame.height, contentSize.height)))
         }
+        // Overlay scrollers do not reduce contentSize; wrap URLs before their track.
+        // Legacy scrollers already reserve their own width.
+        let gutter: CGFloat = scrollerStyle == .overlay ? 16 : 0
+        editor.textContainer?.containerSize = NSSize(width: max(1, width - 2 * editor.textContainerInset.width - gutter),
+                                                    height: .greatestFiniteMagnitude)
     }
 }
 
@@ -1263,9 +1273,9 @@ struct SettingsView: View {
             SlidingSegments(selection: $tab, options: ["通用", "快捷键"], title: { L($0) }, palette: palette)
             Group {
                 if tab == "通用" { general } else { ShortcutSettingsView(shortcuts: model.shortcuts, palette: palette) }
-            }.frame(width: 422, height: 424, alignment: .top)
+            }.frame(width: 422, height: 468, alignment: .top)
         }.padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 24)
-            .frame(width: 470, height: 500, alignment: .top)
+            .frame(width: 470, height: 544, alignment: .top)
             .environment(\.locale, L10n.locale)
             .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))
             .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
@@ -1305,6 +1315,12 @@ struct SettingsView: View {
                 Picker(L("语言"), selection: $model.language) {
                     ForEach(AppLanguage.allCases, id: \.self) { Text($0.label).tag($0) }
                 }.id(localization.language).labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(height: 28)
+            HStack(spacing: 16) {
+                settingLabel(L("菜单栏"))
+                Toggle(L("显示 Folioak 图标"), isOn: $model.showsMenuBarIcon).toggleStyle(.checkbox)
+                    .font(.system(size: 12)).help(L("关闭主窗口后继续在菜单栏运行。"))
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
             HStack(spacing: 16) {
                 settingLabel(L("外观"))
@@ -1398,12 +1414,76 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
 }
 
 @MainActor
+enum AboutInformation {
+    static let repository = URL(string: "https://github.com/cleardusk/folioak")!
+    static var credits: NSAttributedString {
+        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center
+        let text = NSMutableAttributedString(string: L("作者") + ": Jianzhu Guo & Codex (GPT)\n\n",
+                                             attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph])
+        text.append(NSAttributedString(string: repository.absoluteString, attributes: [.link: repository, .font: NSFont.systemFont(ofSize: 12), .paragraphStyle: paragraph]))
+        return text
+    }
+}
+
+@MainActor
+final class MenuBarController: NSObject {
+    private(set) var item: NSStatusItem?
+    private var visibilityObservation: AnyCancellable?
+    private var languageObservation: AnyCancellable?
+    private let openWindow: () -> Void
+    private let openSettings: () -> Void
+    private let quit: () -> Void
+    private let disabled: () -> Void
+    init(model: DownloadModel, openWindow: @escaping () -> Void, openSettings: @escaping () -> Void,
+         quit: @escaping () -> Void, disabled: @escaping () -> Void = {}) {
+        self.openWindow = openWindow; self.openSettings = openSettings; self.quit = quit; self.disabled = disabled
+        super.init()
+        visibilityObservation = model.$showsMenuBarIcon.removeDuplicates().sink { [weak self] in self?.update(visible: $0) }
+        languageObservation = model.$language.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.updateMenu() }
+        }
+    }
+    deinit { if let item { NSStatusBar.system.removeStatusItem(item) } }
+    private func update(visible: Bool) {
+        if visible {
+            if item == nil {
+                let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+                let image = NSImage(systemSymbolName: "leaf", accessibilityDescription: "Folioak")
+                image?.isTemplate = true
+                status.button?.image = image
+                status.button?.toolTip = "Folioak"
+                status.button?.setAccessibilityLabel("Folioak")
+                item = status
+            }
+            updateMenu()
+        } else if let item {
+            NSStatusBar.system.removeStatusItem(item); self.item = nil
+            disabled()
+        }
+    }
+    private func updateMenu() {
+        guard let item else { return }
+        let menu = NSMenu(); menu.autoenablesItems = false
+        for (title, action) in [(L("显示 Folioak"), #selector(showWindow)), (L("设置…"), #selector(showSettings)), (L("退出 Folioak"), #selector(terminate))] {
+            if action == #selector(terminate) { menu.addItem(.separator()) }
+            let entry = NSMenuItem(title: title, action: action, keyEquivalent: ""); entry.target = self
+            menu.addItem(entry)
+        }
+        item.menu = menu
+    }
+    @objc private func showWindow() { openWindow() }
+    @objc private func showSettings() { openSettings() }
+    @objc private func terminate() { quit() }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private var settingsWindow: NSWindow?
     private var windowChrome: WindowChrome?
     private var settingsChrome: WindowChrome?
     private let model: DownloadModel
+    private var menuBar: MenuBarController?
     private var terminationPending = false
     private var shortcutObservation: AnyCancellable?
     private var languageObservation: AnyCancellable?
@@ -1440,13 +1520,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             frame.size = NSSize(width: max(frame.width, window.minSize.width), height: max(frame.height, window.minSize.height))
             window.setFrame(frame, display: false)
         }
+        menuBar = MenuBarController(model: model, openWindow: { [weak self] in self?.showMainWindow() },
+                                    openSettings: { [weak self] in self?.showSettings() }, quit: { NSApp.terminate(nil) }, disabled: { [weak self] in
+            if self?.window?.isVisible == false { self?.showMainWindow() }
+        })
         window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !model.showsMenuBarIcon }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationPending { return .terminateLater }
         guard model.busy else { model.cancelVersionCheck(); model.persistWorkspace(); return .terminateNow }
@@ -1464,12 +1548,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateLater
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if sender === window { NSApp.terminate(sender); return false }
+        if sender === window {
+            if model.showsMenuBarIcon { sender.orderOut(nil); model.persistWorkspace() }
+            else { NSApp.terminate(sender) }
+            return false
+        }
         return true
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        window.makeKeyAndOrderFront(nil)
+        showMainWindow()
         return true
+    }
+    private func showMainWindow() {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func focusInput() {
@@ -1491,7 +1584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func showAbout() {
-        var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [.credits: AboutInformation.credits]
         // Use the original multi-resolution artwork instead of the system's
         // processed application icon, which softens the mark on newer macOS.
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
@@ -1517,6 +1610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settingsWindow = panel
         }
         settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func makeMenu() {

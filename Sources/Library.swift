@@ -67,10 +67,19 @@ enum LibraryStore {
     static func read(_ url: URL) throws -> [LibraryPaper]? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let data = try PaperStorage.read(url, limit: byteLimit, tooLarge: "文档库超过 32 MB。")
-        let snapshot = try JSONDecoder().decode(Snapshot.self, from: data)
+        var snapshot = try JSONDecoder().decode(Snapshot.self, from: data)
         guard snapshot.schema == 1, snapshot.papers.count <= countLimit,
-              Set(snapshot.papers.map(\.id)).count == snapshot.papers.count,
-              snapshot.papers.allSatisfy(valid) else { throw DownloadError.storage("文档库格式无效。") }
+              Set(snapshot.papers.map(\.id)).count == snapshot.papers.count else { throw DownloadError.storage("文档库格式无效。") }
+        // Older downloads can have a media-looking preview URL but contain a PDF.
+        // Keep their library records readable when a new preview route is added.
+        snapshot.papers = snapshot.papers.map { paper in
+            guard paper.reference == nil, let url = paper.directURL,
+                  let normalized = (try? DownloadSource.parse(url.absoluteString))?.directURL else { return paper }
+            var result = paper
+            result.directURL = normalized
+            return result
+        }
+        guard snapshot.papers.allSatisfy(valid) else { throw DownloadError.storage("文档库格式无效。") }
         return snapshot.papers
     }
     static func valid(_ paper: LibraryPaper) -> Bool {

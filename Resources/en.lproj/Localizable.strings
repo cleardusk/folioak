@@ -433,3 +433,11 @@
 "本次耗时 %@ · 重试 1 次" = "Elapsed time %@ · 1 retry";
 "视频没有可提取的音轨。" = "This video has no audio track to extract.";
 "无法提取音频，未保存。" = "Could not extract audio. No file was saved.";
+
+"已展开" = "Expanded";
+"已折叠" = "Collapsed";
+"作者" = "Author";
+"菜单栏" = "Menu Bar";
+"显示 Folioak 图标" = "Show Folioak Icon";
+"关闭主窗口后继续在菜单栏运行。" = "Keep running in the menu bar after closing the main window.";
+"显示 Folioak" = "Show Folioak";

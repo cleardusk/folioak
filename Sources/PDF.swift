@@ -64,7 +64,7 @@ enum DownloadSource: Hashable, Sendable {
         var path = parts.percentEncodedPath.components(separatedBy: "/")
         if ["github.com", "www.github.com"].contains(parts.host?.lowercased() ?? ""),
            path.count >= 6, path[3] == "blob", path.dropFirst().allSatisfy({ !$0.isEmpty }),
-           url.pathExtension.lowercased() == "pdf" {
+           (url.pathExtension.lowercased() == "pdf" || FileStorage.extensions.contains(url.pathExtension.lowercased())) {
             path.remove(at: 3)
             parts.host = "raw.githubusercontent.com"
             parts.percentEncodedPath = path.joined(separator: "/")

@@ -354,7 +354,7 @@ extension CoreTests {
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
         let view = NSHostingView(rootView: SettingsView(model: model).id("通用"))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 500), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 544), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         defer { window.orderOut(nil) }
         func header(_ tab: String) async throws -> [Bool] {
@@ -726,5 +726,168 @@ extension CoreTests {
         try expect(editor.placeholderColor == .white, "reduced motion immediately reaches final color")
         try expect(editor.string == "https://arxiv.org/abs/1706.03762 test" && editor.selectedRange() == NSRange(location: 2, length: 5), "color transition preserves text and selection")
         print("PASS native colors: intermediate frame, synchronized caret, rapid reversal, reduced motion, text and selection")
+    }
+}
+
+
+@MainActor private final class DisclosureRegressionProbe: ObservableObject {
+    @Published var expanded = false
+    @Published var revision = 0
+}
+private struct DisclosureRegressionView: View {
+    @ObservedObject var probe: DisclosureRegressionProbe
+    var body: some View {
+        DisclosureGroup("下载记录", isExpanded: $probe.expanded) { Text("Selectable log \(probe.revision)").textSelection(.enabled) }
+            .disclosureGroupStyle(RecordDisclosureStyle()).font(.system(size: 12))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+extension CoreTests {
+    @MainActor static func detailInteractionTests() async throws {
+        let probe = DisclosureRegressionProbe()
+        let host = InteractionTestHost(rootView: DisclosureRegressionView(probe: probe))
+        let testWindow = SelectionTestWindow(contentRect: NSRect(x: 0, y: 0, width: 436, height: 150), styleMask: [.borderless], backing: .buffered, defer: false)
+        testWindow.contentView = host; testWindow.orderFront(nil)
+        defer { testWindow.orderOut(nil) }
+        func settle(_ view: NSView) async {
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            view.layoutSubtreeIfNeeded()
+        }
+        await settle(host)
+        for fraction: CGFloat in [0.025, 0.22, 0.95] {
+            let before = probe.expanded
+            let point = host.convert(NSPoint(x: host.bounds.width * fraction, y: host.isFlipped ? 16 : host.bounds.height - 16), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                testWindow.sendEvent(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: testWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+            }
+            await settle(host)
+            try expect(probe.expanded != before, "arrow, title and trailing blank each toggle the full-height record header")
+        }
+        probe.revision += 1; await settle(host)
+        try expect(probe.expanded, "parent updates preserve disclosure state")
+
+        let suite = "folioak-detail-interaction-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { preferences.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: folder); AppLocalization.shared.language = .chinese }
+        let pdf = folder.appendingPathComponent("A long file name for scroll gutter and selection.pdf")
+        try createPDF(at: pdf)
+        let model = DownloadModel(preferences: preferences)
+        model.theme = .graphite
+        var item = DownloadItem(original: "1706.03762", state: .saved, savedURL: pdf, documentTitle: "Details fixture")
+        let start = Date().addingTimeInterval(-17.8)
+        var trace = TaskDiagnostics(now: start)
+        trace.receive(.metadata, now: start)
+        trace.receive(.resolved(PaperMetadata(reference: try ArxivReference.parse("1706.03762"), title: "Details fixture", year: 2017, month: 6)), now: start.addingTimeInterval(0.8))
+        trace.receive(.waiting(start.addingTimeInterval(17.8)), now: start.addingTimeInterval(2.5))
+        trace.finish(now: start.addingTimeInterval(17.8)); item.diagnostics = trace
+        model.history = [item]
+        model.logs = (0..<90).map { ActivityEntry(level: .info, message: "Log \($0) " + String(repeating: "a long selectable message ", count: 8), subject: nil, itemID: item.id) }
+        func nativeScroll(_ root: NSView) -> NSScrollView? { (root as? NSScrollView) ?? root.subviews.lazy.compactMap(nativeScroll).first }
+        for language in [AppLanguage.chinese, .english] {
+            AppLocalization.shared.language = language
+            for scheme in [ColorScheme.light, .dark] {
+                let view = InteractionTestHost(rootView: TaskDiagnosticView(model: model, item: item, showingDiagnostics: true).environment(\.colorScheme, scheme))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 540), styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = view; window.orderFront(nil)
+                defer { window.orderOut(nil) }
+                await settle(view)
+                guard let scroll = nativeScroll(view), let document = scroll.documentView else { throw TestFailure.failed("details native scroll") }
+                for style in [NSScroller.Style.overlay, .legacy] {
+                    scroll.scrollerStyle = style; scroll.tile(); await settle(view)
+                    for bottom in [false, true] {
+                        scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom ? document.bounds.maxY - scroll.contentView.bounds.height : 0))
+                        scroll.reflectScrolledClipView(scroll.contentView); await settle(view)
+                        // Hide only scroller paint so text can be checked independently of the thumb.
+                        scroll.verticalScroller?.alphaValue = 0
+                        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("detail bitmap") }
+                        view.cacheDisplay(in: view.bounds, to: bitmap)
+                        let clip = scroll.contentView.convert(scroll.contentView.bounds, to: view)
+                        let scale = CGFloat(bitmap.pixelsWide) / view.bounds.width
+                        let background = ThemePalette.nativeColor(model.theme.palette(dark: scheme == .dark).canvas).usingColorSpace(.deviceRGB)!
+                        for y in stride(from: clip.minY + 2, to: clip.maxY - 2, by: 2) {
+                            let py = view.isFlipped ? y : view.bounds.height - y
+                            let pixel = bitmap.colorAt(x: Int((clip.maxX - 12) * scale), y: Int(py * scale))!.usingColorSpace(.deviceRGB)!
+                            try expect(abs(pixel.redComponent - background.redComponent) < 0.03 && abs(pixel.greenComponent - background.greenComponent) < 0.03 && abs(pixel.blueComponent - background.blueComponent) < 0.03,
+                                       "detail text and dividers stay outside the scroll gutter at top and tail")
+                        }
+                        scroll.verticalScroller?.alphaValue = 1
+                    }
+                }
+                if CommandLine.arguments.contains("--snapshots"), let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: min(200, max(0, document.bounds.height - scroll.contentView.bounds.height)))); scroll.reflectScrolledClipView(scroll.contentView); await settle(view)
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/detail-record-\(language.rawValue)-\(scheme == .light ? "light" : "dark").png"))
+                }
+            }
+        }
+        print("PASS details: full-row mouse targets, stable expansion and clear text gutters in both languages, appearances and scroll styles")
+    }
+
+    @MainActor static func inputScrollGutterTests() async throws {
+        let suite = "folioak-input-gutter-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        model.input = String(repeating: "https://example.com/" + String(repeating: "a", count: 150) + "\n", count: 20)
+        let view = InteractionTestHost(rootView: LinkInput(model: model, focused: .constant(false), palette: model.theme.palette(dark: false)))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 104), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view; window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        func input(_ root: NSView) -> LinkTextView? { (root as? LinkTextView) ?? root.subviews.lazy.compactMap(input).first }
+        try await Task.sleep(nanoseconds: 100_000_000); view.layoutSubtreeIfNeeded()
+        guard let editor = input(view), let scroll = editor.enclosingScrollView, let container = editor.textContainer, let layout = editor.layoutManager else { throw TestFailure.failed("native gutter input") }
+        for style in [NSScroller.Style.overlay, .legacy] {
+            scroll.scrollerStyle = style
+            for width: CGFloat in [240, 400, 640] {
+                window.setContentSize(NSSize(width: width, height: 104))
+                view.layoutSubtreeIfNeeded(); scroll.tile(); layout.ensureLayout(for: container)
+                let edge = editor.convert(NSPoint(x: editor.textContainerOrigin.x + layout.usedRect(for: container).maxX, y: 0), to: scroll)
+                let track = scroll.verticalScroller.map { $0.convert($0.bounds, to: scroll).minX } ?? scroll.bounds.maxX
+                try expect(edge.x <= track - 2, "wrapped URLs stay clear of \(style) scroll track at \(width): \(edge.x) vs \(track)")
+                try expect(editor.textContainerOrigin == NSPoint(x: 7, y: 7), "scroll gutter preserves the input's leading baseline")
+                try expect(editor.frame.height > scroll.contentSize.height && !scroll.hasHorizontalScroller, "long links wrap and scroll vertically")
+            }
+        }
+        print("PASS input: wrapped URLs avoid overlay and legacy scrollers at narrow, normal and wide sizes")
+    }
+}
+
+
+extension CoreTests {
+    @MainActor static func aboutAndMenuBarTests() async throws {
+        let credits = AboutInformation.credits
+        let link = (credits.string as NSString).range(of: AboutInformation.repository.absoluteString)
+        try expect(credits.string.contains("Jianzhu Guo & Codex (GPT)") && link.location != NSNotFound && credits.attribute(.link, at: link.location, effectiveRange: nil) as? URL == URL(string: "https://github.com/cleardusk/folioak"), "About credits expose the licensed author and clickable original repository")
+        let suite = "folioak-menu-bar-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite); AppLocalization.shared.language = .chinese }
+        preferences.set("keep draft", forKey: "unrelatedPreference")
+        let model = DownloadModel(preferences: preferences)
+        try expect(model.showsMenuBarIcon && preferences.object(forKey: "showsMenuBarIcon") == nil, "menu bar defaults on without rewriting existing preferences")
+        var opened = 0, settings = 0, quit = 0, disabled = 0
+        var controller: MenuBarController? = MenuBarController(model: model, openWindow: { opened += 1 }, openSettings: { settings += 1 }, quit: { quit += 1 }, disabled: { disabled += 1 })
+        weak var released = controller
+        guard let first = controller?.item, let image = first.button?.image else { throw TestFailure.failed("default menu bar item and symbol") }
+        try expect(image.isTemplate && first.button?.accessibilityLabel() == "Folioak", "menu bar symbol follows system appearance and has an accessible name")
+        model.showsMenuBarIcon = true
+        try expect(controller?.item === first, "unchanged preference does not create duplicate items")
+        for entry in first.menu!.items where !entry.isSeparatorItem {
+            try expect(NSApp.sendAction(entry.action!, to: entry.target, from: entry), "menu action reaches its controller")
+        }
+        try expect(opened == 1 && settings == 1 && quit == 1, "menu routes show, settings and explicit quit independently")
+        model.language = .english
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try expect(controller?.item?.menu?.items.map(\.title).contains("Show Folioak") == true, "visible menu immediately follows language changes")
+        model.showsMenuBarIcon = false
+        try expect(controller?.item == nil && disabled == 1 && !DownloadModel(preferences: preferences).showsMenuBarIcon, "disabling removes the item, restores access and persists across relaunch")
+        model.language = .chinese
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try expect(controller?.item == nil, "language changes do not recreate a disabled menu item")
+        model.showsMenuBarIcon = true
+        try expect(controller?.item?.menu?.items.first?.title == "显示 Folioak", "re-enabling creates one menu in the current language")
+        controller = nil
+        try expect(released == nil && preferences.string(forKey: "unrelatedPreference") == "keep draft", "menu controller releases observers and preserves other settings")
+        print("PASS About/menu bar: original repo link, author, default on, runtime off/on, persisted preference, localized actions and released controller")
     }
 }

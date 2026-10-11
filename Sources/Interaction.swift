@@ -185,6 +185,29 @@ struct PaperListKeyboard: NSViewRepresentable {
     }
 }
 
+// Keep the native disclosure semantics, but make the entire heading a button.
+struct RecordDisclosureStyle: DisclosureGroupStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { configuration.isExpanded.toggle() } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isExpanded)
+                        .frame(width: 12).accessibilityHidden(true)
+                    configuration.label
+                    Spacer(minLength: 0)
+                }.frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                    .contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .accessibilityValue(L(configuration.isExpanded ? "已展开" : "已折叠"))
+            if configuration.isExpanded { configuration.content }
+        }
+    }
+}
+
 struct TaskDiagnosticView: View {
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
@@ -195,7 +218,7 @@ struct TaskDiagnosticView: View {
     @Environment(\.colorScheme) private var scheme
     @WorkspaceViewState private var files: [FileInformation] = []
     @WorkspaceViewState private var loading = false
-    @WorkspaceViewState private var showingDiagnostics = false
+    @WorkspaceViewState var showingDiagnostics = false
     private var paper: LibraryPaper? { libraryPaperID.flatMap { id in model.papers.first { $0.id == id } } }
     var current: DownloadItem {
         if let paper {
@@ -259,10 +282,11 @@ struct TaskDiagnosticView: View {
                         else {
                             Divider()
                             DisclosureGroup(L("下载记录"), isExpanded: $showingDiagnostics) { diagnosticContent.padding(.top, 12) }
-                                .font(.system(size: 12))
+                                .font(.system(size: 12)).disclosureGroupStyle(RecordDisclosureStyle())
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.trailing, 16)
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
             if hasDiagnostics || (current.canRetry && !model.busy) {
                 HStack {
