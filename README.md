@@ -34,4 +34,17 @@ Build with `./build.command`; test with `./test.command`. Requires Xcode or Comm
 
 [Development guide](CONTRIBUTING.md) · [Build & release (中文)](RELEASING.md) · [Design (中文)](DESIGN.md) · [Security notes (中文)](SECURITY-AUDIT.md) · [Media components (中文)](Resources/MediaComponents.md)
 
+## Acknowledgments
+
+Folioak builds on the work of these open-source projects and their contributors:
+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — video site extraction and downloads.
+- [FFmpeg](https://ffmpeg.org/) and ffprobe — media inspection, merging, remuxing, and audio extraction.
+- [QuickJS-NG](https://github.com/quickjs-ng/quickjs) — the JavaScript engine used by yt-dlp's EJS solver.
+- [CPython](https://github.com/python/cpython) — the Python runtime bundled with yt-dlp.
+
+See [Media components](Resources/MediaComponents.md) for pinned versions, build details, and licensing notes. Third-party license texts and notices, including those for bundled dependencies, are included in `Folioak.app/Contents/Resources/media-tools/licenses/`.
+
+## License
+
 Project source: [MIT](LICENSE). Bundled third-party components retain their own licenses.

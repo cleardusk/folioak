@@ -34,4 +34,17 @@
 
 [开发指南（English）](CONTRIBUTING.md) · [构建与发布](RELEASING.md) · [设计](DESIGN.md) · [安全与实测](SECURITY-AUDIT.md) · [媒体组件](Resources/MediaComponents.md)
 
+## 致谢
+
+感谢以下开源项目及其贡献者，Folioak 的相关功能建立在他们的工作之上：
+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)：视频网站解析与下载。
+- [FFmpeg](https://ffmpeg.org/) 和 ffprobe：媒体信息读取、合并、重新封装与音频提取。
+- [QuickJS-NG](https://github.com/quickjs-ng/quickjs)：为 yt-dlp 的 EJS 求解器提供 JavaScript 引擎。
+- [CPython](https://github.com/python/cpython)：随 yt-dlp 内置的 Python 运行时。
+
+固定版本、构建方式与许可说明见[媒体组件](Resources/MediaComponents.md)。第三方组件及其内置依赖的许可证与声明随应用附带，位于 `Folioak.app/Contents/Resources/media-tools/licenses/`。
+
+## 许可证
+
 项目源码采用 [MIT 许可证](LICENSE)；内置第三方组件遵循各自许可证。
