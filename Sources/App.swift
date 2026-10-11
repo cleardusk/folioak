@@ -1312,6 +1312,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.start()
     }
 
+    @objc private func showAbout() {
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+        // Use the original multi-resolution artwork instead of the system's
+        // processed application icon, which softens the mark on newer macOS.
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: url) {
+            options[.applicationIcon] = icon
+        }
+        NSApp.orderFrontStandardAboutPanel(options: options)
+        NSApp.keyWindow?.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        NSApp.keyWindow?.standardWindowButton(.zoomButton)?.isHidden = true
+    }
+
     @objc private func showSettings() {
         if settingsWindow == nil {
             let view = NSHostingView(rootView: SettingsView(model: model))
@@ -1340,11 +1353,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return submenu
         }
         let app = add("", [
-            ("关于 Leafpeak", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""), ("", nil, ""),
+            ("关于 Leafpeak", #selector(showAbout), ""), ("", nil, ""),
             ("设置…", #selector(showSettings), ","), ("", nil, ""),
             ("隐藏 Leafpeak", #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
             ("退出 Leafpeak", #selector(NSApplication.terminate(_:)), "q")
         ])
+        app.item(withTitle: "关于 Leafpeak")?.target = self
         app.item(withTitle: "设置…")?.target = self
         let edit = add("编辑", [
             ("撤销", Selector(("undo:")), "z"), ("重做", Selector(("redo:")), "z"), ("", nil, ""),
