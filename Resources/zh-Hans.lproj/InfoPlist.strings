@@ -1,2 +1,5 @@
-CFBundleDisplayName = "Leafpeak";
-CFBundleName = "Leafpeak";
+CFBundleDisplayName = "Folioak";
+CFBundleName = "Folioak";
+NSDesktopFolderUsageDescription = "将你选择的文件保存到指定目录。";
+NSDownloadsFolderUsageDescription = "将你选择的文件保存到指定目录。";
+NSDocumentsFolderUsageDescription = "将你选择的文件保存到指定目录。";

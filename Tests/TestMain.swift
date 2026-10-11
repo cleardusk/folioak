@@ -85,8 +85,10 @@ actor MockTransport: HTTPTransport {
 
 @main
 struct CoreTests {
-    static func main() async {
+    @MainActor static func main() async {
+        AppLocalization.shared.language = .chinese
         do {
+            try await localizationTests()
             if CommandLine.arguments.contains("--preview-230") { try renderMediaSnapshots(); return }
             if CommandLine.arguments.contains("--ui-only") {
                 try initialDirectoryTests()

@@ -39,7 +39,7 @@ private struct MovingFilterProbe: View {
 extension CoreTests {
     @MainActor static func selectionFocusTests() async throws {
         _ = NSApplication.shared
-        let suite = "leafpeak-selection-focus-\(UUID().uuidString)"
+        let suite = "folioak-selection-focus-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
@@ -89,7 +89,7 @@ extension CoreTests {
 
     @MainActor static func blankCanvasFocusTests() async throws {
         _ = NSApplication.shared
-        let suite = "leafpeak-blank-focus-\(UUID().uuidString)"
+        let suite = "folioak-blank-focus-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         func field(_ root: NSView) -> NSTextField? {
@@ -173,14 +173,14 @@ extension CoreTests {
     }
 
     @MainActor static func initialDirectoryTests() throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent("leafpeak-first-launch-\(UUID().uuidString)")
-        let suite = "leafpeak-first-launch-\(UUID().uuidString)"
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-first-launch-\(UUID().uuidString)")
+        let suite = "folioak-first-launch-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer {
             try? FileManager.default.removeItem(at: home)
             preferences.removePersistentDomain(forName: suite)
         }
-        let root = home.appendingPathComponent("Downloads/Leafpeak")
+        let root = home.appendingPathComponent("Downloads/Folioak")
         preferences.set(root.path, forKey: "downloadRootDirectory")
         let model = DownloadModel(preferences: preferences)
         model.prepareDefaultDirectory(home: home)
@@ -203,7 +203,7 @@ extension CoreTests {
 
     @MainActor static func sidebarLayoutTests() async throws {
         _ = NSApplication.shared
-        let suite = "leafpeak-sidebar-layout-\(UUID().uuidString)"
+        let suite = "folioak-sidebar-layout-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
@@ -268,10 +268,10 @@ extension CoreTests {
         let content = NSView(frame: window.contentLayoutRect)
         content.addSubview(view); window.contentView = content; window.orderFront(nil)
         defer { window.orderOut(nil) }
-        view.configure(menuTitle: "/test/Leafpeak", color: .white, animated: true)
+        view.configure(menuTitle: "/test/Folioak", color: .white, animated: true)
         view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
         let menu = NSMenu(), other = NSMenu()
-        menu.addItem(withTitle: "/test/Leafpeak", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "/test/Folioak", action: nil, keyEquivalent: "")
         other.addItem(withTitle: "Other menu", action: nil, keyEquivalent: "")
         func tip(_ path: CGPath?) -> CGFloat {
             // Core Animation may normalize interpolated paths to cubic curves.
@@ -301,7 +301,7 @@ extension CoreTests {
             RunLoop.current.run(mode: .eventTracking, before: Date().addingTimeInterval(0.01))
             CATransaction.flush()
         }
-        view.configure(menuTitle: "/test/Leafpeak", color: .white, animated: false)
+        view.configure(menuTitle: "/test/Folioak", color: .white, animated: false)
         try expect(view.mark.animation(forKey: "fold") == nil && tip(view.mark.path) == 3.5,
                    "reduced motion settles an in-flight fold without leaving an animation")
         try expect(view.hitTest(.zero) == nil, "decorative chevron cannot steal menu clicks")
@@ -353,7 +353,7 @@ extension CoreTests {
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
         let view = NSHostingView(rootView: SettingsView(model: model).id("通用"))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 456), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 500), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         defer { window.orderOut(nil) }
         func header(_ tab: String) async throws -> [Bool] {

@@ -54,6 +54,7 @@ struct RoundButtonStyle: ButtonStyle {
 }
 
 struct DownloaderView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     @WorkspaceViewState var page: WorkspacePage = .downloads
     var showSettings: () -> Void = {}
@@ -109,7 +110,7 @@ struct DownloaderView: View {
         }
     }
     private var visibleLogs: [ActivityEntry] {
-        model.logs.filter { (logLevel == nil || $0.level == logLevel) && (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || ($0.subject?.localizedCaseInsensitiveContains(query) ?? false)) }
+        model.logs.filter { (logLevel == nil || $0.level == logLevel) && (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || L($0.message).localizedCaseInsensitiveContains(query) || ($0.subject?.localizedCaseInsensitiveContains(query) ?? false)) }
     }
 
     var body: some View {
@@ -128,6 +129,7 @@ struct DownloaderView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 780, minHeight: 540)
+        .environment(\.locale, L10n.locale)
         .foregroundStyle(ThemePalette.color(palette.text))
         .tint(accent)
         .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture(perform: dismissEditing))
@@ -154,12 +156,12 @@ struct DownloaderView: View {
             if let selectedID, !visibleItems.contains(where: { $0.id == selectedID }) { self.selectedID = nil }
         }
         .quickLookPreview($model.previewURL)
-        .alert("清空所有下载记录？", isPresented: $confirmingClearDownloads) {
-            Button("取消", role: .cancel) {}
-            Button("清空记录", role: .destructive, action: model.clearDownloadRecords)
+        .alert(L("清空所有下载记录？"), isPresented: $confirmingClearDownloads) {
+            Button(L("取消"), role: .cancel) {}
+            Button(L("清空记录"), role: .destructive, action: model.clearDownloadRecords)
                 .disabled(!model.canClearDownloadRecords)
         } message: {
-            Text("将移除全部下载记录，包括失败和取消的任务。\n已下载文件、文档库和媒体库都会保留。")
+            Text(L("将移除全部下载记录，包括失败和取消的任务。\n已下载文件、文档库和媒体库都会保留。"))
         }
         .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item, libraryPaperID: page == .library ? item.id : nil, fromMediaLibrary: page == .media) }
         .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
@@ -194,7 +196,7 @@ struct DownloaderView: View {
                     withAnimation(reduceMotion ? nil : .timingCurve(0.2, 0, 0, 1, duration: 0.25)) { collapsed.toggle() }
                 } label: { SidebarToggleGlyph(expanded: !collapsed).frame(width: 50, height: 42).contentShape(Rectangle()) }
                     .buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary)
-                    .help(collapsed ? "展开侧栏" : "收起侧栏").accessibilityLabel(collapsed ? "展开侧栏" : "收起侧栏")
+                    .help(collapsed ? L("展开侧栏") : L("收起侧栏")).accessibilityLabel(collapsed ? L("展开侧栏") : L("收起侧栏"))
                 Spacer(minLength: 0)
             }.padding(.top, 34).padding(.bottom, 10)
             VStack(spacing: 6) {
@@ -204,7 +206,7 @@ struct DownloaderView: View {
                             SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: destination == page)
                                 .font(.system(size: 19, weight: .regular)).frame(width: 24, height: 24)
                             HStack {
-                                Text(destination.rawValue).font(.system(size: 14)).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                                Text(L(destination.rawValue)).font(.system(size: 14)).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
                                 Spacer(minLength: 0)
                                 if destination == .downloads && model.busy { Circle().fill(accent).frame(width: 5, height: 5) }
                             }.modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
@@ -215,7 +217,7 @@ struct DownloaderView: View {
                         .contentShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .buttonStyle(SidebarButtonStyle(palette: palette, selected: destination == page))
-                    .help(destination.rawValue).accessibilityLabel(destination.rawValue)
+                    .help(L(destination.rawValue)).accessibilityLabel(L(destination.rawValue))
                     .accessibilityAddTraits(destination == page ? .isSelected : [])
                 }
             }
@@ -234,12 +236,12 @@ struct DownloaderView: View {
             Button(action: showSettings) {
                 HStack(spacing: 13) {
                     Image(systemName: "gearshape").font(.system(size: 19)).frame(width: 24)
-                    Text("设置").font(.system(size: 14)).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                    Text(L("设置")).font(.system(size: 14)).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
                         .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     Spacer(minLength: 0)
                 }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
                     .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
-            }.buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary).help("设置（⌘,）").accessibilityLabel("设置")
+            }.buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary).help(L("设置（⌘,）")).accessibilityLabel(L("设置"))
         }.padding(.horizontal, 12).padding(.bottom, 16).frame(width: collapsed ? 74 : 190)
             .background(ThemePalette.color(palette.sidebar))
             .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
@@ -249,79 +251,79 @@ struct DownloaderView: View {
         HStack(spacing: 12) {
             if page == .logs {
                 Button { page = .downloads } label: { Image(systemName: "chevron.left") }
-                    .buttonStyle(RoundButtonStyle(palette: palette)).help("返回下载").accessibilityLabel("返回下载")
+                    .buttonStyle(RoundButtonStyle(palette: palette)).help(L("返回下载")).accessibilityLabel(L("返回下载"))
             }
-            if page != .downloads { Text(page.rawValue).font(.system(size: 20, weight: .semibold)) }
+            if page != .downloads { Text(L(page.rawValue)).font(.system(size: 20, weight: .semibold)) }
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty { searchField }
                 Menu {
-                    Button("导入 PDF…") { libraryFilter = .all; libraryTag = nil; query = ""; model.importPDFs() }
+                    Button(L("导入 PDF…")) { libraryFilter = .all; libraryTag = nil; query = ""; model.importPDFs() }
                         .disabled(model.importingPDFs || !model.libraryWritable)
-                    Picker("排序", selection: $librarySort) { ForEach(LibrarySort.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                    Picker(L("排序"), selection: $librarySort) { ForEach(LibrarySort.allCases, id: \.self) { Text(L($0.rawValue)).tag($0) } }.id(localization.language)
                     if !libraryTags.isEmpty {
-                        Menu("标签") {
-                            Button { libraryTag = nil } label: { if libraryTag == nil { Label("全部标签", systemImage: "checkmark") } else { Text("全部标签") } }
+                        Menu(L("标签")) {
+                            Button { libraryTag = nil } label: { if libraryTag == nil { Label(L("全部标签"), systemImage: "checkmark") } else { Text(L("全部标签")) } }
                             ForEach(libraryTags, id: \.self) { tag in
                                 Button { libraryTag = tag } label: { if libraryTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) } }
                             }
                         }
                     }
                     Divider()
-                    Button("导出文档库", action: model.exportLibrary).disabled(!model.papers.contains { !$0.removed })
+                    Button(L("导出文档库"), action: model.exportLibrary).disabled(!model.papers.contains { !$0.removed })
                     if model.checkingVersions.isEmpty {
-                        Button("检查论文新版本") { model.checkPaperVersions(libraryPapers.map(\.id)) }
+                        Button(L("检查论文新版本")) { model.checkPaperVersions(libraryPapers.map(\.id)) }
                             .disabled(!libraryPapers.contains { $0.reference != nil })
-                    } else { Button("停止检查版本", action: model.cancelVersionCheck) }
+                    } else { Button(L("停止检查版本"), action: model.cancelVersionCheck) }
                     Divider()
-                    Button(libraryFilter == .removed ? "返回文档库" : "已移除的文档") {
+                    Button(libraryFilter == .removed ? L("返回文档库") : L("已移除的文档")) {
                         libraryFilter = libraryFilter == .removed ? .all : .removed; query = ""; libraryTag = nil
                     }
                 } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
-                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel("文档库操作")
+                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("文档库操作"))
             } else if page == .media {
                 if !model.mediaLibrary.isEmpty { searchField }
             } else if page == .logs && !model.logs.isEmpty {
                 searchField
                 Button { model.exportLogs(visibleLogs) } label: { Image(systemName: "square.and.arrow.up") }
                     .buttonStyle(RoundButtonStyle(palette: palette))
-                    .disabled(visibleLogs.isEmpty).help("导出当前筛选的日志").accessibilityLabel("导出日志")
+                    .disabled(visibleLogs.isEmpty).help(L("导出当前筛选的日志")).accessibilityLabel(L("导出日志"))
             }
         }.frame(height: 76)
     }
 
     private var downloadActions: some View {
         Menu {
-            Button("从文本文件导入链接…", action: model.importLinks).disabled(model.busy)
+            Button(L("从文本文件导入链接…"), action: model.importLinks).disabled(model.busy)
             if model.hasMediaInput {
-                Toggle("视频仅下载音频", isOn: Binding(get: { model.mediaFormat == .audio }, set: { model.mediaFormat = $0 ? .audio : .automatic }))
+                Toggle(L("视频仅下载音频"), isOn: Binding(get: { model.mediaFormat == .audio }, set: { model.mediaFormat = $0 ? .audio : .automatic }))
                     .disabled(model.busy)
             }
             if model.downloads.contains(where: { $0.canRetry || $0.source == nil }) {
-                Button("复制未完成链接", action: model.copyUnfinished)
+                Button(L("复制未完成链接"), action: model.copyUnfinished)
             }
             Divider()
-            Button("查看日志") { page = .logs }
+            Button(L("查看日志")) { page = .logs }
             Divider()
-            Button("清空下载记录…", role: .destructive) { confirmingClearDownloads = true }
+            Button(L("清空下载记录…"), role: .destructive) { confirmingClearDownloads = true }
                 .disabled(!model.canClearDownloadRecords)
         } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32).contentShape(Rectangle()) }
             .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
-            .help("更多下载操作").accessibilityLabel("下载操作")
+            .help(L("更多下载操作")).accessibilityLabel(L("下载操作"))
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("添加链接").font(.system(size: 14, weight: .medium))
+                Text(L("添加链接")).font(.system(size: 14, weight: .medium))
                 Spacer()
                 if model.hasMediaInput && model.mediaFormat == .audio {
                     Button { model.mediaFormat = .automatic } label: {
-                        Label("仅音频", systemImage: "waveform").font(.system(size: 12)).foregroundStyle(secondary)
-                    }.help("视频链接仅保存音频，点按恢复下载视频").accessibilityLabel("仅音频模式，点按恢复视频").disabled(model.busy)
+                        Label(L("仅音频"), systemImage: "waveform").font(.system(size: 12)).foregroundStyle(secondary)
+                    }.help(L("视频链接仅保存音频，点按恢复下载视频")).accessibilityLabel(L("仅音频模式，点按恢复视频")).disabled(model.busy)
                 }
                 Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
-                    .help("追加剪贴板中的链接").accessibilityLabel("粘贴链接").disabled(model.busy)
+                    .help(L("追加剪贴板中的链接")).accessibilityLabel(L("粘贴链接")).disabled(model.busy)
                 downloadActions
             }.buttonStyle(.plain).padding(.leading, 20).padding(.trailing, 24).padding(.top, 12)
             LinkInput(model: model, focused: $inputFocused, palette: palette)
@@ -336,14 +338,14 @@ struct DownloaderView: View {
                         else { Image(systemName: "stop.fill").font(.system(size: 14, weight: .semibold)) }
                     }.buttonStyle(PrimaryActionStyle(palette: palette))
                         .keyboardShortcut(searchFocused ? nil : .cancelAction).disabled(model.cancelling)
-                        .help(model.cancelling ? "正在取消" : "取消下载（Esc）")
-                        .accessibilityLabel(model.cancelling ? "正在取消" : "取消下载")
+                        .help(model.cancelling ? L("正在取消") : L("取消下载（Esc）"))
+                        .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
                 } else {
                     Button(action: model.start) { Image(systemName: "arrow.down") }
                         .buttonStyle(PrimaryActionStyle(palette: palette))
                         .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
-                        .disabled(model.tokenCount == 0).help("开始下载（\(model.shortcuts[.download].label)）")
-                        .accessibilityLabel("开始下载")
+                        .disabled(model.tokenCount == 0).help(L("开始下载（\(model.shortcuts[.download].label)）"))
+                        .accessibilityLabel(L("开始下载"))
                 }
             }.padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 18)
         }
@@ -366,10 +368,10 @@ struct DownloaderView: View {
 
     private var searchLabel: String {
         switch page {
-        case .downloads: return "搜索下载"
-        case .library: return "搜索文档"
-        case .media: return "搜索媒体"
-        case .logs: return "搜索日志"
+        case .downloads: return L("搜索下载")
+        case .library: return L("搜索文档")
+        case .media: return L("搜索媒体")
+        case .logs: return L("搜索日志")
         }
     }
 
@@ -393,7 +395,7 @@ struct DownloaderView: View {
                 }
             if !query.isEmpty {
                 Button { query = ""; searchFocused = true } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary).frame(width: 24, height: 24).contentShape(Rectangle()) }
-                    .buttonStyle(.plain).accessibilityLabel("清除搜索")
+                    .buttonStyle(.plain).accessibilityLabel(L("清除搜索"))
             }
         }.padding(.horizontal, 10)
             .frame(width: 178, height: 32)
@@ -413,37 +415,37 @@ struct DownloaderView: View {
             HStack(spacing: 4) {
                 if page == .downloads {
                     Menu {
-                        Text("下载状态")
+                        Text(L("下载状态"))
                         ForEach(QueueFilter.allCases, id: \.self) { option in
                             Button { filter = option } label: {
-                                if option == filter { Label(option.rawValue, systemImage: "checkmark") }
-                                else { Text(option.rawValue) }
+                                if option == filter { Label(L(option.rawValue), systemImage: "checkmark") }
+                                else { Text(L(option.rawValue)) }
                             }
                         }
                     } label: {
-                        Text(filter.rawValue).font(.system(size: 13, weight: .medium)).foregroundStyle(secondary)
+                        Text(L(filter.rawValue)).font(.system(size: 13, weight: .medium)).foregroundStyle(secondary)
                     }
-                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: "下载状态"))
+                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: L("下载状态")))
                     .menuIndicator(.hidden).fixedSize()
-                    .help("筛选下载状态").accessibilityLabel("下载状态：\(filter.rawValue)")
+                    .help(L("筛选下载状态")).accessibilityLabel(L("下载状态：\(filter.rawValue)"))
                     Spacer(minLength: 0)
                     if filter == .failed && query.isEmpty && model.retryCount > 1 && !model.busy {
-                        Button("批量重试") { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
+                        Button(L("批量重试")) { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
                             .padding(.trailing, 8)
                     }
                     searchField
                 } else {
                     if libraryFilter == .removed {
-                        Button { libraryFilter = .all } label: { Label("已移除", systemImage: "chevron.left").font(.system(size: 13)) }
-                            .buttonStyle(.plain).foregroundStyle(secondary).help("返回文档库")
+                        Button { libraryFilter = .all } label: { Label(L("已移除"), systemImage: "chevron.left").font(.system(size: 13)) }
+                            .buttonStyle(.plain).foregroundStyle(secondary).help(L("返回文档库"))
                     }
-                    else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { $0.rawValue }, palette: palette) }
+                    else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { L($0.rawValue) }, palette: palette) }
                     Spacer()
                     if let tag = libraryTag {
                         Button { libraryTag = nil } label: {
                             HStack(spacing: 6) { Text(tag).lineLimit(1); Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }
-                        }.buttonStyle(QuietButtonStyle(palette: palette)).help("清除标签筛选")
-                            .accessibilityLabel("清除标签筛选：\(tag)")
+                        }.buttonStyle(QuietButtonStyle(palette: palette)).help(L("清除标签筛选"))
+                            .accessibilityLabel(L("清除标签筛选：\(tag)"))
                     }
                 }
             }.frame(height: 36)
@@ -501,14 +503,14 @@ struct DownloaderView: View {
     }
 
     private var emptyMessage: String {
-        if !query.isEmpty { return "没有匹配的结果" }
-        if page == .media { return "暂无媒体" }
+        if !query.isEmpty { return L("没有匹配的结果") }
+        if page == .media { return L("暂无媒体") }
         if page == .library {
-            if libraryTag != nil { return "没有匹配的结果" }
-            switch libraryFilter { case .all: return "暂无文档"; case .favorites: return "暂无收藏"; case .unread: return "暂无未读文档"; case .removed: return "暂无已移除文档" }
+            if libraryTag != nil { return L("没有匹配的结果") }
+            switch libraryFilter { case .all: return L("暂无文档"); case .favorites: return L("暂无收藏"); case .unread: return L("暂无未读文档"); case .removed: return L("暂无已移除文档") }
         }
-        if !model.downloads.isEmpty { return "暂无\(filter.rawValue)任务" }
-        return "粘贴链接，开始下载"
+        if !model.downloads.isEmpty { return L("暂无\(filter.rawValue)任务") }
+        return L("粘贴链接，开始下载")
     }
 
     private func empty(icon: String, text: String) -> some View {
@@ -525,25 +527,25 @@ struct DownloaderView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let error = model.directoryNotice ?? model.notice ?? model.libraryNotice ?? model.mediaLibraryNotice ?? model.persistenceNotice {
-                Label(error, systemImage: "exclamationmark.circle").font(.system(size: 12)).foregroundStyle(UIColors.error)
+                Label(L(error), systemImage: "exclamationmark.circle").font(.system(size: 12)).foregroundStyle(UIColors.error)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
                 if page == .downloads {
                     if model.busy { ProgressView().controlSize(.mini).frame(width: 12) }
                     else if !model.summary.isEmpty { Circle().fill(accent).frame(width: 5, height: 5) }
-                    Text(model.summary).lineLimit(1)
+                    Text(L(model.summary)).lineLimit(1)
                     Spacer()
-                    if !model.downloads.isEmpty { Text("\(visibleItems.count) 项").monospacedDigit() }
+                    if !model.downloads.isEmpty { Text(L("\(visibleItems.count) 项")).monospacedDigit() }
                 } else if page == .logs {
-                    Text("\(visibleLogs.count) 条").monospacedDigit()
+                    Text(L("\(visibleLogs.count) 条")).monospacedDigit()
                     Spacer()
                 } else if page == .media {
-                    Spacer(); Text("\(visibleItems.count) 项").monospacedDigit()
+                    Spacer(); Text(L("\(visibleItems.count) 项")).monospacedDigit()
                 } else {
-                    if model.importingPDFs { Text("正在导入…") }
-                    else if !model.checkingVersions.isEmpty { Text("正在检查版本 · 剩余 \(model.checkingVersions.count) 篇") }
-                    Spacer(); Text("\(libraryPapers.count) 篇").monospacedDigit()
+                    if model.importingPDFs { Text(L("正在导入…")) }
+                    else if !model.checkingVersions.isEmpty { Text(L("正在检查版本 · 剩余 \(model.checkingVersions.count) 篇")) }
+                    Spacer(); Text(L("\(libraryPapers.count) 篇")).monospacedDigit()
                 }
             }.font(.system(size: 11)).foregroundStyle(secondary).frame(height: 18)
         }
@@ -579,6 +581,7 @@ struct LogHeading {
 }
 
 struct LogRow: View {
+    @ObservedObject private var localization = AppLocalization.shared
     static let messageInset: CGFloat = 64 + 12 + 16 + 12
     let entry: ActivityEntry
     let palette: ThemePalette
@@ -588,26 +591,27 @@ struct LogRow: View {
     }
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Text(entry.date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits)))
+            Text(entry.date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits).locale(L10n.locale)))
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(ThemePalette.color(palette.secondary))
                 .frame(width: 64, height: 16, alignment: .leading)
-                .help(entry.date.formatted(date: .complete, time: .standard))
+                .help(L10n.date(entry.date, dateStyle: .complete))
             Image(systemName: entry.level.symbol).font(.system(size: 12)).foregroundStyle(color).frame(width: 16, height: 16)
                 .opacity(entry.level == .info ? 0 : 1)
-                .accessibilityLabel(entry.level.label)
-            Text(entry.message).font(.system(size: 12)).foregroundStyle(entry.level == .error ? color : ThemePalette.color(palette.text))
+                .accessibilityLabel(L(entry.level.label))
+            Text(L(entry.message)).font(.system(size: 12)).foregroundStyle(entry.level == .error ? color : ThemePalette.color(palette.text))
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading).textSelection(.enabled)
         }.padding(.vertical, 8).padding(.horizontal, horizontalInset)
-            .contentShape(Rectangle()).help(entry.subject ?? entry.message)
+            .contentShape(Rectangle()).help(entry.subject ?? L(entry.message))
             .accessibilityElement(children: .ignore).accessibilityLabel(entry.line)
             .contextMenu {
-                Button("复制日志") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.line, forType: .string) }
+                Button(L("复制日志")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.line, forType: .string) }
             }
     }
 }
 
 struct DownloadRow: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let item: DownloadItem
     let model: DownloadModel
     let busy: Bool
@@ -631,7 +635,7 @@ struct DownloadRow: View {
             Image(systemName: item.mediaFormat == .audio ? "waveform" : item.source?.symbol ?? "doc")
                 .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)
                 .frame(width: 28, height: 34)
-                .accessibilityLabel(item.state.label)
+                .accessibilityLabel(L(item.state.label))
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.title).font(.system(size: 13, weight: .medium)).lineSpacing(3)
                     .lineLimit(2).help(item.title)
@@ -640,36 +644,36 @@ struct DownloadRow: View {
                     else if let host = item.directURL?.host, item.documentTitle != nil { Text(host).lineLimit(1) }
                     if !inMediaLibrary || item.state == .missing {
                     HStack(spacing: 4) {
-                        Image(systemName: item.state.symbol).font(.system(size: 10))
-                        Text(item.state.label)
+                        Image(systemName: item.state.symbol).font(.system(size: 10)).accessibilityHidden(true)
+                        Text(L(item.state.label))
                     }.foregroundStyle(item.state.color(palette)).lineLimit(1)
                     }
-                    if let files = item.additionalURLs, !files.isEmpty { Text("\(files.count + 1) 个文件") }
+                    if let files = item.additionalURLs, !files.isEmpty { Text(L("\(files.count + 1) 个文件")) }
                 }.font(.system(size: 11)).foregroundStyle(secondary)
                 if let progress = item.progress, item.state == .downloading {
                     VStack(alignment: .leading, spacing: 6) {
                         if let fraction = progress.fraction { ProgressView(value: fraction).tint(ThemePalette.color(palette.accent)).progressViewStyle(.linear) }
-                        Text(progressText(progress)).font(.system(size: 11)).monospacedDigit().foregroundStyle(secondary)
+                        Text(L(progressText(progress))).font(.system(size: 11)).monospacedDigit().foregroundStyle(secondary)
                     }.frame(maxWidth: 320)
                 }
                 if let error = item.error {
-                    Text(error).font(.system(size: 11)).lineSpacing(3)
+                    Text(L(error)).font(.system(size: 11)).lineSpacing(3)
                         .foregroundStyle(item.state == .paused || item.state == .cancelled ? secondary : UIColors.error)
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
             HStack(spacing: 6) {
                 if let url = item.savedURL, !inMediaLibrary || item.state != .missing || item.localURLs.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
-                    Button("打开") { model.openFile(item) }.buttonStyle(QuietButtonStyle(palette: palette)).help(url.path)
+                    Button(L("打开")) { model.openFile(item) }.buttonStyle(QuietButtonStyle(palette: palette)).help(url.path)
                 } else if item.canRetry {
-                    Button("重试", action: retry)
+                    Button(L("重试"), action: retry)
                         .buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
                 } else if item.source == nil {
-                    Button("修改") { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
+                    Button(L("修改")) { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
                 }
                 Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                     .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
-                    .accessibilityLabel("\(item.title)的更多操作")
+                    .accessibilityLabel(L("\(item.title)的更多操作"))
             }.padding(.top, 1)
         }.padding(.horizontal, 10).padding(.vertical, 13)
             .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
@@ -685,22 +689,22 @@ struct DownloadRow: View {
 
     @ViewBuilder private var actions: some View {
         if !item.localURLs.isEmpty {
-            Button("快速预览") { select(); model.preview(item) }.help("选中文件后按空格")
-            Button("在 Finder 中显示") { model.openFile(item, reveal: true) }
+            Button(L("快速预览")) { select(); model.preview(item) }.help(L("选中文件后按空格"))
+            Button(L("在 Finder 中显示")) { model.openFile(item, reveal: true) }
             Divider()
         }
-        Button("详情…") { select(); model.diagnosticItem = item }.help("选中文件后按 \(model.shortcuts[.details].label)")
+        Button(L("详情…")) { select(); model.diagnosticItem = item }.help(L("选中文件后按 \(model.shortcuts[.details].label)"))
         if item.canRetry && item.savedURL != nil {
-            Button("重新下载缺失文件", action: retry).disabled(busy)
+            Button(L("重新下载缺失文件"), action: retry).disabled(busy)
         }
         if let source = item.source {
-            Button("打开来源页面") { model.openSource(item) }
-            Button("复制来源链接") {
+            Button(L("打开来源页面")) { model.openSource(item) }
+            Button(L("复制来源链接")) {
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.webURL.absoluteString, forType: .string)
             }
         }
         if let url = item.savedURL {
-            Button("复制文件名") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
+            Button(L("复制文件名")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
         }
     }
 
@@ -719,6 +723,7 @@ struct DownloadRow: View {
 }
 
 struct LogContent: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let entries: [ActivityEntry]
     let hasLogs: Bool
     let query: String
@@ -738,7 +743,7 @@ struct LogContent: View {
         VStack(spacing: 16) {
             if hasLogs {
                 HStack(spacing: 4) {
-                    FilterTabs(options: [nil] + ActivityLevel.allCases.map(Optional.some), selection: $level, title: { $0?.label ?? "全部" }, palette: palette)
+                    FilterTabs(options: [nil] + ActivityLevel.allCases.map(Optional.some), selection: $level, title: { L($0?.label ?? "全部") }, palette: palette)
                     Spacer()
                     if position.canScroll && !entries.isEmpty {
                         Button { jump(toBottom: !pointsUp) } label: {
@@ -746,15 +751,15 @@ struct LogContent: View {
                                 .rotationEffect(.degrees(pointsUp ? 180 : 0))
                                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: pointsUp)
                         }.buttonStyle(RoundButtonStyle(palette: palette))
-                            .help(pointsUp ? "回到最早日志" : "前往最新日志")
-                            .accessibilityLabel(pointsUp ? "回到最早日志" : "前往最新日志")
+                            .help(pointsUp ? L("回到最早日志") : L("前往最新日志"))
+                            .accessibilityLabel(pointsUp ? L("回到最早日志") : L("前往最新日志"))
                     }
                 }.frame(height: 36)
             }
             if entries.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "text.alignleft").font(.system(size: 28, weight: .light))
-                    Text(query.isEmpty && level == nil ? "暂无日志" : "没有匹配的日志").font(.system(size: 13))
+                    Text(query.isEmpty && level == nil ? L("暂无日志") : L("没有匹配的日志")).font(.system(size: 13))
                 }.foregroundStyle(secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
             } else {
@@ -766,7 +771,7 @@ struct LogContent: View {
                                     if let group = headers[entry.id], group.subject != nil || group.date != nil {
                                         VStack(alignment: .leading, spacing: 8) {
                                             if let date = group.date {
-                                                Text(date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
+                                                Text(L10n.date(date, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
                                             }
                                             if let subject = group.subject {
                                                 Text(subject).font(.system(size: 12, weight: .medium)).lineLimit(1).help(subject).textSelection(.enabled)
@@ -805,16 +810,17 @@ struct LogContent: View {
 }
 
 struct DirectoryMenu: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     let palette: ThemePalette
     var body: some View {
         Menu {
             Text(model.directoryLabel)
-            Text("自动归入 Papers、Videos、Audio、Images")
-            if !model.directoryExists { Text("首次下载时创建文件夹") }
+            Text(L("自动归入 Papers、Videos、Audio、Images"))
+            if !model.directoryExists { Text(L("首次下载时创建文件夹")) }
             Divider()
-            Button("更改保存位置…", action: model.chooseDirectory).disabled(model.busy)
-            Button("在访达中打开", action: model.openDirectory).disabled(!model.directoryExists)
+            Button(L("更改保存位置…"), action: model.chooseDirectory).disabled(model.busy)
+            Button(L("在访达中打开"), action: model.openDirectory).disabled(!model.directoryExists)
         } label: {
             Label(model.directory.lastPathComponent.isEmpty ? "/" : model.directory.lastPathComponent, systemImage: "folder")
                 .font(.system(size: 12)).lineLimit(1).truncationMode(.middle).foregroundStyle(ThemePalette.color(palette.secondary))
@@ -822,8 +828,8 @@ struct DirectoryMenu: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 300, alignment: .leading)
             .padding(.leading, -12)
-            .help("\(model.directoryLabel)\n自动归入 Papers、Videos、Audio、Images")
-            .accessibilityLabel("保存位置：\(model.directoryLabel)，自动按类型归档")
+            .help(L("\(model.directoryLabel)\n自动归入 Papers、Videos、Audio、Images"))
+            .accessibilityLabel(L("保存位置：\(model.directoryLabel)，自动按类型归档"))
     }
 }
 

@@ -9,13 +9,13 @@ on:
     paths-ignore:
       - '*.md'
       - '.github/release-notes.md'
-      - 'Resources/LeafpeakMark.png'
+      - 'Resources/FolioakMark.png'
   pull_request:
     branches: [main]
     paths-ignore:
       - '*.md'
       - '.github/release-notes.md'
-      - 'Resources/LeafpeakMark.png'
+      - 'Resources/FolioakMark.png'
   workflow_dispatch:
 
 permissions:
@@ -76,8 +76,8 @@ jobs:
         with:
           name: macos-arm64
           path: |
-            dist/Leafpeak-*-macos-arm64.zip
-            dist/Leafpeak-*-macos-arm64.dmg
+            dist/Folioak-*-macos-arm64.zip
+            dist/Folioak-*-macos-arm64.dmg
             dist/SHA256SUMS.txt
           if-no-files-found: error
           compression-level: 0
@@ -111,7 +111,7 @@ jobs:
         run: |
           cd dist
           sha256sum --check SHA256SUMS.txt
-          asset_name="Leafpeak-$RELEASE_TAG-macos-arm64"
+          asset_name="Folioak-$RELEASE_TAG-macos-arm64"
           test -f "$asset_name.zip"
           test -f "$asset_name.dmg"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
@@ -119,6 +119,6 @@ jobs:
             exit 1
           fi
           gh release create "$RELEASE_TAG" "$asset_name.zip" "$asset_name.dmg" SHA256SUMS.txt \
-            --draft --verify-tag --target "$RELEASE_COMMIT" --title "Leafpeak $RELEASE_TAG" \
+            --draft --verify-tag --target "$RELEASE_COMMIT" --title "Folioak $RELEASE_TAG" \
             --notes-file ../.github/release-notes.md
           gh release edit "$RELEASE_TAG" --draft=false

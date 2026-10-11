@@ -235,8 +235,8 @@ extension CoreTests {
         let prefsText = String(decoding: prefsOut.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         try expect(prefsText == root.appendingPathComponent("preferences-folder").path + "\nidentifierTitle\n", "shared preferences can be read by another process")
 
-        let cli = executable.deletingLastPathComponent().appendingPathComponent("arxiv-download-test")
-        let embedded = root.appendingPathComponent("arXiv下载器.app/Contents/MacOS/arxiv-download")
+        let cli = executable.deletingLastPathComponent().appendingPathComponent("folioak-test")
+        let embedded = root.appendingPathComponent("Folioak.app/Contents/MacOS/folioak")
         try FileManager.default.createDirectory(at: embedded.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: cli, to: embedded)
         let info = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources/Info.plist")

@@ -1,7 +1,7 @@
-Leafpeak 2.3.8
+Folioak 2.4.0
 
-- 现有「详情…」入口加入文件信息：通用文件属性、PDF 页数与首页尺寸、视频分辨率/帧率/编码/比特率，以及音频和图片参数。支持文档库、媒体库和导入的 PDF，清空下载记录后仍可查看。
-- 列表失去焦点时收起选中底色，返回列表时恢复；选中行采用 8 pt 连续圆角。
-- 支持直接输入完整 B 站 BV 号，自动沿用现有视频解析流程。
+- 产品与仓库统一更名为 Folioak，应用、命令行、安装包和文档同步更新；新图标以书页与橡叶呼应名称。
+- 设置 → 通用新增语言：跟随系统、简体中文、English。切换立即生效，保留输入、选择与已有资料内容。
+- 命令行入口改为 `folioak`；包内保留 `leafpick` 和 `arxiv-download` 兼容入口。已有 shell alias 若指向旧应用路径，请改为 `/Applications/Folioak.app/Contents/MacOS/folioak`。
 
-支持 Apple Silicon、macOS 13 及以上。媒体组件完整内置，升级保留保存目录、历史记录与资料库。
+支持 Apple Silicon、macOS 13 及以上。媒体组件完整内置。升级时退出旧应用，将 Folioak.app 放入 Applications 并移走旧版应用；偏好、保存目录、草稿、下载记录与资料库继续沿用，已有文件不移动。全新安装默认保存到 ~/Downloads/Folioak。

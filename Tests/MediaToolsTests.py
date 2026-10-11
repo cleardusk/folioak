@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix='media-tools-', dir=ROOT / 'build') as t
     result = run([tools / 'yt-dlp', '--ignore-config', '--no-plugin-dirs', '--plugin-dirs',
                   ROOT / 'Tests/Fixtures/EJS', '--no-remote-components', '--no-update', '--no-cache-dir',
                   '--no-js-runtimes', '--js-runtimes', f'quickjs:{qjs}', '--skip-download',
-                  '--print', 'title', 'leafpick-ejs:fixture'])
+                  '--print', 'title', 'folioak-ejs:fixture'])
     assert result.strip() == 'EJS provider passed', result
 
     def probe(path):

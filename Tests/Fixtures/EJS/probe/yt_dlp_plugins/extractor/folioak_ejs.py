@@ -16,8 +16,8 @@ class Logger:
     def warning(self, message, **_): raise AssertionError(message)
 
 
-class LeafpickEJSIE(InfoExtractor):
-    _VALID_URL = r'leafpick-ejs:(?P<id>fixture)'
+class FolioakEJSIE(InfoExtractor):
+    _VALID_URL = r'folioak-ejs:(?P<id>fixture)'
 
     def _real_extract(self, url):
         provider = QuickJSJCP(self, Logger(), {})
@@ -26,7 +26,7 @@ class LeafpickEJSIE(InfoExtractor):
         inputs = ['IlLiA21ny7gqA2m4p37', 'eabGFpsUKuWHXGh6FR4', 'eabGF/ps%UK=uWHXGh6FR4']
         requests = [JsChallengeRequest(JsChallengeType.N, NChallengeInput('fixture', inputs)),
                     JsChallengeRequest(JsChallengeType.SIG, SigChallengeInput('fixture', [signature]))]
-        if player_path := os.environ.get('LEAFPICK_EJS_PLAYER'):
+        if player_path := os.environ.get('FOLIOAK_EJS_PLAYER'):
             # Optional live validation: upstream EJS 0.8.0 player 74edf1a3 fixtures.
             player = Path(player_path).read_text()
             self._load_player = lambda **_: player

@@ -58,6 +58,7 @@ enum DownloadFolder: String, Sendable {
 }
 
 struct DownloadPreferences {
+    // Stable storage identity across product renames; also shared with old CLIs.
     static let domain = "local.paperrepo.arxiv-downloader"
     static var shared: UserDefaults {
         // In the app this is its existing application domain; the standalone CLI
@@ -68,13 +69,14 @@ struct DownloadPreferences {
     let directory: URL
     let naming: NamingStyle
     init(_ preferences: UserDefaults, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
-        let oldDefault = home.appendingPathComponent("Downloads/Leafpick", isDirectory: true)
-        var isDirectory: ObjCBool = false
-        let usedOldDefault = FileManager.default.fileExists(atPath: oldDefault.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        let oldDefault = ["Leafpick", "Leafpeak"].map { home.appendingPathComponent("Downloads/\($0)", isDirectory: true) }.first {
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
         // Keep legacy folder preferences and existing file URLs intact. Their
         // meanings differ from the new root and cannot be safely inferred.
         directory = preferences.string(forKey: "downloadRootDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? (usedOldDefault ? oldDefault : home.appendingPathComponent("Downloads/Leafpeak", isDirectory: true))
+            ?? oldDefault ?? home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
         naming = NamingStyle(rawValue: preferences.string(forKey: "namingStyle") ?? "") ?? .dateTitle
     }
 }

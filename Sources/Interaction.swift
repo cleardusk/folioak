@@ -93,6 +93,7 @@ struct MenuChevron: NSViewRepresentable {
 }
 
 struct PaperListKeyboard: NSViewRepresentable {
+    @ObservedObject private var localization = AppLocalization.shared
     enum Action { case up, down, preview, open, diagnostics }
     let request: UUID?
     var detailsShortcut = AppShortcut(key: "i")
@@ -105,6 +106,7 @@ struct PaperListKeyboard: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: KeyView, context: Context) {
+        view.setAccessibilityLabel(L("文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情"))
         view.action = action
         view.detailsShortcut = detailsShortcut
         view.didFocus = didFocus
@@ -125,7 +127,7 @@ struct PaperListKeyboard: NSViewRepresentable {
         init(request: UUID?, didFocus: @escaping (UUID) -> Void, action: @escaping (Action) -> Void) {
             self.request = request; self.didFocus = didFocus; self.action = action
             super.init(frame: .zero)
-            setAccessibilityLabel("文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情")
+            setAccessibilityLabel(L("文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情"))
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
         deinit { windowObservers.forEach(NotificationCenter.default.removeObserver) }
@@ -184,6 +186,7 @@ struct PaperListKeyboard: NSViewRepresentable {
 }
 
 struct TaskDiagnosticView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     let item: DownloadItem
     var libraryPaperID: UUID? = nil
@@ -219,43 +222,43 @@ struct TaskDiagnosticView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
-                Text("详情").font(.system(size: 18, weight: .medium))
+                Text(L("详情")).font(.system(size: 18, weight: .medium))
                 Spacer()
                 Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(RoundButtonStyle(palette: palette)).keyboardShortcut(.cancelAction).accessibilityLabel("关闭详情")
+                    .buttonStyle(RoundButtonStyle(palette: palette)).keyboardShortcut(.cancelAction).accessibilityLabel(L("关闭详情"))
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(current.title).font(.system(size: 14, weight: .medium)).lineLimit(3).textSelection(.enabled)
-                        Text(current.state.label).font(.system(size: 12)).foregroundStyle(current.state.color(palette))
+                        Text(L(current.state.label)).font(.system(size: 12)).foregroundStyle(current.state.color(palette))
                     }
                     ForEach(Array(files.enumerated()), id: \.offset) { index, information in
                         if index > 0 { Divider() }
                         ForEach(Array(information.groups.enumerated()), id: \.offset) { _, group in
                             VStack(alignment: .leading, spacing: 10) {
-                                Text(group.title).font(.system(size: 12, weight: .medium))
+                                Text(L(group.title)).font(.system(size: 12, weight: .medium))
                                 ForEach(Array(group.fields.enumerated()), id: \.offset) { _, field in
                                     HStack(alignment: .top, spacing: 12) {
-                                        Text(field.name).foregroundStyle(ThemePalette.color(palette.secondary)).frame(width: 72, alignment: .leading)
-                                        Text(field.value).frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                                        Text(L(field.name)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(width: L10n.language.code() == "en" ? 104 : 72, alignment: .leading)
+                                        Text(field.name == "尺寸" ? L(field.value) : field.value).frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                                     }.font(.system(size: 12))
                                 }
                             }
                         }
                         if let issue = information.issue {
-                            Text(issue).font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
+                            Text(L(issue)).font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
                         }
                     }
                     if loading {
-                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在读取文件信息…").font(.system(size: 12)) }
+                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text(L("正在读取文件信息…")).font(.system(size: 12)) }
                             .foregroundStyle(ThemePalette.color(palette.secondary))
                     }
                     if hasDiagnostics {
                         if current.localURLs.isEmpty { diagnosticContent }
                         else {
                             Divider()
-                            DisclosureGroup("下载记录", isExpanded: $showingDiagnostics) { diagnosticContent.padding(.top, 12) }
+                            DisclosureGroup(L("下载记录"), isExpanded: $showingDiagnostics) { diagnosticContent.padding(.top, 12) }
                                 .font(.system(size: 12))
                         }
                     }
@@ -264,21 +267,21 @@ struct TaskDiagnosticView: View {
             if hasDiagnostics || (current.canRetry && !model.busy) {
                 HStack {
                     if hasDiagnostics {
-                        Button("复制诊断") {
+                        Button(L("复制诊断")) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(report, forType: .string)
                         }.buttonStyle(QuietButtonStyle(palette: palette))
                     }
                     Spacer()
                     if current.canRetry && !model.busy {
-                        Button("重试", action: retry).buttonStyle(QuietButtonStyle(palette: palette))
+                        Button(L("重试"), action: retry).buttonStyle(QuietButtonStyle(palette: palette))
                     }
                 }
             }
         }.padding(24).frame(width: 500, height: 540)
             .foregroundStyle(ThemePalette.color(palette.text))
             .background(ThemePalette.color(palette.canvas))
-            .task(id: current.localURLs) {
+            .task(id: current.localURLs.map(\.absoluteString).joined(separator: "\n") + L10n.locale.identifier) {
                 files = []; loading = !current.localURLs.isEmpty
                 let record = current, author = paper?.authors ?? current.metadata?.authors?.joined(separator: ", ")
                 do {
@@ -301,7 +304,7 @@ struct TaskDiagnosticView: View {
                 }.transaction { $0.animation = nil }
             }
             if let error = diagnosticTask?.error {
-                Text(ActivityEntry.redacted(error)).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
+                Text(L(ActivityEntry.redacted(error))).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
             }
             if !entries.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
@@ -313,32 +316,32 @@ struct TaskDiagnosticView: View {
     private func timings(_ trace: TaskDiagnostics, now: Date) -> some View {
         VStack(spacing: 9) {
             HStack {
-                Text("本次耗时")
+                Text(L("本次耗时"))
                 Spacer()
-                Text(TaskDiagnostics.time(trace.elapsed(now: now))).monospacedDigit()
-                if trace.retries > 0 { Text("· 重试 \(trace.retries) 次") }
+                Text(L(TaskDiagnostics.time(trace.elapsed(now: now)))).monospacedDigit()
+                if trace.retries > 0 { Text(L("· 重试 \(trace.retries) 次")) }
             }.foregroundStyle(ThemePalette.color(palette.text))
             ForEach(TaskDiagnostics.Phase.allCases, id: \.self) { phase in
                 if trace.duration(phase, now: now) >= 0.05 || trace.phase == phase {
                     HStack {
-                        Text(phase.label)
+                        Text(L(phase.label))
                         Spacer()
-                        Text(TaskDiagnostics.time(trace.duration(phase, now: now))).monospacedDigit()
+                        Text(L(TaskDiagnostics.time(trace.duration(phase, now: now)))).monospacedDigit()
                     }
                 }
             }
         }.font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
     }
     private var report: String {
-        var lines = [current.title, current.state.label]
+        var lines = [current.title, L(current.state.label)]
         if let source = current.source { lines.append(ActivityEntry.redacted(source.webURL.absoluteString)) }
         if let trace = diagnosticTask?.diagnostics {
-            lines.append("本次耗时 \(TaskDiagnostics.time(trace.elapsed())) · 重试 \(trace.retries) 次")
+            lines.append(L("本次耗时 \(TaskDiagnostics.time(trace.elapsed())) · 重试 \(trace.retries) 次"))
             for phase in TaskDiagnostics.Phase.allCases where trace.duration(phase) > 0 {
-                lines.append("\(phase.label) \(TaskDiagnostics.time(trace.duration(phase)))")
+                lines.append("\(L(phase.label)) \(L(TaskDiagnostics.time(trace.duration(phase))))")
             }
         }
-        if let error = diagnosticTask?.error { lines.append(ActivityEntry.redacted(error)) }
+        if let error = diagnosticTask?.error { lines.append(L(ActivityEntry.redacted(error))) }
         lines.append(contentsOf: entries.map(\.line))
         return lines.map(ActivityEntry.redacted).joined(separator: "\n")
     }

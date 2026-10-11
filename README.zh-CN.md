@@ -1,7 +1,7 @@
 <p align="center">
-  <img src="Resources/LeafpeakMark.png" width="96" height="96" alt="Leafpeak logo">
+  <img src="Resources/FolioakMark.png" width="96" height="96" alt="Folioak logo">
 </p>
-<h1 align="center">Leafpeak</h1>
+<h1 align="center">Folioak</h1>
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
 **原生 macOS 下载器，保存论文与媒体。**
@@ -14,15 +14,17 @@
 
 ## 安装
 
-[下载最新版](https://github.com/cleardusk/leafpick/releases/latest) · Apple Silicon · macOS 13+
+[下载最新版](https://github.com/cleardusk/folioak/releases/latest) · Apple Silicon · macOS 13+
 
-打开 DMG，将 Leafpeak 拖入 Applications。当前未做 Apple 公证，首次打开可能需要在系统「隐私与安全性」中允许打开。
+打开 DMG，将 Folioak 拖入 Applications。当前未做 Apple 公证，首次打开可能需要在系统「隐私与安全性」中允许打开。
 
 ## 使用
 
 粘贴或拖入链接，点击下载按钮或按 `⌘ Return`；再次点击可停止。支持多条链接、失败重试和下载后快速预览。
 
-首次启动自动创建 `~/Downloads/Leafpeak`；分类子文件夹按需创建。点击目录即可更改保存位置。升级保留已有设置、文件和资料库。
+在「设置 → 通用 → 语言」选择跟随系统、简体中文或 English，切换立即生效。
+
+全新安装默认保存到 `~/Downloads/Folioak`；分类子文件夹按需创建。点击目录即可更改保存位置。升级保留已有设置、文件和资料库；从旧品牌升级时，退出旧应用，安装 Folioak 后将旧应用移出 Applications。
 
 [命令行用法](CLI-README.md)
 

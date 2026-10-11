@@ -14,7 +14,7 @@ extension CoreTests {
         try expect(try PaperInput.captured("[PDF](\(signed))") == signed, "capture preserves signed URL punctuation")
         try expect(try PaperInput.captured("bad-link") == "bad-link", "unrecognized input remains editable")
         let bvInput = "BV1MaHp6KENU"
-        let bvSuite = "leafpeak-bv-capture-\(UUID().uuidString)", bvPreferences = UserDefaults(suiteName: bvSuite)!
+        let bvSuite = "folioak-bv-capture-\(UUID().uuidString)", bvPreferences = UserDefaults(suiteName: bvSuite)!
         defer { bvPreferences.removePersistentDomain(forName: bvSuite) }
         let bvModel = DownloadModel(preferences: bvPreferences)
         bvModel.appendInput(bvInput)
@@ -48,7 +48,7 @@ extension CoreTests {
         do { _ = try await waiting.value; throw TestFailure.failed("stdin cancellation ignored") } catch is CancellationError { }
         try held.fileHandleForWriting.close()
 
-        let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/arxiv-download-test")
+        let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/folioak-test")
         for signal in [SIGINT, SIGTERM] {
             let process = Process(); let input = Pipe(); let output = Pipe(); let errors = Pipe()
             process.executableURL = executable; process.arguments = ["--json", "--verbose"]

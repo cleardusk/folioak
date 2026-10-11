@@ -26,12 +26,12 @@ enum AppTheme: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .native: return "暖砂"
-        case .graphite: return "石墨"
-        case .iris: return "鸢尾"
-        case .lagoon: return "海湾"
-        case .amber: return "琥珀"
-        case .midnight: return "午夜"
+        case .native: return L("暖砂")
+        case .graphite: return L("石墨")
+        case .iris: return L("鸢尾")
+        case .lagoon: return L("海湾")
+        case .amber: return L("琥珀")
+        case .midnight: return L("午夜")
         }
     }
 
@@ -82,6 +82,7 @@ struct PrimaryActionStyle: ButtonStyle {
 }
 
 struct ThemeChoice: View {
+    @ObservedObject private var localization = AppLocalization.shared
     static let previewHeight: CGFloat = 41
     let theme: AppTheme
     let selected: Bool
@@ -110,7 +111,7 @@ struct ThemeChoice: View {
                 }.font(.system(size: 11, weight: selected ? .semibold : .regular))
             }.frame(maxWidth: .infinity).contentShape(Rectangle())
         }.buttonStyle(.plain)
-            .accessibilityLabel("\(theme.label)主题")
-            .accessibilityValue(selected ? "已选中" : "未选中")
+            .accessibilityLabel(L("\(theme.label)主题"))
+            .accessibilityValue(selected ? L("已选中") : L("未选中"))
     }
 }

@@ -23,12 +23,12 @@ fi
 ./build.command
 staging_dir=$(mktemp -d "$project_dir/build/package.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT
-app_dir="$project_dir/dist/Leafpeak.app"
-asset_name="Leafpeak-v$version-macos-arm64"
+app_dir="$project_dir/dist/Folioak.app"
+asset_name="Folioak-v$version-macos-arm64"
 ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$staging_dir/$asset_name.zip"
 ditto -x -k "$staging_dir/$asset_name.zip" "$staging_dir/unpacked"
-codesign --verify --deep --strict "$staging_dir/unpacked/Leafpeak.app"
-media_dir="$staging_dir/unpacked/Leafpeak.app/Contents/Resources/media-tools"
+codesign --verify --deep --strict "$staging_dir/unpacked/Folioak.app"
+media_dir="$staging_dir/unpacked/Folioak.app/Contents/Resources/media-tools"
 for binary in "$media_dir/ffmpeg" "$media_dir/ffprobe" "$media_dir/"*.dylib; do
   codesign --verify --strict "$binary"
 done
@@ -37,14 +37,24 @@ done
 codesign --verify --strict "$media_dir/qjs"
 "$media_dir/yt-dlp" --ignore-config --no-plugin-dirs --plugin-dirs "$project_dir/Tests/Fixtures/EJS" \
   --no-remote-components --no-update --no-cache-dir --no-js-runtimes --js-runtimes "quickjs:$media_dir/qjs" \
-  --skip-download --print title leafpick-ejs:fixture | /usr/bin/grep -qx 'EJS provider passed'
-xcrun lipo "$staging_dir/unpacked/Leafpeak.app/Contents/MacOS/LeafpeakApp" -verify_arch arm64
-bundled_cli="$staging_dir/unpacked/Leafpeak.app/Contents/MacOS/leafpick"
+  --skip-download --print title folioak-ejs:fixture | /usr/bin/grep -qx 'EJS provider passed'
+xcrun lipo "$staging_dir/unpacked/Folioak.app/Contents/MacOS/FolioakApp" -verify_arch arm64
+bundled_cli="$staging_dir/unpacked/Folioak.app/Contents/MacOS/folioak"
 codesign --verify --strict "$bundled_cli"
 xcrun lipo "$bundled_cli" -verify_arch arm64
 test "$("$bundled_cli" --version)" = "$version"
 "$bundled_cli" --help > /dev/null
-cmp "$bundled_cli" "$project_dir/dist/leafpick"
+cmp "$bundled_cli" "$project_dir/dist/folioak"
+for alias_name in leafpick arxiv-download; do
+  alias_path="$staging_dir/unpacked/Folioak.app/Contents/MacOS/$alias_name"
+  test "$(readlink "$alias_path")" = folioak
+  test "$("$alias_path" --version)" = "$version"
+  "$alias_path" --help | /usr/bin/grep -q 'folioak'
+  cmp "$bundled_cli" "$alias_path"
+done
+test -s "$staging_dir/unpacked/Folioak.app/Contents/Resources/en.lproj/Localizable.strings"
+test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$staging_dir/unpacked/Folioak.app/Contents/Info.plist")" = 'local.paperrepo.arxiv-downloader'
+test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$staging_dir/unpacked/Folioak.app/Contents/Info.plist")" = FolioakApp
 invalid_status=0
 "$bundled_cli" not-an-arxiv-link --json > "$staging_dir/invalid.json" 2> "$staging_dir/invalid.stderr" || invalid_status=$?
 if [[ "$invalid_status" != 1 ]]; then
@@ -57,10 +67,10 @@ let report = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURL
 let rows = report["results"] as! [[String: Any]]
 precondition(report["schema"] as? Int == 1 && rows.count == 1 && rows[0]["status"] as? String == "failed")' "$staging_dir/invalid.json"
 mkdir -p "$staging_dir/dmg"
-ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/Leafpeak.app"
+ditto --norsrc --noextattr "$app_dir" "$staging_dir/dmg/Folioak.app"
 ln -s /Applications "$staging_dir/dmg/Applications"
-# LZMA disk images are supported since macOS 10.15; Leafpeak requires macOS 13.
-hdiutil create -volname 'Leafpeak' -srcfolder "$staging_dir/dmg" -format ULMO "$staging_dir/$asset_name.dmg"
+# LZMA disk images are supported since macOS 10.15; Folioak requires macOS 13.
+hdiutil create -volname 'Folioak' -srcfolder "$staging_dir/dmg" -format ULMO "$staging_dir/$asset_name.dmg"
 hdiutil verify "$staging_dir/$asset_name.dmg"
 mv -f "$staging_dir/$asset_name.zip" "$project_dir/dist/$asset_name.zip"
 mv -f "$staging_dir/$asset_name.dmg" "$project_dir/dist/$asset_name.dmg"

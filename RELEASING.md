@@ -1,6 +1,6 @@
 # 构建与发布
 
-面向 Apple Silicon / macOS 13+。普通用户从 [Releases](https://github.com/cleardusk/leafpick/releases/latest) 安装，无需开发工具；开发环境见 [CONTRIBUTING](CONTRIBUTING.md)。
+面向 Apple Silicon / macOS 13+。普通用户从 [Releases](https://github.com/cleardusk/folioak/releases/latest) 安装，无需开发工具；开发环境见 [CONTRIBUTING](CONTRIBUTING.md)。
 
 ## 本地检查
 
@@ -23,7 +23,7 @@
 
 ```sh
 version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
-git tag -a "v$version" -m "Leafpeak $version"
+git tag -a "v$version" -m "Folioak $version"
 git push origin "v$version"
 ```
 
@@ -37,6 +37,8 @@ CI 固定 Xcode 26.3 / macOS SDK 26.2，并校验 arm64；最低运行系统仍�
 
 ## 本机更新
 
-退出应用，备份旧 `.app`、偏好及已有 `workspace.json`、`library.json`、`media-library.json`。核验已发布 ZIP 的 SHA-256、签名和版本后替换 `/Applications/Leafpeak.app`，启动确认原草稿、目录和资料库保留。不要把 QA 状态带入用户环境。
+退出应用，备份旧 `.app`、偏好及已有 `workspace.json`、`library.json`、`media-library.json`。核验已发布 ZIP 的 SHA-256、签名和版本后替换 `/Applications/Folioak.app`，启动确认原草稿、目录和资料库保留。不要把 QA 状态带入用户环境。
+
+从旧品牌升级时，将旧应用移入备份，避免同时启动两个共享同一数据域的应用。数据域与文件来源属性继续使用 `local.paperrepo.arxiv-downloader`，这是兼容标识，不随产品名改变。已有保存目录和文件路径保持原样；无保存目录偏好但存在旧默认目录时继续沿用。已有 shell alias 若写死旧 `.app` 路径，需要更新，见 [CLI 说明](CLI-README.md)。
 
 目前为 ad-hoc 签名并启用 Hardened Runtime，尚无 Developer ID 签名或 Apple 公证。公开分发的首次打开仍可能需要用户在系统「隐私与安全性」中允许。

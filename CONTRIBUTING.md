@@ -1,19 +1,19 @@
 # Development
 
-Leafpeak is a native macOS app with an embedded `leafpick` CLI. Both use the same download engine; there is no server to deploy.
+Folioak is a native macOS app with an embedded `folioak` CLI. Both use the same download engine; there is no server to deploy.
 
 ## Start
 
 Use an Apple Silicon Mac, Xcode or Command Line Tools, and Python 3.9+. Clone the repository, then run:
 
 ```sh
-./build.command          # Build dist/Leafpeak.app and the embedded CLI
+./build.command          # Build dist/Folioak.app and the embedded CLI
 ./test.command          # Offline regression tests
 ./test.command --stress # Queue lifecycle and resource checks
 ./package.command       # Build and verify DMG / ZIP
 ```
 
-The first build or test run needs internet access to fetch pinned media dependencies and compile them. Later runs verify and reuse `build/media-tools/`; regression tests themselves run offline. Run the app from `dist/Leafpeak.app`. CI uses the toolchain documented in [Build & release](RELEASING.md).
+The first build or test run needs internet access to fetch pinned media dependencies and compile them. Later runs verify and reuse `build/media-tools/`; regression tests themselves run offline. Run the app from `dist/Folioak.app`. CI uses the toolchain documented in [Build & release](RELEASING.md).
 
 ## Find the code
 

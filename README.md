@@ -1,7 +1,7 @@
 <p align="center">
-  <img src="Resources/LeafpeakMark.png" width="96" height="96" alt="Leafpeak logo">
+  <img src="Resources/FolioakMark.png" width="96" height="96" alt="Folioak logo">
 </p>
-<h1 align="center">Leafpeak</h1>
+<h1 align="center">Folioak</h1>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
 **A native macOS downloader for papers and media.**
@@ -14,15 +14,17 @@ All download components are bundled. No Python or Homebrew required. Playlists, 
 
 ## Install
 
-[Download the latest release](https://github.com/cleardusk/leafpick/releases/latest) · Apple Silicon · macOS 13+
+[Download the latest release](https://github.com/cleardusk/folioak/releases/latest) · Apple Silicon · macOS 13+
 
-Open the DMG and drag Leafpeak into Applications. The app is not yet notarized by Apple; you may need to allow it in System Settings → Privacy & Security on first launch.
+Open the DMG and drag Folioak into Applications. The app is not yet notarized by Apple; you may need to allow it in System Settings → Privacy & Security on first launch.
 
 ## Use
 
 Paste or drop links, then click the download button or press `⌘ Return`. Click again to stop. Batch downloads, retries, and Quick Look previews are supported.
 
-The app creates `~/Downloads/Leafpeak` on first launch; type subfolders are created as needed. Click the folder to change the save location. Upgrades preserve your settings, files, and libraries.
+Choose System, 简体中文, or English in Settings → General → Language. Changes take effect immediately.
+
+New installations use `~/Downloads/Folioak`; type subfolders are created as needed. Click the folder to change the save location. Upgrades preserve your settings, files, and libraries. When upgrading from an earlier product name, quit and move the old app out of Applications after installing Folioak.
 
 [CLI guide (中文)](CLI-README.md)
 

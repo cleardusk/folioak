@@ -43,7 +43,7 @@ struct ActivityEntry: Identifiable, Codable {
     }
 
     var line: String {
-        "\(date.formatted(date: .numeric, time: .standard)) [\(level.label)] \(subject.map { "\($0) · " } ?? "")\(message)"
+        "\(L10n.date(date, dateStyle: .numeric)) [\(L(level.label))] \(subject.map { "\($0) · " } ?? "")\(L(message))"
     }
 }
 

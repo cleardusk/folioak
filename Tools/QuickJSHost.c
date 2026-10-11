@@ -33,7 +33,7 @@ static JSValue log_message(JSContext *context, JSValueConst this_value,
 
 int main(int argc, char **argv) {
     if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "--version"))) {
-        printf("QuickJS-ng version %d.%d.%d\nLeafpick EJS host: --script FILE\n",
+        printf("QuickJS-ng version %d.%d.%d\nFolioak EJS host: --script FILE\n",
                QJS_VERSION_MAJOR, QJS_VERSION_MINOR, QJS_VERSION_PATCH);
         return 0;
     }

@@ -43,7 +43,7 @@ enum ItemState: Equatable, Codable {
         case .downloading: return "下载中"
         case .validating: return "校验并保存"
         case .retrying(let attempt): return "自动重试 \(attempt)/3"
-        case .waiting(let date): return "等待请求 · \(date.formatted(date: .omitted, time: .standard)) 后继续"
+        case .waiting(let date): return "等待请求 · \(L10n.date(date, dateStyle: .omitted)) 后继续"
         case .paused: return "等待重试"
         case .saved: return "已保存"
         case .existing: return "文件已存在"
@@ -119,7 +119,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func prepareDefaultDirectory(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
-        guard directory.standardizedFileURL.path == home.appendingPathComponent("Downloads/Leafpeak").standardizedFileURL.path else { return }
+        guard directory.standardizedFileURL.path == home.appendingPathComponent("Downloads/Folioak").standardizedFileURL.path else { return }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
@@ -135,6 +135,9 @@ final class DownloadModel: ObservableObject {
     }
     @Published var theme: AppTheme {
         didSet { preferences.set(theme.rawValue, forKey: "theme") }
+    }
+    @Published var language: AppLanguage {
+        didSet { preferences.set(language.rawValue, forKey: "language"); AppLocalization.shared.language = language }
     }
     @Published var items: [DownloadItem] = []
     @Published var mediaFormat: MediaFormat = .automatic
@@ -191,6 +194,7 @@ final class DownloadModel: ObservableObject {
         naming = downloadPreferences.naming
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
+        language = AppLanguage(rawValue: preferences.string(forKey: "language") ?? "") ?? .system
         directory = downloadPreferences.directory
         if preferences.string(forKey: "downloadRootDirectory") == nil {
             preferences.set(directory.path, forKey: "downloadRootDirectory")
@@ -296,7 +300,7 @@ final class DownloadModel: ObservableObject {
     func importLinks() {
         guard !busy else { return }
         let panel = NSOpenPanel()
-        panel.title = "导入链接"; panel.allowedContentTypes = [.plainText]; panel.allowsMultipleSelection = false
+        panel.title = L("导入链接"); panel.allowedContentTypes = [.plainText]; panel.allowsMultipleSelection = false
         present(panel) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
             do {
@@ -325,8 +329,8 @@ final class DownloadModel: ObservableObject {
 
     private func exportData(_ data: Data, name: String) {
         let panel = NSOpenPanel()
-        panel.title = name.hasSuffix(".txt") ? "导出日志" : "导出文档库"
-        panel.prompt = "导出"
+        panel.title = name.hasSuffix(".txt") ? L("导出日志") : L("导出文档库")
+        panel.prompt = L("导出")
         panel.canChooseFiles = false; panel.canChooseDirectories = true
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
         panel.directoryURL = directory
@@ -493,8 +497,8 @@ final class DownloadModel: ObservableObject {
     func chooseDirectory() {
         guard !busy else { return }
         let panel = NSOpenPanel()
-        panel.title = "选择保存位置"
-        panel.prompt = "选择"
+        panel.title = L("选择保存位置")
+        panel.prompt = L("选择")
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
@@ -784,7 +788,7 @@ final class DownloadModel: ObservableObject {
 // Placeholder glyphs use the same TextKit layout and origin as editable text.
 // SwiftUI Text over TextEditor has a different first-line baseline on macOS.
 final class LinkTextView: NSTextView {
-    static let example = "粘贴论文或媒体链接"
+    static var example: String { L("粘贴论文或媒体链接") }
     var placeholderColor = NSColor.secondaryLabelColor { didSet { if placeholderColor != oldValue { needsDisplay = true } } }
     var focusChanged: ((Bool) -> Void)?
     private var styledInput: String?
@@ -909,7 +913,7 @@ final class LinkTextView: NSTextView {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 8
         let text = NSMutableAttributedString(string: Self.example + "\n", attributes: [.font: font, .foregroundColor: placeholderColor, .paragraphStyle: paragraph])
-        text.append(NSAttributedString(string: "支持多条链接，每行一个", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
+        text.append(NSAttributedString(string: L("支持多条链接，每行一个"), attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: placeholderColor]))
         placeholderStorage.setAttributedString(text)
         placeholderContainer.containerSize = textContainer.containerSize
         placeholderContainer.lineFragmentPadding = textContainer.lineFragmentPadding
@@ -942,6 +946,7 @@ final class LinkTextView: NSTextView {
 }
 
 struct LinkInput: NSViewRepresentable {
+    @ObservedObject private var localization = AppLocalization.shared
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: DownloadModel
@@ -983,7 +988,7 @@ struct LinkInput: NSViewRepresentable {
         editor.isAutomaticTextCompletionEnabled = false
         editor.isAutomaticTextReplacementEnabled = false
         editor.isAutomaticLinkDetectionEnabled = false
-        editor.setAccessibilityLabel("下载链接，每行一个")
+        editor.setAccessibilityLabel(L("下载链接，每行一个"))
         editor.delegate = context.coordinator
         editor.captureFailure = { [weak model] in model?.notice = $0 }
         editor.focusChanged = { [weak editor, weak coordinator = context.coordinator] value in
@@ -1004,6 +1009,8 @@ struct LinkInput: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? LinkTextView else { return }
+        editor.setAccessibilityLabel(L("下载链接，每行一个"))
+        editor.needsDisplay = true
         editor.isEditable = !model.busy
         let textColor = ThemePalette.nativeColor(palette.text)
         let accentColor = ThemePalette.nativeColor(palette.accent)
@@ -1041,12 +1048,12 @@ struct LinkInput: NSViewRepresentable {
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard let replacementString else { return true }
             guard replacementString.utf8.count <= ResourceLimits.inputBytes else {
-                parent.model.notice = "输入超过 64 KB，请分批粘贴。"
+                parent.model.notice = L("输入超过 64 KB，请分批粘贴。")
                 return false
             }
             let proposed = (textView.string as NSString).replacingCharacters(in: affectedCharRange, with: replacementString)
             guard proposed.utf8.count <= ResourceLimits.inputBytes else {
-                parent.model.notice = "输入超过 64 KB，请分批粘贴。"
+                parent.model.notice = L("输入超过 64 KB，请分批粘贴。")
                 return false
             }
             return true
@@ -1075,11 +1082,12 @@ final class LinkScrollView: NSScrollView {
 }
 
 struct SlidingSegments<Selection: Hashable>: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @Binding var selection: Selection
     let options: [Selection]
     let title: (Selection) -> String
     var segmentWidth: CGFloat = 80
-    var accessibilityName = "设置分类"
+    var accessibilityName = L("设置分类")
     let palette: ThemePalette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focusedTab: Selection?
@@ -1123,20 +1131,23 @@ struct SlidingSegments<Selection: Hashable>: View {
 }
 
 struct SettingsView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     @Environment(\.colorScheme) private var scheme
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     @ViewState var tab = "通用"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var labelWidth: CGFloat { L10n.language.code() == "en" ? 88 : 48 }
 
     var body: some View {
         VStack(spacing: 16) {
-            SlidingSegments(selection: $tab, options: ["通用", "快捷键"], title: { $0 }, palette: palette)
+            SlidingSegments(selection: $tab, options: ["通用", "快捷键"], title: { L($0) }, palette: palette)
             Group {
                 if tab == "通用" { general } else { ShortcutSettingsView(shortcuts: model.shortcuts, palette: palette) }
-            }.frame(width: 422, height: 380, alignment: .top)
+            }.frame(width: 422, height: 424, alignment: .top)
         }.padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 24)
-            .frame(width: 470, height: 456, alignment: .top)
+            .frame(width: 470, height: 500, alignment: .top)
+            .environment(\.locale, L10n.locale)
             .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))
             .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
@@ -1145,52 +1156,58 @@ struct SettingsView: View {
     private var general: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 16) {
-                settingLabel("保存位置")
+                settingLabel(L("保存位置"))
                 HStack(spacing: 12) {
                     Text(model.directoryLabel).font(.system(size: 12)).lineLimit(1)
                         .truncationMode(.middle).help(model.directory.path).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("更改…", action: model.chooseDirectory).controlSize(.small).disabled(model.busy)
-                        .accessibilityLabel("更改保存位置")
+                    Button(L("更改…"), action: model.chooseDirectory).controlSize(.small).fixedSize().disabled(model.busy)
+                        .accessibilityLabel(L("更改保存位置"))
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
-                .help("自动归入 Papers、Videos、Audio、Images；首次下载时创建。")
+                .help(L("自动归入 Papers、Videos、Audio、Images；首次下载时创建。"))
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 16) {
-                    settingLabel("论文命名")
-                    Picker("文件命名", selection: $model.naming) {
-                        ForEach(NamingStyle.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }.labelsHidden().disabled(model.busy).frame(maxWidth: .infinity, alignment: .leading)
-                        .help("arXiv 使用所选命名，年月取首次提交日期；其他 PDF 使用标题或原文件名。")
+                    settingLabel(L("论文命名"))
+                    Picker(L("文件命名"), selection: $model.naming) {
+                        ForEach(NamingStyle.allCases, id: \.self) { Text(L($0.label)).tag($0) }
+                    }.id(localization.language).labelsHidden().disabled(model.busy).frame(maxWidth: .infinity, alignment: .leading)
+                        .help(L("arXiv 使用所选命名，年月取首次提交日期；其他 PDF 使用标题或原文件名。"))
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.namingExample).font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(ThemePalette.color(palette.secondary)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }.padding(.leading, 64).frame(maxWidth: .infinity, alignment: .leading)
+                }.padding(.leading, labelWidth + 16).frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()
             HStack(spacing: 16) {
-                settingLabel("外观")
-                SlidingSegments(selection: $model.appearance, options: AppAppearance.allCases, title: { $0.label },
-                                segmentWidth: 118, accessibilityName: "外观", palette: palette)
+                settingLabel(L("语言"))
+                Picker(L("语言"), selection: $model.language) {
+                    ForEach(AppLanguage.allCases, id: \.self) { Text($0.label).tag($0) }
+                }.id(localization.language).labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(height: 28)
+            HStack(spacing: 16) {
+                settingLabel(L("外观"))
+                SlidingSegments(selection: $model.appearance, options: AppAppearance.allCases, title: { L($0.label) },
+                                segmentWidth: (422 - labelWidth - 20) / 3, accessibilityName: L("外观"), palette: palette)
             }
             HStack(alignment: .top, spacing: 16) {
-                settingLabel("主题").frame(height: ThemeChoice.previewHeight)
+                settingLabel(L("主题")).frame(height: ThemeChoice.previewHeight)
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 12) {
                     ForEach(AppTheme.allCases, id: \.self) { theme in
                         ThemeChoice(theme: theme, selected: model.theme == theme) { model.theme = theme }
                     }
-                }.frame(maxWidth: .infinity)
+                }.frame(width: 422 - labelWidth - 16)
             }
-            Text(model.busy ? "下载结束后可更改目录和命名。" : "")
-                .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(height: 14).padding(.leading, 64)
+            Text(model.busy ? L("下载结束后可更改目录和命名。") : "")
+                .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(height: 14).padding(.leading, labelWidth + 16)
         }
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private func settingLabel(_ text: String) -> some View {
-        Text(text).font(.system(size: 12, weight: .medium)).frame(width: 48, alignment: .leading)
+        Text(text).font(.system(size: 12, weight: .medium)).frame(width: labelWidth, alignment: .leading)
     }
 }
 
@@ -1270,8 +1287,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let model: DownloadModel
     private var terminationPending = false
     private var shortcutObservation: AnyCancellable?
+    private var languageObservation: AnyCancellable?
 
-    init(model: DownloadModel? = nil) { self.model = model ?? DownloadModel(stateURL: WorkspaceStore.defaultURL); super.init() }
+    init(model: DownloadModel? = nil) {
+        self.model = model ?? DownloadModel(stateURL: WorkspaceStore.defaultURL)
+        super.init()
+        AppLocalization.shared.language = self.model.language
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         model.prepareDefaultDirectory()
@@ -1279,10 +1301,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.applyAppearance()
         makeMenu()
         shortcutObservation = model.shortcuts.$bindings.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { self?.makeMenu() } }
+        languageObservation = model.$language.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.makeMenu()
+                self?.settingsWindow?.title = L("Folioak 设置")
+            }
+        }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Leafpeak"
+        window.title = "Folioak"
         window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow")
-        windowChrome = WindowChrome(window: window, model: model, title: "Leafpeak", workspace: true)
+        windowChrome = WindowChrome(window: window, model: model, title: "Folioak", workspace: true)
         window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }, endTextEditing: { [weak window] in
             // End editing only in this workspace, leaving list navigation intact.
             if window?.firstResponder is NSTextView { window?.makeFirstResponder(nil) }
@@ -1304,10 +1332,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if terminationPending { return .terminateLater }
         guard model.busy else { model.cancelVersionCheck(); model.persistWorkspace(); return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "仍有文件正在下载"
-        alert.informativeText = "已保存的文件会保留。退出将停止当前下载和等待中的任务。"
-        alert.addButton(withTitle: "继续下载")
-        alert.addButton(withTitle: "停止并退出")
+        alert.messageText = L("仍有文件正在下载")
+        alert.informativeText = L("已保存的文件会保留。退出将停止当前下载和等待中的任务。")
+        alert.addButton(withTitle: L("继续下载"))
+        alert.addButton(withTitle: L("停止并退出"))
         guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
         terminationPending = true
         Task { [self] in
@@ -1361,8 +1389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let view = NSHostingView(rootView: SettingsView(model: model))
             let contentSize = view.fittingSize
             let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            panel.title = "Leafpeak 设置"
-            settingsChrome = WindowChrome(window: panel, model: model, title: "设置", workspace: true)
+            panel.title = L("Folioak 设置")
+            settingsChrome = WindowChrome(window: panel, model: model, title: L("设置"), workspace: true)
             panel.contentView = view
             panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
             panel.isReleasedWhenClosed = false
@@ -1384,28 +1412,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return submenu
         }
         let app = add("", [
-            ("关于 Leafpeak", #selector(showAbout), ""), ("", nil, ""),
-            ("设置…", #selector(showSettings), ","), ("", nil, ""),
-            ("隐藏 Leafpeak", #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
-            ("退出 Leafpeak", #selector(NSApplication.terminate(_:)), "q")
+            (L("关于 Folioak"), #selector(showAbout), ""), ("", nil, ""),
+            (L("设置…"), #selector(showSettings), ","), ("", nil, ""),
+            (L("隐藏 Folioak"), #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
+            (L("退出 Folioak"), #selector(NSApplication.terminate(_:)), "q")
         ])
-        app.item(withTitle: "关于 Leafpeak")?.target = self
-        app.item(withTitle: "设置…")?.target = self
-        let edit = add("编辑", [
-            ("撤销", Selector(("undo:")), "z"), ("重做", Selector(("redo:")), "z"), ("", nil, ""),
-            ("剪切", #selector(NSText.cut(_:)), "x"), ("复制", #selector(NSText.copy(_:)), "c"),
-            ("粘贴", #selector(NSText.paste(_:)), "v"), ("全选", #selector(NSText.selectAll(_:)), "a")
+        app.item(withTitle: L("关于 Folioak"))?.target = self
+        app.item(withTitle: L("设置…"))?.target = self
+        let edit = add(L("编辑"), [
+            (L("撤销"), Selector(("undo:")), "z"), (L("重做"), Selector(("redo:")), "z"), ("", nil, ""),
+            (L("剪切"), #selector(NSText.cut(_:)), "x"), (L("复制"), #selector(NSText.copy(_:)), "c"),
+            (L("粘贴"), #selector(NSText.paste(_:)), "v"), (L("全选"), #selector(NSText.selectAll(_:)), "a")
         ])
-        edit.item(withTitle: "重做")?.keyEquivalentModifierMask = [.command, .shift]
-        let find = NSMenuItem(title: "搜索", action: #selector(focusSearch), keyEquivalent: "f")
+        edit.item(withTitle: L("重做"))?.keyEquivalentModifierMask = [.command, .shift]
+        let find = NSMenuItem(title: L("搜索"), action: #selector(focusSearch), keyEquivalent: "f")
         find.target = self; edit.addItem(.separator()); edit.addItem(find)
-        let navigation = add("前往", [("添加链接", #selector(focusInput), "l"), ("文件列表", #selector(focusList), "j")])
+        let navigation = add(L("前往"), [(L("添加链接"), #selector(focusInput), "l"), (L("文件列表"), #selector(focusList), "j")])
         navigation.items.forEach { $0.target = self }
-        let start = NSMenuItem(title: "开始下载", action: #selector(startDownload), keyEquivalent: "\r"); start.target = self; navigation.addItem(start)
+        let start = NSMenuItem(title: L("开始下载"), action: #selector(startDownload), keyEquivalent: "\r"); start.target = self; navigation.addItem(start)
         for (action, item) in [(ShortcutAction.input, navigation.items[0]), (.list, navigation.items[1]), (.download, start)] {
             item.keyEquivalent = model.shortcuts[action].key; item.keyEquivalentModifierMask = model.shortcuts[action].flags
         }
-        NSApp.windowsMenu = add("窗口", [("关闭窗口", #selector(NSWindow.performClose(_:)), "w"), ("最小化", #selector(NSWindow.performMiniaturize(_:)), "m")])
+        NSApp.windowsMenu = add(L("窗口"), [(L("关闭窗口"), #selector(NSWindow.performClose(_:)), "w"), (L("最小化"), #selector(NSWindow.performMiniaturize(_:)), "m")])
         NSApp.mainMenu = menu
     }
 }

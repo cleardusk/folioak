@@ -3,7 +3,7 @@ import AppKit
 
 extension CoreTests {
     @MainActor static func clearDownloadRecordsTests(root: URL, pdf: URL) async throws {
-        let suite = "leafpeak-clear-records-\(UUID().uuidString)"
+        let suite = "folioak-clear-records-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let state = root.appendingPathComponent("clear-records/workspace.json")

@@ -4,7 +4,7 @@ private typealias ShortcutViewState<Value> = SwiftUI.State<Value>
 
 enum ShortcutAction: String, CaseIterable, Codable {
     case input, list, download, details
-    var title: String { switch self { case .input: return "添加链接"; case .list: return "文件列表"; case .download: return "开始下载"; case .details: return "详情" } }
+    var title: String { switch self { case .input: return L("添加链接"); case .list: return L("文件列表"); case .download: return L("开始下载"); case .details: return L("详情") } }
     var defaultKey: String { switch self { case .input: return "l"; case .list: return "j"; case .download: return "\r"; case .details: return "i" } }
 }
 struct AppShortcut: Codable, Equatable {
@@ -47,9 +47,9 @@ struct AppShortcut: Codable, Equatable {
     }
     subscript(_ action: ShortcutAction) -> AppShortcut { bindings[action.rawValue]! }
     func set(_ shortcut: AppShortcut, for action: ShortcutAction) -> String? {
-        guard shortcut.valid else { return "请使用 ⌘ 配合字母、数字或 Return。" }
-        guard !shortcut.reserved else { return "这个组合保留给系统和编辑操作。" }
-        if let conflict = ShortcutAction.allCases.first(where: { $0 != action && self[$0] == shortcut }) { return "已用于“\(conflict.title)”。" }
+        guard shortcut.valid else { return L("请使用 ⌘ 配合字母、数字或 Return。") }
+        guard !shortcut.reserved else { return L("这个组合保留给系统和编辑操作。") }
+        if let conflict = ShortcutAction.allCases.first(where: { $0 != action && self[$0] == shortcut }) { return L("已用于“\(conflict.title)”。") }
         bindings[action.rawValue] = shortcut
         preferences.set(try? JSONEncoder().encode(bindings), forKey: "shortcuts")
         return nil
@@ -61,11 +61,13 @@ struct AppShortcut: Codable, Equatable {
 }
 
 struct ShortcutRecorder: NSViewRepresentable {
+    @ObservedObject private var localization = AppLocalization.shared
     let shortcut: AppShortcut
     let changed: (AppShortcut) -> String?
     let report: (String?) -> Void
     func makeNSView(context: Context) -> Recorder { Recorder() }
     func updateNSView(_ view: Recorder, context: Context) {
+        view.setAccessibilityLabel(L("修改快捷键"))
         view.shortcut = shortcut; view.changed = changed; view.report = report
         if !view.recording { view.title = shortcut.label; view.setAccessibilityValue(shortcut.label) }
     }
@@ -78,12 +80,12 @@ struct ShortcutRecorder: NSViewRepresentable {
         private var observer: NSObjectProtocol?
         override init(frame: NSRect) {
             super.init(frame: frame); bezelStyle = .rounded; target = self; action = #selector(beginRecording)
-            setAccessibilityLabel("修改快捷键")
+            setAccessibilityLabel(L("修改快捷键"))
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
         override var acceptsFirstResponder: Bool { true }
         @objc private func beginRecording() {
-            window?.makeFirstResponder(self); recording = true; title = "请按组合键…"; setAccessibilityValue(title); report?(nil)
+            window?.makeFirstResponder(self); recording = true; title = L("请按组合键…"); setAccessibilityValue(title); report?(nil)
             if monitor == nil {
                 monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
                     guard let self, self.recording, self.window === NSApp.keyWindow else { return event }
@@ -111,6 +113,7 @@ struct ShortcutRecorder: NSViewRepresentable {
 }
 
 struct ShortcutSettingsView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var shortcuts: ShortcutSettings
     let palette: ThemePalette
     @ShortcutViewState private var error: String?
@@ -118,35 +121,35 @@ struct ShortcutSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(spacing: 0) {
                 HStack {
-                    Text("操作"); Spacer()
-                    Text("快捷键").frame(width: 126)
+                    Text(L("操作")); Spacer()
+                    Text(L("快捷键")).frame(width: 126)
                 }.font(.system(size: 11, weight: .medium))
                     .foregroundStyle(ThemePalette.color(palette.secondary))
                     .frame(height: 28)
                 ForEach(ShortcutAction.allCases, id: \.self) { action in
                     row(action.title) {
                         ShortcutRecorder(shortcut: shortcuts[action], changed: { shortcuts.set($0, for: action) }, report: { error = $0 })
-                            .frame(width: 126, height: 26).accessibilityLabel("\(action.title)快捷键")
-                            .help("点击修改，按 Esc 取消")
+                            .frame(width: 126, height: 26).accessibilityLabel(L("\(action.title)快捷键"))
+                            .help(L("点击修改，按 Esc 取消"))
                     }
                 }
                 Divider().padding(.vertical, 8)
-                fixedRow("选择文件", key: "↑  ↓")
-                fixedRow("快速预览", key: "空格")
-                fixedRow("打开文件", key: "↩")
-                fixedRow("关闭窗口", key: "⌘W")
-                fixedRow("打开设置", key: "⌘,")
+                fixedRow(L("选择文件"), key: "↑  ↓")
+                fixedRow(L("快速预览"), key: L("空格"))
+                fixedRow(L("打开文件"), key: "↩")
+                fixedRow(L("关闭窗口"), key: "⌘W")
+                fixedRow(L("打开设置"), key: "⌘,")
             }
             HStack(spacing: 12) {
                 Text(error ?? "").foregroundStyle(UIColors.error).font(.system(size: 11))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Group {
                     if shortcuts.isCustomized {
-                        Button("恢复默认") {
+                        Button(L("恢复默认")) {
                             NSApp.keyWindow?.makeFirstResponder(nil)
                             shortcuts.reset(); error = nil
                         }.buttonStyle(.borderless).font(.system(size: 11))
-                            .help("恢复四项可修改的快捷键")
+                            .help(L("恢复四项可修改的快捷键"))
                     }
                 }.frame(width: 126)
             }.frame(height: 28)
@@ -159,6 +162,6 @@ struct ShortcutSettingsView: View {
         }.frame(height: 32)
     }
     private func fixedRow(_ title: String, key: String) -> some View {
-        row(title) { Text(key).foregroundStyle(ThemePalette.color(palette.secondary)).help("固定快捷键") }
+        row(title) { Text(key).foregroundStyle(ThemePalette.color(palette.secondary)).help(L("固定快捷键")) }
     }
 }

@@ -49,9 +49,9 @@ struct FileInformation: Equatable, Sendable {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey, .contentTypeKey])
             guard values.isRegularFile == true else { result.issue = "此路径不是普通文件。"; return result }
             if let size = values.fileSize { fields.append(Field(name: "大小", value: ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))) }
-            if let type = values.contentType?.localizedDescription { fields.append(Field(name: "类型", value: type)) }
-            if let date = values.creationDate { fields.append(Field(name: "创建时间", value: date.formatted(date: .abbreviated, time: .standard))) }
-            if let date = values.contentModificationDate { fields.append(Field(name: "修改时间", value: date.formatted(date: .abbreviated, time: .standard))) }
+            if let type = values.contentType.map({ L10n.language.code() == "en" ? ($0.preferredMIMEType ?? $0.identifier) : ($0.localizedDescription ?? $0.identifier) }) { fields.append(Field(name: "类型", value: type)) }
+            if let date = values.creationDate { fields.append(Field(name: "创建时间", value: L10n.date(date))) }
+            if let date = values.contentModificationDate { fields.append(Field(name: "修改时间", value: L10n.date(date))) }
             result.groups = [Group(title: "文件信息", fields: fields)]
             let ext = url.pathExtension.lowercased()
             if ext == "pdf" {

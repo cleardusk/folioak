@@ -136,7 +136,7 @@ extension DownloadModel {
     }
     func importPDFs() {
         guard !importingPDFs, canChangeLibrary() else { return }
-        let panel = NSOpenPanel(); panel.title = "导入 PDF"; panel.allowedContentTypes = [.pdf]; panel.allowsMultipleSelection = true
+        let panel = NSOpenPanel(); panel.title = L("导入 PDF"); panel.allowedContentTypes = [.pdf]; panel.allowsMultipleSelection = true
         present(panel) { [weak self] response in
             guard response == .OK, let self else { return }
             self.importPDFs(panel.urls)
@@ -165,7 +165,7 @@ extension DownloadModel {
     }
     func relinkPaper(_ id: UUID) {
         guard canChangeLibrary() else { return }
-        let panel = NSOpenPanel(); panel.title = "重新关联 PDF"; panel.allowedContentTypes = [.pdf]
+        let panel = NSOpenPanel(); panel.title = L("重新关联 PDF"); panel.allowedContentTypes = [.pdf]
         present(panel) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
             Task {
@@ -232,6 +232,7 @@ extension DownloadModel {
 }
 
 struct LibraryEditView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     let paper: LibraryPaper
     @LibraryViewState private var title = ""
@@ -239,11 +240,11 @@ struct LibraryEditView: View {
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("整理文档").font(.system(size: 18, weight: .medium))
-            VStack(alignment: .leading, spacing: 8) { Text("标题"); TextField("标题", text: $title) }
-            VStack(alignment: .leading, spacing: 8) { Text("标签"); TextField("用逗号分隔", text: $tags) }
-            HStack { Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("完成") {
+            Text(L("整理文档")).font(.system(size: 18, weight: .medium))
+            VStack(alignment: .leading, spacing: 8) { Text(L("标题")); TextField(L("标题"), text: $title) }
+            VStack(alignment: .leading, spacing: 8) { Text(L("标签")); TextField(L("用逗号分隔"), text: $tags) }
+            HStack { Spacer(); Button(L("取消")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(L("完成")) {
                     model.changePaper(paper.id) { $0.title = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(ResourceLimits.titleCharacters)); $0.tags = LibraryPaper.cleanTags(tags) }
                     dismiss()
                 }.keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -254,6 +255,7 @@ struct LibraryEditView: View {
 }
 
 struct LibraryRow: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let paper: LibraryPaper
     @ObservedObject var model: DownloadModel
     let selected: Bool
@@ -266,28 +268,28 @@ struct LibraryRow: View {
             Image(systemName: paper.favorite ? "star.fill" : "doc.text")
                 .font(.system(size: 21, weight: .light)).foregroundStyle(ThemePalette.color(palette.accent))
                 .frame(width: 44, height: 44).background(ThemePalette.color(palette.accent).opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 13))
-                .accessibilityLabel(paper.favorite ? "已收藏" : "文档")
+                .accessibilityLabel(paper.favorite ? L("已收藏") : L("文档"))
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    if !paper.read { Circle().fill(ThemePalette.color(palette.accent)).frame(width: 5, height: 5).accessibilityLabel("未读") }
+                    if !paper.read { Circle().fill(ThemePalette.color(palette.accent)).frame(width: 5, height: 5).accessibilityLabel(L("未读")) }
                     Text(paper.title).font(.system(size: 14, weight: .medium)).lineLimit(2).lineSpacing(3).help(paper.title)
                 }
                 HStack(spacing: 10) {
                     if let ref = paper.reference { Text(ref.identifier).font(.system(size: 11, design: .monospaced)) }
-                    else { Text(paper.directURL?.host ?? "本地 PDF").lineLimit(1) }
-                    if let pages = paper.pages { Text("\(pages) 页") }
-                    if paper.hasUpdate { Text("有 v\(paper.latest!.version!)").foregroundStyle(ThemePalette.color(palette.accent)) }
-                    if paper.missing { Text("文件缺失").foregroundStyle(UIColors.error) }
+                    else { Text(paper.directURL?.host ?? L("本地 PDF")).lineLimit(1) }
+                    if let pages = paper.pages { Text(L("\(pages) 页")) }
+                    if paper.hasUpdate { Text(L("有 v\(paper.latest!.version!)")).foregroundStyle(ThemePalette.color(palette.accent)) }
+                    if paper.missing { Text(L("文件缺失")).foregroundStyle(UIColors.error) }
                 }.font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
                 if !paper.tags.isEmpty { Text(paper.tags.joined(separator: " · ")).font(.system(size: 11)).lineLimit(1).foregroundStyle(ThemePalette.color(palette.secondary)) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
             HStack(spacing: 6) {
-                if paper.removed { Button("恢复") { model.changePaper(paper.id) { $0.removed = false } }.buttonStyle(QuietButtonStyle(palette: palette)) }
-                else if paper.missing { Button("关联") { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
-                else { Button("打开") { model.openPaper(paper) }.buttonStyle(QuietButtonStyle(palette: palette)) }
+                if paper.removed { Button(L("恢复")) { model.changePaper(paper.id) { $0.removed = false } }.buttonStyle(QuietButtonStyle(palette: palette)) }
+                else if paper.missing { Button(L("关联")) { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
+                else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 if !paper.removed {
                     Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
-                        .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel("\(paper.title)的更多操作")
+                        .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("\(paper.title)的更多操作"))
                 }
             }.padding(.top, 6)
         }.padding(20).background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
@@ -297,26 +299,26 @@ struct LibraryRow: View {
     }
     @ViewBuilder private var actions: some View {
         if !paper.removed {
-            Button("快速预览") { select(); model.openPaper(paper, preview: true) }.disabled(paper.missing)
-            Button(paper.favorite ? "取消收藏" : "收藏") { model.changePaper(paper.id) { $0.favorite.toggle() } }
-            Button(paper.read ? "标为未读" : "标为已读") { model.changePaper(paper.id) { $0.read.toggle() } }
-            Button("整理文档…") { select(); model.editingPaper = paper }
+            Button(L("快速预览")) { select(); model.openPaper(paper, preview: true) }.disabled(paper.missing)
+            Button(paper.favorite ? L("取消收藏") : L("收藏")) { model.changePaper(paper.id) { $0.favorite.toggle() } }
+            Button(paper.read ? L("标为未读") : L("标为已读")) { model.changePaper(paper.id) { $0.read.toggle() } }
+            Button(L("整理文档…")) { select(); model.editingPaper = paper }
             Divider()
             if paper.reference != nil {
-                Button("检查新版本") { model.checkPaperVersions([paper.id]) }.disabled(!model.checkingVersions.isEmpty)
-                if paper.hasUpdate { Button("下载 v\(paper.latest!.version!)") { model.downloadLatest(paper) }.disabled(model.busy) }
-                if let date = paper.checkedAt { Text("上次检查：\(date.formatted(date: .abbreviated, time: .shortened))") }
+                Button(L("检查新版本")) { model.checkPaperVersions([paper.id]) }.disabled(!model.checkingVersions.isEmpty)
+                if paper.hasUpdate { Button(L("下载 v\(paper.latest!.version!)")) { model.downloadLatest(paper) }.disabled(model.busy) }
+                if let date = paper.checkedAt { Text(L("上次检查：\(L10n.date(date, time: .shortened))")) }
             }
             if let source = paper.source {
-                Button("打开来源页面") { model.openSource(paper.downloadItem) }
-                Button("复制来源链接") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.webURL.absoluteString, forType: .string) }
-                if paper.missing { Button("重新下载") { model.retryFromLibrary(paper.downloadItem) }.disabled(model.busy) }
+                Button(L("打开来源页面")) { model.openSource(paper.downloadItem) }
+                Button(L("复制来源链接")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.webURL.absoluteString, forType: .string) }
+                if paper.missing { Button(L("重新下载")) { model.retryFromLibrary(paper.downloadItem) }.disabled(model.busy) }
             }
-            if let file = paper.file { Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([file]) } }
-            Button("重新关联 PDF…") { model.relinkPaper(paper.id) }
-            Button("详情…") { select(); model.showPaperDetails(paper) }
+            if let file = paper.file { Button(L("在 Finder 中显示")) { NSWorkspace.shared.activateFileViewerSelecting([file]) } }
+            Button(L("重新关联 PDF…")) { model.relinkPaper(paper.id) }
+            Button(L("详情…")) { select(); model.showPaperDetails(paper) }
             Divider()
-            Button("移出文档库") { model.changePaper(paper.id) { $0.removed = true } }.help("保留 PDF，可从已移除的文档中恢复")
-        } else { Button("恢复到文档库") { model.changePaper(paper.id) { $0.removed = false } } }
+            Button(L("移出文档库")) { model.changePaper(paper.id) { $0.removed = true } }.help(L("保留 PDF，可从已移除的文档中恢复"))
+        } else { Button(L("恢复到文档库")) { model.changePaper(paper.id) { $0.removed = false } } }
     }
 }

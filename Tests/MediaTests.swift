@@ -82,7 +82,7 @@ extension CoreTests {
         do { _ = try await task.value; throw TestFailure.failed("cancelled process succeeded") } catch is CancellationError {}
         try expect(Date().timeIntervalSince(cancelledAt) < 4, "cancellation stops inherited output pipes and children promptly")
 
-        let suite = "leafpick-media-tests-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        let suite = "folioak-media-tests-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let state = root.appendingPathComponent("media-workspace.json")
         let item = DownloadItem(original: source.webURL.absoluteString, directURL: source.directURL, state: .saved, savedURL: first.url, documentTitle: "Photo", mediaFormat: .audio, additionalURLs: [first.url])
@@ -243,19 +243,28 @@ extension CoreTests {
     }
 
     @MainActor static func categoryDestinationTests(root: URL, image: URL) async throws {
-        let suite = "leafpick-destinations-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        let suite = "folioak-destinations-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let legacyFolder = root.appendingPathComponent("legacy-papers")
         preferences.set(legacyFolder.path, forKey: "saveDirectory")
         preferences.set(root.appendingPathComponent("legacy-media").path, forKey: "mediaSaveDirectory")
         let home = root.appendingPathComponent("test-home", isDirectory: true)
         let defaults = DownloadPreferences(preferences, home: home)
-        try expect(defaults.directory.path.hasSuffix("/Downloads/Leafpeak") && preferences.string(forKey: "saveDirectory") == legacyFolder.path,
+        try expect(defaults.directory.path.hasSuffix("/Downloads/Folioak") && preferences.string(forKey: "saveDirectory") == legacyFolder.path,
                    "one new default root does not reinterpret or overwrite legacy paths")
         let oldDefault = home.appendingPathComponent("Downloads/Leafpick", isDirectory: true)
         try FileManager.default.createDirectory(at: oldDefault, withIntermediateDirectories: true)
         try expect(DownloadPreferences(preferences, home: home).directory == oldDefault,
                    "an existing old default without a preference survives renaming")
+        let newerDefault = home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
+        let previousDefault = home.appendingPathComponent("Downloads/Leafpeak", isDirectory: true)
+        try FileManager.default.createDirectory(at: newerDefault, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: previousDefault, withIntermediateDirectories: true)
+        try expect(DownloadPreferences(preferences, home: home).directory == oldDefault,
+                   "installing a new default folder does not divert an existing old folder")
+        try FileManager.default.removeItem(at: oldDefault)
+        try expect(DownloadPreferences(preferences, home: home).directory == previousDefault,
+                   "the most recent legacy brand folder is retained when it exists alone")
         preferences.set(legacyFolder.path, forKey: "downloadRootDirectory")
         try expect(DownloadPreferences(preferences, home: home).directory.path == legacyFolder.path,
                    "an explicit root takes precedence over the old default")
@@ -321,7 +330,7 @@ extension CoreTests {
     }
 
     @MainActor static func mediaLibraryTests(root: URL, image: URL) async throws {
-        let suite = "leafpick-library-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        let suite = "folioak-library-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let state = root.appendingPathComponent("saved-media.json")
         let source = URL(string: "https://example.com/photo.png")!
@@ -404,10 +413,10 @@ extension CoreTests {
     }
 
     @MainActor static func renderMediaSnapshots() throws {
-        let suite = "leafpick-preview-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        let suite = "folioak-preview-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
-        model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Leafpeak")
+        model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Folioak")
         let video = URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc")!
         model.input = video.absoluteString
         model.items = [
@@ -433,11 +442,11 @@ extension CoreTests {
                     model.items[0] = model.busy ? activeVideo : savedVideo
                     model.input = scene == "idle" || scene == "long-path" ? "" : video.absoluteString
                     model.mediaFormat = scene == "audio" ? .audio : .automatic
-                    model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/" + (scene == "long-path" ? String(repeating: "Long Download Folder ", count: 6) : "Leafpeak"))
+                    model.directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/" + (scene == "long-path" ? String(repeating: "Long Download Folder ", count: 6) : "Folioak"))
                     app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
                     let view = NSHostingView(rootView: DownloaderView(model: model, page: page).environment(\.colorScheme, scheme).environment(\.controlActiveState, .key))
                     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: width == 780 ? 540 : 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-                    let chrome = WindowChrome(window: window, model: model, title: "Leafpeak", workspace: true)
+                    let chrome = WindowChrome(window: window, model: model, title: "Folioak", workspace: true)
                     window.contentView = view
                     let rendered = view.superview ?? view
                     rendered.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.15)); window.displayIfNeeded()
@@ -448,6 +457,6 @@ extension CoreTests {
                 }
             }
         }
-        print("Leafpeak previews: \(output.path)")
+        print("Folioak previews: \(output.path)")
     }
 }

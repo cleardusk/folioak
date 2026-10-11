@@ -66,7 +66,7 @@ extension CoreTests {
         let unknown = FileInformation(url: target, groups: try FileInformation.mediaGroups(Data(#"{"format":{"duration":"N/A","bit_rate":"0"},"streams":[{"codec_type":"video","codec_name":"h264","avg_frame_rate":"0/0","width":0,"height":0},{"codec_type":"audio","sample_rate":"N/A","channels":0,"bit_rate":"N/A"}]}"#.utf8)))
         try expect(value(unknown, "帧率") == nil && value(unknown, "分辨率") == nil && value(unknown, "时长") == nil && value(unknown, "总比特率") == nil, "unknown and zero-valued media fields are omitted")
         try rejects({ _ = try FileInformation.mediaGroups(Data("{}".utf8)) }, "empty probe output fails cleanly")
-        let suite = "leafpeak-file-info-retry-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        let suite = "folioak-file-info-retry-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(engine: DownloadEngine(pdfTransport: MockTransport(sourcePDF: fixture.appendingPathComponent("tone.m4a")), requestInterval: 0, retryDelay: 0), preferences: preferences)
         model.directory = root.appendingPathComponent("info-retry")
