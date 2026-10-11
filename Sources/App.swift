@@ -598,7 +598,10 @@ final class DownloadModel: ObservableObject {
     }
 
     private func markRead(_ file: URL) {
-        for index in papers.indices where papers[index].file == file { papers[index].read = true; papers[index].missing = false }
+        for index in papers.indices where papers[index].file == file && (!papers[index].read || papers[index].missing) {
+            var paper = papers[index]; paper.read = true; paper.missing = false
+            papers[index] = paper
+        }
     }
 
     func openSource(_ item: DownloadItem) {

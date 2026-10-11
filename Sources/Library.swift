@@ -226,7 +226,9 @@ extension DownloadModel {
         }
         if preview { previewURL = file }
         else if !opener(file) { notice = "无法打开 PDF，请检查默认阅读器。"; return }
-        changePaper(paper.id) { $0.read = true; $0.missing = false }
+        if let current = papers.first(where: { $0.id == paper.id }), !current.read || current.missing {
+            changePaper(paper.id) { $0.read = true; $0.missing = false }
+        }
         if libraryWritable { notice = nil }
     }
 }

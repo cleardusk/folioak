@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 private actor SchedulingProbe {
@@ -26,6 +27,18 @@ extension CoreTests {
         try expect(model.papers[0].matches("vision 1706") && !model.papers[0].matches("unknown"), "library multi-term search covers title, identifier and tags")
         model.openPaper(model.papers[0], preview: true)
         try expect(model.papers[0].read && model.previewURL == pdf, "successful preview marks read")
+        var readChanges = 0
+        let readObservation = model.$papers.dropFirst().sink { _ in readChanges += 1 }
+        for _ in 0..<10 {
+            model.openPaper(LibraryPaper(item)) // A caller may retain an older unread snapshot.
+            model.openFile(item)
+            model.preview(item)
+        }
+        try expect(readChanges == 0, "repeated open and preview do not dirty an already-read library")
+        model.changePaper(id) { $0.read = false; $0.missing = true }
+        model.openFile(item)
+        try expect(model.papers[0].read && !model.papers[0].missing, "opening a readable file still updates changed read and missing state")
+        readObservation.cancel()
         model.previewURL = nil
         model.history = []; model.items = []; model.persistWorkspace()
         let restored = DownloadModel(preferences: preferences, stateURL: state)
