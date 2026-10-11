@@ -20,6 +20,16 @@ extension CoreTests {
         bvModel.appendInput(bvInput)
         let bvBatch = try BatchInput(bvModel.input)
         try expect(bvModel.hasMediaInput && bvBatch.entries.count == 1 && bvBatch.entries[0].source?.webURL.absoluteString == "https://www.bilibili.com/video/BV1MaHp6KENU/", "app capture and batch input recognize a complete BV identifier through the shared parser")
+        let mixedBV = "https://example.org/file.pdf\n\(bvInput)\n1706.03762"
+        bvModel.input = ""; bvModel.appendInput(mixedBV)
+        try expect(bvModel.input == mixedBV && (try BatchInput(bvModel.input)).entries.count == 3, "mixed paste retains PDF, BV and arXiv inputs")
+        let bvFile = root.appendingPathComponent("bv-links.txt")
+        try Data(mixedBV.utf8).write(to: bvFile)
+        try expect(try await CLIOptions.parse(["-i", bvFile.path]).resolvedInput() == mixedBV, "CLI file import retains mixed BV input")
+        try expect(try PaperInput.decode(Data(mixedBV.utf8)) == mixedBV, "stdin decoding retains mixed BV input")
+        for invalid in ["bv1MaHp6KENU", "BV1MaHp6KEN0", "prefixBV1MaHp6KENU", "BV1MaHp6KENU.txt"] {
+            try expect(try PaperInput.captured("https://example.org/file.pdf\n" + invalid) == "https://example.org/file.pdf", "capture does not promote malformed BV text")
+        }
         try rejects({ _ = try PaperInput.captured(String(repeating: "1706.03762 ", count: 201)) }, "capture batch limit before dedup")
         try rejects({ _ = try PaperInput.captured(String(repeating: "x", count: ResourceLimits.inputBytes + 1)) }, "capture byte limit before extraction")
         try rejects({ _ = try PaperInput.decode(Data([0xff, 0xfe])) }, "non-UTF8 input rejected")

@@ -11,7 +11,7 @@ enum ActivityLevel: String, Codable, CaseIterable {
         switch self { case .info: return "信息"; case .success: return "成功"; case .warning: return "注意"; case .error: return "错误" }
     }
     var symbol: String {
-        switch self { case .info: return "circle"; case .success: return "checkmark.circle"; case .warning: return "clock"; case .error: return "exclamationmark.circle" }
+        switch self { case .info: return "info.circle"; case .success: return "checkmark.circle"; case .warning: return "exclamationmark.triangle"; case .error: return "exclamationmark.circle" }
     }
 }
 

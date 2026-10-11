@@ -86,7 +86,7 @@ struct DownloadPreferences {
 enum PaperInput {
     private static let markdownLabels = try! NSRegularExpression(pattern: #"\[[^\]\r\n]*\]\((?=https?://)"#, options: .caseInsensitive)
     private static let candidates = try! NSRegularExpression(
-        pattern: #"https?://[^\s<>\"“”]+|(?<![\w./])(?:\d{4}\.\d{4,5}|[A-Za-z][A-Za-z.-]*(?:\.[A-Za-z]{2})?/\d{7})(?:v\d+)?(?![\w.])"#,
+        pattern: #"https?://[^\s<>\"“”]+|(?<![\w./])(?-i:BV1[1-9A-HJ-NP-Za-km-z]{9})(?![\w.])|(?<![\w./])(?:\d{4}\.\d{4,5}|[A-Za-z][A-Za-z.-]*(?:\.[A-Za-z]{2})?/\d{7})(?:v\d+)?(?![\w.])"#,
         options: .caseInsensitive)
     static func captured(_ text: String) throws -> String {
         guard text.utf8.count <= ResourceLimits.inputBytes else { throw DownloadError.limit("输入超过 64 KB，请分批导入。") }

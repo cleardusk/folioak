@@ -10,6 +10,7 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
 enum UIColors {
     static let success = adaptive(light: (0.08, 0.43, 0.22), dark: (0.30, 0.85, 0.43))
     static let error = adaptive(light: (0.70, 0.12, 0.09), dark: (1, 0.42, 0.42))
+    static let warning = adaptive(light: (0.51, 0.33, 0.06), dark: (0.94, 0.72, 0.31))
 
     private static func adaptive(light: (Double, Double, Double), dark: (Double, Double, Double)) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -93,7 +94,25 @@ struct DownloadItem: Identifiable, Codable {
     var additionalURLs: [URL]? = nil
     var incompleteFileList: Bool? = nil
     var localURLs: [URL] { (savedURL.map { [$0] } ?? []) + (additionalURLs ?? []) }
-    var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.flatMap { try? DownloadSource.parse($0.absoluteString) } }
+    var source: DownloadSource? {
+        if let reference { return .arxiv(reference) }
+        guard let directURL else { return nil }
+        let parsed = try? DownloadSource.parse(directURL.absoluteString)
+        if parsed?.isMedia != true, let savedURL {
+            if savedURL.pathExtension.lowercased() == "pdf" { return .pdf(directURL) }
+            if FileStorage.extensions.contains(savedURL.pathExtension.lowercased()) { return .file(directURL) }
+        }
+        return parsed
+    }
+    var symbol: String {
+        if let savedURL {
+            let ext = savedURL.pathExtension.lowercased()
+            if ext == "pdf" { return "doc.text" }
+            if FileStorage.imageExtensions.contains(ext) { return "photo" }
+            return FileStorage.videoExtensions.contains(ext) ? "play.rectangle" : "waveform"
+        }
+        return mediaFormat == .audio && source?.isMedia == true ? "waveform" : source?.symbol ?? "doc"
+    }
     var title: String { metadata?.title ?? documentTitle ?? source?.label ?? original }
     var canRetry: Bool { source != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
 }

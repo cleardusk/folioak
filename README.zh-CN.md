@@ -7,10 +7,10 @@
 **原生 macOS 下载器，保存论文与媒体。**
 
 - **文档**：arXiv、Hugging Face 论文页、OpenReview、ACL、CVF、GitHub PDF 和公开 PDF 直链。
-- **媒体**：YouTube、Bilibili、X、今日头条的单个公开视频，以及图片／音视频直链。
+- **媒体**：YouTube、Bilibili、X、今日头条、小红书、抖音、TikTok、Instagram、Vimeo 的单个视频，以及图片／音视频直链。
 - **归档**：一个保存位置，自动分入 `Papers`、`Videos`、`Audio`、`Images`，可在文档库和媒体库中查找。
 
-内置完整下载组件，无需安装 Python 或 Homebrew。仅支持公开可访问的内容；不支持播放列表、账号主页、X 纯图片帖子或登录内容。今日头条请使用 `/video/数字/` 详情页链接。
+内置完整下载组件，无需安装 Python 或 Homebrew。站点下载取决于当前网络能否公开访问；部分站点对公开视频也要求登录或验证，应用不会导入浏览器凭据。不支持播放列表、账号主页和纯图文帖子。小红书请粘贴完整视频分享链接并保留访问参数，也识别 `xhslink.com` 短链。今日头条请使用 `/video/数字/` 详情页链接。
 
 ## 安装
 

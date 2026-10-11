@@ -37,6 +37,14 @@ enum MockReply {
     case status(Int, String? = nil), network(URLError.Code), corrupt, failure(DownloadError)
 }
 
+private final class ResponseDownloadTask: URLSessionDownloadTask, @unchecked Sendable {
+    let fixture: HTTPURLResponse
+    private(set) var cancelled = false
+    init(_ fixture: HTTPURLResponse) { self.fixture = fixture; super.init() }
+    override var response: URLResponse? { fixture }
+    override func cancel() { cancelled = true }
+}
+
 actor MockTransport: HTTPTransport {
     private var metadataReplies: [MockReply]
     private var pdfReplies: [MockReply]
@@ -249,6 +257,18 @@ struct CoreTests {
         let observer = ProgressObserver(limit: 1024)
         observer.urlSession(session, downloadTask: task, didWriteData: 1025, totalBytesWritten: 1025, totalBytesExpectedToWrite: -1)
         if case .limit? = observer.failure { } else { throw TestFailure.failed("streaming limit did not report clear error") }
+        for (path, mime, limited) in [("/download", "application/pdf", true), ("/download", "application/octet-stream", true),
+                                      ("/download", "video/mp4", false), ("/download", "image/png", false),
+                                      ("/video.mp4", "application/octet-stream", false), ("/video.mp4", "application/pdf", true)] {
+            let response = HTTPURLResponse(url: URL(string: "https://example.org" + path)!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": mime])!
+            let task = ResponseDownloadTask(response)
+            let observer = ProgressObserver(limit: FileStorage.byteLimit, policy: .externalPDF)
+            observer.urlSession(session, downloadTask: task, didWriteData: 1, totalBytesWritten: ResourceLimits.pdfBytes + 1, totalBytesExpectedToWrite: -1)
+            try expect((observer.failure != nil) == limited, "production streaming policy keeps PDF/unknown at 256 MB and recognizes declared media: \(path) \(mime)")
+            try expect(task.cancelled == limited, "streaming limit cancels only rejected responses")
+            observer.urlSession(session, downloadTask: task, didWriteData: 1, totalBytesWritten: FileStorage.byteLimit + 1, totalBytesExpectedToWrite: -1)
+            try expect(observer.failure != nil && task.cancelled, "all media retains the 16 GB streaming maximum")
+        }
         let redirect = ProgressObserver()
         let response = HTTPURLResponse(url: task.originalRequest!.url!, statusCode: 302, httpVersion: nil, headerFields: nil)!
         var allowed = true
@@ -1047,7 +1067,7 @@ struct CoreTests {
             for dark in [false, true] {
                 let palette = theme.palette(dark: dark)
                 for surface in [palette.canvas, palette.surface] {
-                    for text in [palette.text, palette.secondary, palette.accent, dark ? 0xFF6B6B : 0xB21F17, dark ? 0x4CD96E : 0x146E38] {
+                    for text in [palette.text, palette.secondary, palette.accent, dark ? 0xFF6B6B : 0xB21F17, dark ? 0x4CD96E : 0x146E38, dark ? 0xF0B84F : 0x82540F] {
                         try expect(contrast(text, surface) >= 4.5, "\(theme.rawValue) text contrast in \(dark ? "dark" : "light")")
                     }
                 }

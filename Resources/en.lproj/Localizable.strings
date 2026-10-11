@@ -254,6 +254,9 @@
 "请先在浏览器打开头条分享短链，再复制视频详情页地址（/video/…）。" = "Open the Toutiao short link in your browser, then copy its video page address (/video/…).";
 "请粘贴今日头条的视频详情链接（/video/…）；文章和用户主页暂不支持。" = "Paste a Toutiao video page link (/video/…). Articles and profiles are not supported.";
 "请粘贴单个视频或 X 帖子的链接。" = "Paste a single video or X post link.";
+"请粘贴单个视频或帖子的链接；主页和合集暂不支持。" = "Paste a single video or post link. Profiles and collections are not supported.";
+"小红书未返回可下载的视频。请复制完整分享链接并保留访问参数；图文笔记或需要登录、验证的内容当前无法直接下载。" = "Xiaohongshu did not return a downloadable video. Copy the full share link, keeping its access parameters. Image posts and content requiring login or verification cannot currently be downloaded directly.";
+"无法识别：请输入论文、支持站点的视频链接，或 HTTPS 文件直链。" = "Unrecognized input. Enter a paper, a video link from a supported site, or a direct HTTPS file link.";
 "无法识别：请输入论文、YouTube / Bilibili / X 视频链接，或 HTTPS 文件直链。" = "Unrecognized input. Enter a paper, YouTube / Bilibili / X video link, or a direct HTTPS file link.";
 "下载站点拒绝访问（403），可能需要登录或浏览器验证。" = "The download site denied access (403). Sign-in or browser verification may be required.";
 "下载站点未找到文件或指定版本（404）。" = "The download site could not find the file or requested version (404).";
@@ -428,3 +431,5 @@
 "去重 1 条" = "1 duplicate removed";
 "· 重试 1 次" = "· 1 retry";
 "本次耗时 %@ · 重试 1 次" = "Elapsed time %@ · 1 retry";
+"视频没有可提取的音轨。" = "This video has no audio track to extract.";
+"无法提取音频，未保存。" = "Could not extract audio. No file was saved.";

@@ -587,18 +587,17 @@ struct LogRow: View {
     let palette: ThemePalette
     var horizontalInset: CGFloat = 20
     private var color: Color {
-        switch entry.level { case .error: return UIColors.error; case .success: return UIColors.success; case .warning: return ThemePalette.color(palette.accent); default: return ThemePalette.color(palette.secondary) }
+        switch entry.level { case .error: return UIColors.error; case .success: return UIColors.success; case .warning: return UIColors.warning; default: return ThemePalette.color(palette.secondary) }
     }
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Text(entry.date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits).locale(L10n.locale)))
+            Text(L10n.logTime(entry.date))
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(ThemePalette.color(palette.secondary))
                 .frame(width: 64, height: 16, alignment: .leading)
                 .help(L10n.date(entry.date, dateStyle: .complete))
             Image(systemName: entry.level.symbol).font(.system(size: 12)).foregroundStyle(color).frame(width: 16, height: 16)
-                .opacity(entry.level == .info ? 0 : 1)
                 .accessibilityLabel(L(entry.level.label))
-            Text(L(entry.message)).font(.system(size: 12)).foregroundStyle(entry.level == .error ? color : ThemePalette.color(palette.text))
+            Text(L(entry.message)).font(.system(size: 12)).foregroundStyle(entry.level == .info ? ThemePalette.color(palette.text) : color)
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading).textSelection(.enabled)
         }.padding(.vertical, 8).padding(.horizontal, horizontalInset)
@@ -632,7 +631,7 @@ struct DownloadRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: item.mediaFormat == .audio ? "waveform" : item.source?.symbol ?? "doc")
+            Image(systemName: item.symbol)
                 .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)
                 .frame(width: 28, height: 34)
                 .accessibilityLabel(L(item.state.label))
@@ -722,6 +721,24 @@ struct DownloadRow: View {
     }
 }
 
+struct LogDaySeparator: View {
+    @ObservedObject private var localization = AppLocalization.shared
+    let date: Date
+    let palette: ThemePalette
+    var body: some View {
+        HStack(spacing: 10) {
+            line
+            Text(L10n.date(date, time: .omitted)).font(.system(size: 11, weight: .medium))
+                .foregroundStyle(ThemePalette.color(palette.secondary))
+            line
+        }.frame(maxWidth: .infinity).padding(.vertical, 4)
+    }
+    private var line: some View {
+        Rectangle().fill(ThemePalette.color(palette.border).opacity(0.65))
+            .frame(width: 32, height: 1).accessibilityHidden(true)
+    }
+}
+
 struct LogContent: View {
     @ObservedObject private var localization = AppLocalization.shared
     let entries: [ActivityEntry]
@@ -771,7 +788,7 @@ struct LogContent: View {
                                     if let group = headers[entry.id], group.subject != nil || group.date != nil {
                                         VStack(alignment: .leading, spacing: 8) {
                                             if let date = group.date {
-                                                Text(L10n.date(date, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
+                                                LogDaySeparator(date: date, palette: palette)
                                             }
                                             if let subject = group.subject {
                                                 Text(subject).font(.system(size: 12, weight: .medium)).lineLimit(1).help(subject).textSelection(.enabled)

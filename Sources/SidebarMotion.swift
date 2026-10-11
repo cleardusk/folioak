@@ -161,6 +161,7 @@ enum FilterTabLayout {
 }
 
 struct FilterTabs<Selection: Hashable>: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let options: [Selection]
     @Binding var selection: Selection
     let title: (Selection) -> String
@@ -171,7 +172,9 @@ struct FilterTabs<Selection: Hashable>: View {
             ForEach(options.indices, id: \.self) { index in
                 let option = options[index]
                 Button { selection = option } label: {
-                    Text(title(option)).font(.system(size: 12, weight: selection == option ? .medium : .regular))
+                    // Keep glyph metrics unchanged when selecting a tab. A weight
+                    // change shifts every tab after it, including the underline.
+                    Text(title(option)).font(.system(size: 12, weight: .medium))
                         .foregroundStyle(ThemePalette.color(selection == option ? palette.accent : palette.secondary))
                         .padding(.horizontal, 12).frame(height: 36).contentShape(Rectangle())
                 }

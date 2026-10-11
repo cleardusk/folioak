@@ -26,7 +26,7 @@ enum DownloadError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidLink: return "无法识别：请输入论文、YouTube / Bilibili / X 视频链接，或 HTTPS 文件直链。"
+        case .invalidLink: return "无法识别：请输入论文、支持站点的视频链接，或 HTTPS 文件直链。"
         case .metadata(let message), .limit(let message), .coordination(let message): return message
         case .http(let code, _):
             if code == 403 { return "下载站点拒绝访问（403），可能需要登录或浏览器验证。" }
@@ -315,8 +315,16 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
             lock.lock(); rejectedResponse = response; lock.unlock()
             downloadTask.cancel(); return
         }
-        if totalBytesWritten > limit || totalBytesExpectedToWrite > limit {
-            reject(.limit("文件超过 \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))，已停止下载。")); downloadTask.cancel(); return
+        var responseLimit = limit
+        if policy == .externalPDF, limit > ResourceLimits.pdfBytes, let response = downloadTask.response {
+            let mime = response.mimeType?.lowercased() ?? ""
+            let media = ["image/", "audio/", "video/"].contains { mime.hasPrefix($0) }
+                || FileStorage.extensions.contains(((response.suggestedFilename ?? "") as NSString).pathExtension.lowercased())
+                || FileStorage.extensions.contains(response.url?.pathExtension.lowercased() ?? "")
+            if mime == "application/pdf" || !media { responseLimit = ResourceLimits.pdfBytes }
+        }
+        if totalBytesWritten > responseLimit || totalBytesExpectedToWrite > responseLimit {
+            reject(.limit("文件超过 \(ByteCountFormatter.string(fromByteCount: responseLimit, countStyle: .file))，已停止下载。")); downloadTask.cancel(); return
         }
         let now = ContinuousClock().now
         lock.lock()
@@ -803,18 +811,17 @@ actor DownloadEngine {
 
     func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, mediaFormat: MediaFormat = .automatic, organizeByType: Bool = false, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
         try Task.checkCancellation()
-        let destination = organizeByType && !source.isMedia
-            ? try (source.isPaper ? DownloadFolder.papers : DownloadFolder.media(extension: source.webURL.pathExtension)).prepare(in: directory)
-            : directory
         switch source {
         case .arxiv(let reference):
+            let destination = organizeByType ? try DownloadFolder.papers.prepare(in: directory) : directory
             let paper = try await download(reference, to: destination, naming: naming, event: event)
             return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
         case .media(let url):
-            try DownloadFolder.prepareRoot(destination)
-            return try await MediaDownloader.download(url, to: destination, format: mediaFormat, organizeByType: organizeByType, event: event)
+            try DownloadFolder.prepareRoot(directory)
+            return try await MediaDownloader.download(url, to: directory, format: mediaFormat, organizeByType: organizeByType, event: event)
         case .pdf(let url), .file(let url):
             guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
+            try DownloadFolder.prepareRoot(directory)
             var shared: RequestCoordinator?
             if let coordinator {
                 // Establish a private parent before creating per-origin state.
@@ -822,42 +829,23 @@ actor DownloadEngine {
                 Darwin.close(parent)
                 shared = RequestCoordinator(directory: coordinator.directory.appendingPathComponent("pdf-" + PDFStorage.key(url.host!.lowercased())))
             }
-            let native = pdfTransport ?? URLSessionTransport(policy: .externalPDF, fileLimit: source.isPaper ? ResourceLimits.pdfBytes : FileStorage.byteLimit)
+            let native = pdfTransport ?? URLSessionTransport(policy: .externalPDF, fileLimit: url.pathExtension.lowercased() == "pdf" ? ResourceLimits.pdfBytes : FileStorage.byteLimit)
             let client = DownloadEngine(transport: native, requestInterval: coordinator == nil ? min(1, requestInterval) : 1,
                 retryDelay: retryDelay, rateLimitDelay: rateLimitDelay, coordinator: shared)
-            if source.isPaper { return try await client.downloadPDF(url, to: destination, event: event) }
-            return try await client.downloadFile(url, to: destination, event: event)
+            return try await client.downloadDirect(url, to: directory, mediaFormat: mediaFormat, organizeByType: organizeByType, event: event)
         }
     }
 
-    private func downloadFile(_ url: URL, to directory: URL, event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
-        defer { lease = nil }
-        try await acquire(event: event)
-        return try await retried(event: event) {
-            event(.progress(DownloadProgress(received: 0, total: -1)))
-            let (file, response) = try await transport.download(for: URLRequest(url: url)) { event(.progress($0)) }
-            defer { try? FileManager.default.removeItem(at: file) }
-            try check(response)
-            guard response.statusCode == 200 else { throw DownloadError.http(response.statusCode, retryAfter: nil) }
-            event(.validating)
-            let ext = url.pathExtension.lowercased()
-            try await FileStorage.validate(file, extension: ext)
-            let filename = (response.suggestedFilename ?? url.lastPathComponent) as NSString
-            let title = PaperMetadata.cleanTitle((filename.lastPathComponent as NSString).deletingPathExtension)
-            let saved = try FileStorage.save(file, title: title, extension: ext, to: directory)
-            event(.document(saved.title))
-            return saved
-        }
-    }
-
-    private func downloadPDF(_ url: URL, to directory: URL, event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
+    private func downloadDirect(_ url: URL, to directory: URL, mediaFormat: MediaFormat, organizeByType: Bool,
+                                event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         defer { lease = nil }
         try await acquire(event: event)
         event(.checkingLocal)
-        var cached = try PDFStorage.existing(source: url, directory: directory)
+        let paperDirectory = organizeByType ? directory.appendingPathComponent(DownloadFolder.papers.rawValue, isDirectory: true) : directory
+        var cached = FileStorage.extensions.contains(url.pathExtension.lowercased()) ? nil : try PDFStorage.existing(source: url, directory: paperDirectory)
         return try await retried(event: event) {
             var request = URLRequest(url: url)
-            request.setValue("application/pdf, application/octet-stream;q=0.9", forHTTPHeaderField: "Accept")
+            request.setValue("application/pdf, image/*, audio/*, video/*, application/octet-stream;q=0.9", forHTTPHeaderField: "Accept")
             if let cached {
                 request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match")
                 if cached.etag == nil { request.setValue(cached.modified, forHTTPHeaderField: "If-Modified-Since") }
@@ -867,7 +855,7 @@ actor DownloadEngine {
             defer { try? FileManager.default.removeItem(at: file) }
             if response.statusCode == 304 {
                 guard response.url == url, let previous = cached, (previous.etag != nil || previous.modified != nil),
-                      let verified = try PDFStorage.existing(source: url, directory: directory), verified.hash == previous.hash else {
+                      let verified = try PDFStorage.existing(source: url, directory: paperDirectory), verified.hash == previous.hash else {
                     cached = nil; throw DownloadError.invalidPDF
                 }
                 try check(HTTPURLResponse(url: response.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!)
@@ -878,7 +866,23 @@ actor DownloadEngine {
             guard response.statusCode == 200 else { throw DownloadError.http(response.statusCode, retryAfter: nil) }
             try Task.checkCancellation()
             event(.validating)
-            let saved = try PDFStorage.save(downloaded: file, source: url, response: response, directory: directory)
+            let ext = try await FileStorage.detectedExtension(file, source: url, response: response)
+            let saved: SavedDocument
+            if ext == "pdf" {
+                let destination = organizeByType ? try DownloadFolder.papers.prepare(in: directory) : directory
+                saved = try PDFStorage.save(downloaded: file, source: url, response: response, directory: destination)
+            } else {
+                let streams = try await FileStorage.validate(file, extension: ext)
+                let audioOnly = mediaFormat == .audio && (FileStorage.videoExtensions.contains(ext) || streams.contains(where: \.isVideo))
+                let converted = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-audio-" + UUID().uuidString + ".m4a")
+                defer { try? FileManager.default.removeItem(at: converted) }
+                if audioOnly { try await FileStorage.extractAudio(file, streams: streams, to: converted) }
+                let outputExtension = audioOnly ? "m4a" : ext
+                let destination = organizeByType ? try DownloadFolder.media(extension: outputExtension).prepare(in: directory) : directory
+                let filename = (response.suggestedFilename ?? url.lastPathComponent) as NSString
+                let title = PaperMetadata.cleanTitle((filename.lastPathComponent as NSString).deletingPathExtension)
+                saved = try FileStorage.save(audioOnly ? converted : file, title: title, extension: outputExtension, to: destination)
+            }
             event(.document(saved.title))
             return saved
         }

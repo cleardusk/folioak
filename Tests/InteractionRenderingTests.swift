@@ -25,12 +25,13 @@ private final class SelectionTestWindow: NSWindow {
 
 private struct MovingFilterProbe: View {
     @ObservedObject var probe: FilterLayoutProbe
-    private let palette = ThemePalette(canvas: 0xFFFFFF, surface: 0xFFFFFF, text: 0x000000, secondary: 0x555555,
+    var titles = ["全部", "进行中", "已完成"]
+    var palette = ThemePalette(canvas: 0xFFFFFF, surface: 0xFFFFFF, text: 0x000000, secondary: 0x555555,
                                        border: 0xDDDDDD, accent: 0xFF0000, action: 0xFF0000, onAction: 0xFFFFFF)
     var body: some View {
         HStack(spacing: 0) {
             Color.clear.frame(width: probe.inset)
-            FilterTabs(options: [0, 1, 2], selection: $probe.selection, title: { ["全部", "进行中", "已完成"][$0] }, palette: palette)
+            FilterTabs(options: Array(titles.indices), selection: $probe.selection, title: { titles[$0] }, palette: palette)
             Spacer(minLength: 0)
         }.frame(width: 600, height: 36).background(Color.white)
     }
@@ -553,6 +554,38 @@ extension CoreTests {
         probe.selection = 2
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         try sample("tab change during parent motion")
+        // Isolate selection from foreground color and the moving underline.
+        // Every text pixel should remain identical, including neighboring tabs.
+        let stableProbe = FilterLayoutProbe()
+        stableProbe.inset = 0
+        let black = ThemePalette(canvas: 0xFFFFFF, surface: 0xFFFFFF, text: 0, secondary: 0,
+                                 border: 0xDDDDDD, accent: 0, action: 0, onAction: 0xFFFFFF)
+        let stableView = NSHostingView(rootView: MovingFilterProbe(probe: stableProbe, palette: black))
+        let stableWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 36), styleMask: [.borderless], backing: .buffered, defer: false)
+        stableWindow.contentView = stableView
+        defer { stableWindow.orderOut(nil) }
+        func textPixels() throws -> [UInt8] {
+            stableView.layoutSubtreeIfNeeded(); stableWindow.displayIfNeeded()
+            guard let bitmap = stableView.bitmapImageRepForCachingDisplay(in: stableView.bounds) else { throw TestFailure.failed("stable filter bitmap") }
+            stableView.cacheDisplay(in: stableView.bounds, to: bitmap)
+            let rows = Int(CGFloat(bitmap.pixelsHigh) * 29 / 36)
+            return (0..<rows).flatMap { y in
+                (0..<bitmap.pixelsWide).map { x in
+                    UInt8(((bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)?.redComponent ?? 1) * 255).rounded())
+                }
+            }
+        }
+        for titles in [["All", "Info", "Success", "Warning", "Error"], ["全部", "信息", "成功", "注意", "错误"]] {
+            stableView.rootView = MovingFilterProbe(probe: stableProbe, titles: titles, palette: black)
+            stableProbe.selection = 0
+            RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+            let baseline = try textPixels()
+            for selected in [1, 3, 2, 4, 0] {
+                stableProbe.selection = selected
+                RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+                try expect(try textPixels() == baseline, "filter selection preserves every text pixel in \(titles[0])")
+            }
+        }
         print("PASS rendered filter motion: intermediate frames and rapid parent reversal stay aligned")
     }
 }

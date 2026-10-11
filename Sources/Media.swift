@@ -1,7 +1,62 @@
 import Foundation
 import CryptoKit
 import ImageIO
+import UniformTypeIdentifiers
 import Darwin
+
+// Keep routing, canonical hosts and platform cooldowns in one place. Only
+// individual-media paths are accepted; profiles and collections stay excluded.
+enum MediaSite: String, CaseIterable {
+    case youtube, bilibili, x, toutiao, xiaohongshu, douyin, tiktok, instagram, vimeo
+
+    var hosts: [String] {
+        switch self {
+        case .youtube: return ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"]
+        case .bilibili: return ["bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"]
+        case .x: return ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"]
+        case .toutiao: return ["toutiao.com", "www.toutiao.com", "m.toutiao.com", "v.toutiao.com"]
+        case .xiaohongshu: return ["xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com"]
+        case .douyin: return ["douyin.com", "www.douyin.com", "v.douyin.com"]
+        case .tiktok: return ["tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]
+        case .instagram: return ["instagram.com", "www.instagram.com"]
+        case .vimeo: return ["vimeo.com", "www.vimeo.com", "player.vimeo.com"]
+        }
+    }
+    private static let byHost = Dictionary(uniqueKeysWithValues: allCases.flatMap { site in site.hosts.map { ($0, site) } })
+    static func site(for host: String?) -> Self? { host.flatMap { byHost[$0.lowercased()] } }
+    func canonicalHost(_ host: String) -> String {
+        switch (self, host) {
+        case (.toutiao, "toutiao.com"), (.toutiao, "m.toutiao.com"): return "www.toutiao.com"
+        case (.xiaohongshu, "xiaohongshu.com"): return "www.xiaohongshu.com"
+        case (.douyin, "douyin.com"): return "www.douyin.com"
+        case (.tiktok, "tiktok.com"): return "www.tiktok.com"
+        case (.instagram, "instagram.com"): return "www.instagram.com"
+        default: return host
+        }
+    }
+    func accepts(_ url: URL) -> Bool {
+        let host = url.host ?? "", path = url.path
+        func matches(_ expression: String) -> Bool { path.range(of: expression, options: .regularExpression) != nil }
+        switch self {
+        case .youtube:
+            return host == "youtu.be" ? matches(#"^/[^/]+/?$"#) : path == "/watch" || path.hasPrefix("/shorts/") || path.hasPrefix("/live/")
+        case .bilibili:
+            return host == "b23.tv" ? matches(#"^/[A-Za-z0-9]+/?$"#) : path.hasPrefix("/video/")
+        case .x: return matches(#"^/(?:[^/]+/status|i/web/status)/[0-9]+(?:/video/[0-9]+)?/?$"#)
+        case .toutiao: return host != "v.toutiao.com" && matches(#"^/video/[0-9]+/?$"#)
+        case .xiaohongshu:
+            return host == "xhslink.com" ? matches(#"^/(?:[am]/[A-Za-z0-9]+|[A-Za-z0-9]{2,})/?$"#) : matches(#"^/(?:explore|discovery/item)/[0-9a-f]{24}/?$"#)
+        case .douyin:
+            return host == "v.douyin.com" ? matches(#"^/[A-Za-z0-9_-]+/?$"#) : matches(#"^/video/[0-9]+/?$"#)
+        case .tiktok:
+            if host == "vm.tiktok.com" || host == "vt.tiktok.com" { return matches(#"^/[A-Za-z0-9]+/?$"#) }
+            return matches(#"^/(?:t/[A-Za-z0-9]+|(?:embed|(?:share|@[A-Za-z0-9_.-]+)/video)/[0-9]+)/?$"#)
+        case .instagram: return matches(#"^/(?:(?!share/)[^/]+/)?(?:p|tv|reels?)/[A-Za-z0-9_-]+/?$"#)
+        case .vimeo:
+            return host == "player.vimeo.com" ? matches(#"^/video/[0-9]+/?$"#) : matches(#"^/(?:[0-9]+(?:/[0-9a-f]{10})?|channels/[^/]+/[0-9]+|groups/[^/]+/videos/[0-9]+)/?$"#)
+        }
+    }
+}
 
 enum MediaFormat: String, Codable, CaseIterable, Sendable {
     case automatic, audio
@@ -147,14 +202,76 @@ final class MediaOutput: @unchecked Sendable {
 
 enum FileStorage {
     struct Stream: Decodable, Equatable {
+        struct Disposition: Decodable { let attached_pic: Int? }
         let codec_type: String?
         let codec_name: String?
+        let disposition: Disposition?
+        var isVideo: Bool { codec_type == "video" && disposition?.attached_pic != 1 }
+        static func == (lhs: Self, rhs: Self) -> Bool { lhs.codec_type == rhs.codec_type && lhs.codec_name == rhs.codec_name }
     }
-    private struct Probe: Decodable { let streams: [Stream] }
+    private struct Probe: Decodable {
+        struct Format: Decodable { let format_name: String? }
+        let streams: [Stream]
+        let format: Format?
+    }
     static let byteLimit: Int64 = 16 * 1024 * 1024 * 1024
     static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "tif", "tiff"]
     static let videoExtensions: Set<String> = ["mp4", "mov", "webm", "mkv"]
     static let extensions = imageExtensions.union(videoExtensions).union(["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus"])
+
+    // Response metadata is a hint; validate the downloaded content before saving.
+    static func detectedExtension(_ file: URL, source: URL, response: HTTPURLResponse) async throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        if try handle.read(upToCount: 5) == Data("%PDF-".utf8) { return "pdf" }
+        if let image = CGImageSourceCreateWithURL(file as CFURL, nil), let type = CGImageSourceGetType(image),
+           let ext = UTType(type as String)?.preferredFilenameExtension, imageExtensions.contains(ext) { return ext }
+        let types = ["application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+                     "image/heic": "heic", "image/tiff": "tiff", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm",
+                     "video/x-matroska": "mkv", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/x-m4a": "m4a",
+                     "audio/aac": "aac", "audio/wav": "wav", "audio/x-wav": "wav", "audio/flac": "flac", "audio/x-flac": "flac",
+                     "audio/ogg": "ogg", "application/ogg": "ogg", "audio/webm": "webm", "audio/opus": "opus"]
+        if let mime = response.mimeType?.lowercased(), let ext = types[mime] { return ext }
+        for name in [response.suggestedFilename, response.url?.lastPathComponent, source.lastPathComponent].compactMap({ $0 }) {
+            let ext = (name as NSString).pathExtension.lowercased()
+            if ext == "pdf" || extensions.contains(ext) { return ext }
+        }
+        if let info = try await probe(file), let format = info.format?.format_name {
+            let names = Set(format.components(separatedBy: ","))
+            if names.contains("mov") { return info.streams.contains(where: \.isVideo) ? "mp4" : "m4a" }
+            if names.contains("matroska") { return "mkv" }
+            for ext in ["mp3", "aac", "wav", "flac", "ogg"] where names.contains(ext) { return ext }
+        }
+        return "pdf"
+    }
+
+    private static func probe(_ file: URL) async throws -> Probe? {
+        let tools = try MediaTools.installed(), output = MediaOutput()
+        let status = try await MediaProcess().run(try tools.executable("ffprobe"), arguments: [
+            "-v", "error", "-protocol_whitelist", "file", "-probesize", "5000000", "-analyzeduration", "5000000",
+            "-show_entries", "stream=codec_type,codec_name:stream_disposition=attached_pic:format=format_name", "-of", "json", file.path
+        ], timeout: 30) {
+            if output.text.utf8.count < 64 * 1024 { output.text += $0 + "\n" }
+        }
+        return status == 0 ? try? JSONDecoder().decode(Probe.self, from: Data(output.text.utf8)) : nil
+    }
+
+    static func extractAudio(_ file: URL, streams: [Stream], to output: URL) async throws {
+        guard let audio = streams.first(where: { $0.codec_type == "audio" }) else {
+            throw DownloadError.metadata("视频没有可提取的音轨。")
+        }
+        let tools = try MediaTools.installed()
+        let codec = ["aac", "alac"].contains(audio.codec_name ?? "") ? "copy" : "aac"
+        let status = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: [
+            "-nostdin", "-v", "error", "-xerror", "-n", "-protocol_whitelist", "file", "-i", file.path, "-map", "0:a:0", "-vn", "-c:a", codec,
+            "-movflags", "+faststart", "-f", "ipod", output.path
+        ]) { _ in }
+        guard status == 0 else { throw DownloadError.metadata("无法提取音频，未保存。") }
+        let result = try await validate(output, extension: "m4a")
+        guard result.contains(where: { $0.codec_type == "audio" }), !result.contains(where: { $0.codec_type == "video" }) else {
+            throw DownloadError.metadata("无法提取音频，未保存。")
+        }
+    }
 
     @discardableResult
     static func validate(_ file: URL, extension ext: String) async throws -> [Stream] {
@@ -170,12 +287,8 @@ enum FileStorage {
                 throw DownloadError.metadata("收到的内容不是完整图片，未保存。")
             }
         } else {
-            let tools = try MediaTools.installed(), output = MediaOutput()
-            let status = try await MediaProcess().run(try tools.executable("ffprobe"), arguments: ["-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", file.path], timeout: 30) {
-                if output.text.utf8.count < 64 * 1024 { output.text += $0 + "\n" }
-            }
-            streams = (try? JSONDecoder().decode(Probe.self, from: Data(output.text.utf8)).streams) ?? []
-            guard status == 0, streams.contains(where: { ["audio", "video"].contains($0.codec_type ?? "") }) else {
+            streams = try await probe(file)?.streams ?? []
+            guard streams.contains(where: { ["audio", "video"].contains($0.codec_type ?? "") }) else {
                 throw DownloadError.metadata("收到的内容不是有效音视频，未保存。")
             }
         }
@@ -289,15 +402,10 @@ enum MediaDownloader {
         }
     }
 
-    static let hosts: Set<String> = ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv", "x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com", "www.toutiao.com", "v.toutiao.com"]
+    static let hosts = Set(MediaSite.allCases.flatMap(\.hosts))
     static func accepts(_ url: URL) -> Bool {
-        guard PublicHTTPS.allows(url), let host = url.host, hosts.contains(host) else { return false }
-        if host == "v.toutiao.com" { return false }
-        if host == "www.toutiao.com" { return url.path.range(of: #"^/video/[0-9]+/?$"#, options: .regularExpression) != nil }
-        if host == "youtu.be" || host == "b23.tv" { return url.path.count > 1 }
-        if host.contains("youtube.com") { return url.path == "/watch" || url.path.hasPrefix("/shorts/") || url.path.hasPrefix("/live/") }
-        if host.contains("bilibili.com") { return url.path.hasPrefix("/video/") }
-        return url.path.range(of: #"^/(?:[^/]+/status|i/web/status)/[0-9]+(?:/video/[0-9]+)?/?$"#, options: .regularExpression) != nil
+        guard PublicHTTPS.allows(url), let site = MediaSite.site(for: url.host) else { return false }
+        return site.accepts(url)
     }
 
     static func arguments(url: URL, format: MediaFormat, tools: MediaTools, folder: URL) throws -> [String] {
@@ -334,7 +442,7 @@ enum MediaDownloader {
         let status = try await MediaProcess().run(try tools.executable("yt-dlp"), arguments: arguments(url: url, format: format, tools: tools, folder: folder)) {
             output.receive($0, event: event)
         }
-        guard status == 0, !output.files.isEmpty else { throw failure(output.error) }
+        guard status == 0, !output.files.isEmpty else { throw failure(output.error, url: url) }
         event(.validating)
         var files = try validatedOutputs(output.files, in: folder)
         let scratch = folder.appendingPathComponent(".mp4-" + UUID().uuidString, isDirectory: true)
@@ -350,7 +458,7 @@ enum MediaDownloader {
         return result
     }
 
-    static func failure(_ raw: String) -> DownloadError {
+    static func failure(_ raw: String, url: URL? = nil) -> DownloadError {
         let lower = raw.lowercased()
         // Match an HTTP status rather than digits in a video ID. yt-dlp does not
         // expose Retry-After here; use the native engine's default one-minute pause.
@@ -364,6 +472,9 @@ enum MediaDownloader {
         }
         if lower.contains("sign in") || lower.contains("login") || lower.contains("cookies") || lower.contains("403") || lower.contains("authentication") {
             return .metadata("此内容需要登录或站点验证，当前无法直接下载。请在浏览器中确认链接可访问，或换一个公开链接。")
+        }
+        if MediaSite.site(for: url?.host) == .xiaohongshu && lower.contains("no video formats") {
+            return .metadata("小红书未返回可下载的视频。请复制完整分享链接并保留访问参数；图文笔记或需要登录、验证的内容当前无法直接下载。")
         }
         if lower.contains("no video") || lower.contains("does not contain") { return .metadata("链接中没有可下载的视频。若是图片，请使用图片文件的直链。") }
         if lower.contains("unsupported url") { return .metadata("该链接暂不支持，请使用单个视频或帖子链接。") }

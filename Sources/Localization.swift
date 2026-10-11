@@ -95,6 +95,9 @@ enum L10n {
                      time: Date.FormatStyle.TimeStyle = .standard) -> String {
         date.formatted(Date.FormatStyle(date: dateStyle, time: time).locale(locale))
     }
+    static func logTime(_ date: Date) -> String {
+        date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits).locale(Locale(identifier: "en_GB")))
+    }
 }
 
 func L(_ source: String) -> String { L10n.text(source) }

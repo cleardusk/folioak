@@ -32,6 +32,28 @@ extension CoreTests {
         for url in ["https://www.toutiao.com/", "https://www.toutiao.com/article/7505382061495176511/", "https://v.toutiao.com/abc/", "https://www.toutiao.com/video/not-a-number/"] {
             try rejects({ _ = try DownloadSource.parse(url) }, "Toutiao non-video pages never route to PDF")
         }
+        let sharedNote = try DownloadSource.parse("https://xiaohongshu.com/discovery/item/674051740000000007027a15?xsec_token=a%2Bb%3D&xsec_source=app_share#ignored")
+        try expect(sharedNote.isMedia && sharedNote.directURL?.host == "www.xiaohongshu.com" && sharedNote.directURL?.query == "xsec_token=a%2Bb%3D&xsec_source=app_share" && sharedNote.directURL?.fragment == nil,
+                   "Xiaohongshu canonicalization preserves the access token and drops only the fragment")
+        for link in ["http://xhslink.com/a/abc123", "https://xhslink.com/m/abc123", "https://xhslink.com/abc123",
+                     "https://v.douyin.com/abc123/", "https://www.douyin.com/video/6961737553342991651",
+                     "https://www.tiktok.com/@demo/video/1234567890", "https://vm.tiktok.com/ZTR45GpSF/", "https://vt.tiktok.com/ZSe4FqkKd", "https://tiktok.com/t/ZTRC5xgJp",
+                     "https://instagram.com/reel/ABC_123-/", "https://www.instagram.com/demo/p/ABC123/",
+                     "https://vimeo.com/76979871", "https://vimeo.com/76979871/abcdef1234", "https://player.vimeo.com/video/76979871?h=abcdef1234", "https://vimeo.com/channels/staffpicks/76979871"] {
+            let media = try DownloadSource.parse(link)
+            try expect(media.isMedia && media.directURL?.scheme == "https" && MediaDownloader.accepts(media.webURL), "mainstream individual media and shared links route to the media engine: \(link)")
+        }
+        for link in ["https://www.xiaohongshu.com/user/profile/abc", "https://www.xiaohongshu.com/explore/not-a-note",
+                     "https://xhslink.com/a/", "https://www.douyin.com/user/123", "https://www.douyin.com/note/123",
+                     "https://www.tiktok.com/@demo", "https://www.tiktok.com/@demo/collection/name-123", "https://www.tiktok.com/music/demo-123",
+                     "https://www.instagram.com/demo/", "https://www.instagram.com/stories/demo/123", "https://www.instagram.com/reels/audio/123/", "https://www.instagram.com/share/reel/abc123/",
+                     "https://vimeo.com/showcase/123", "https://vimeo.com/channels/staffpicks", "https://player.vimeo.com/123",
+                     "http://example.com/file.mp4", "https://user:pass@www.xiaohongshu.com/explore/674051740000000007027a15"] {
+            try rejects({ _ = try DownloadSource.parse(link) }, "profiles, collections, malformed media and unsafe URLs are rejected: \(link)")
+        }
+        try expect(!(try DownloadSource.parse("https://xiaohongshu.com.example.org/file.pdf")).isMedia, "lookalike domains never gain media routing")
+        try expect(MediaDownloader.failure("ERROR: No video formats found", url: sharedNote.webURL).localizedDescription.contains("完整分享链接"), "Xiaohongshu missing formats explain access parameters without asserting the post is an image")
+        try expect(MediaDownloader.failure("ERROR: Unsupported URL: https://www.xiaohongshu.com/login", url: sharedNote.webURL).localizedDescription.contains("登录"), "short-link redirects to login retain authentication guidance")
         for ext in ["png", "mp3", "mp4"] {
             try expect(try DownloadSource.parse("https://example.com/file." + ext).isPaper == false, "all native media types use media destination")
         }
@@ -40,6 +62,7 @@ extension CoreTests {
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         let image = root.appendingPathComponent("photo.png")
         try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+        try await directMediaRegressionTests(root: root, image: image)
         let folder = root.appendingPathComponent("media-output")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let parentWithoutSlash = URL(fileURLWithPath: folder.path, isDirectory: false)
@@ -118,12 +141,95 @@ extension CoreTests {
         print("PASS media: routing, native transfer, reuse, invalid response, atomic group rollback, safe process arguments, child cancellation, restoration and paper isolation")
     }
 
+    @MainActor static func directMediaRegressionTests(root: URL, image: URL) async throws {
+        FixtureProtocol.reset(); defer { FixtureProtocol.reset() }
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FixtureProtocol.self]
+        let engine = DownloadEngine(pdfTransport: URLSessionTransport(testConfiguration: config, policy: .externalPDF), requestInterval: 0, retryDelay: 0)
+        FixtureProtocol.install(.init(headers: ["Content-Type": "image/png"], body: try Data(contentsOf: image)), path: "/image/png")
+        let suite = "folioak-direct-regression-\(UUID().uuidString)", prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        let state = root.appendingPathComponent("direct-regression.json")
+        let model = DownloadModel(engine: engine, preferences: prefs, stateURL: state)
+        model.directory = root.appendingPathComponent("direct-regression")
+        model.input = "https://example.org/image/png?token=preserved"
+        model.start(); try await waitForQueue(model)
+        let saved = model.items[0]
+        try expect(saved.state == .saved && saved.savedURL?.pathExtension == "png" && saved.savedURL?.deletingLastPathComponent().lastPathComponent == "Images", "extensionless PNG is detected and organized by actual content")
+        try expect(FixtureProtocol.count("/image/png") == 1 && FixtureProtocol.lastRequest("/image/png")?.url?.query == "token=preserved", "valid image needs one attempt and preserves access parameters")
+        try expect(model.papers.isEmpty && model.mediaLibrary.count == 1 && MediaLibraryStore.valid(saved) && saved.symbol == "photo", "extensionless media enters media library and uses its actual file icon")
+        model.persistWorkspace()
+        let restored = DownloadModel(engine: engine, preferences: prefs, stateURL: state)
+        try expect(restored.mediaLibrary.count == 1 && restored.history.count + restored.items.count > 0, "extensionless media remains available after restart")
+
+        let fixtures = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Tests/Fixtures/Media")
+        let movie = root.appendingPathComponent("with-audio.mp4"), tools = try MediaTools.installed()
+        let status = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: [
+            "-nostdin", "-v", "error", "-n", "-i", fixtures.appendingPathComponent("video.mp4").path,
+            "-i", fixtures.appendingPathComponent("tone.m4a").path, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest", movie.path
+        ]) { _ in }
+        try expect(status == 0, "small video/audio fixture mux")
+        let covered = root.appendingPathComponent("covered.m4a")
+        let coverImage = root.appendingPathComponent("cover.jpg")
+        let cover = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16, bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try cover.representation(using: .jpeg, properties: [:])!.write(to: coverImage)
+        let coverStatus = try await MediaProcess().run(try tools.executable("ffmpeg"), arguments: [
+            "-nostdin", "-v", "error", "-n", "-i", fixtures.appendingPathComponent("tone.m4a").path,
+            "-i", coverImage.path, "-map", "0:a:0", "-map", "1:v:0", "-c", "copy", "-disposition:v:0", "attached_pic", covered.path
+        ]) { _ in }
+        try expect(coverStatus == 0, "small covered audio fixture mux")
+        FixtureProtocol.install(.init(headers: ["Content-Type": "video/mp4"], body: try Data(contentsOf: movie)), path: "/flower.mp4")
+        let destination = root.appendingPathComponent("direct-audio-exact")
+        let options = try CLIOptions.parse(["--audio", "--json", "https://example.org/flower.mp4", "-o", destination.path])
+        let console = CapturedConsole()
+        let code = await CLIRunner.run(options, version: "test", engine: engine, preferences: prefs, stdout: { console.stdout($0) }, stderr: { console.stderr($0) })
+        let report = try JSONSerialization.jsonObject(with: Data(console.output.utf8)) as! [String: Any]
+        let rows = report["results"] as! [[String: Any]], audio = URL(fileURLWithPath: rows[0]["path"] as! String)
+        let streams = try await FileStorage.validate(audio, extension: "m4a")
+        try expect(code == 0 && audio.pathExtension == "m4a" && audio.deletingLastPathComponent().path == destination.path && streams.allSatisfy { $0.codec_type == "audio" }, "CLI --audio on MP4 direct link saves only audio in the exact output directory")
+        let again = try await engine.download(DownloadSource.parse("https://example.org/flower.mp4"), to: destination, mediaFormat: .audio)
+        try expect(again.alreadyExisted && again.url == audio, "repeated audio extraction reuses content without publishing a video")
+        FixtureProtocol.install(.init(headers: ["Content-Type": "video/mp4"], body: try Data(contentsOf: movie)), path: "/video/download")
+        let organized = try await engine.download(DownloadSource.parse("https://example.org/video/download"), to: model.directory, mediaFormat: .audio, organizeByType: true)
+        try expect(organized.url.pathExtension == "m4a" && organized.url.deletingLastPathComponent().lastPathComponent == "Audio", "extensionless video in audio mode uses Audio folder")
+        for (path, file, ext, category) in [("/binary/video", movie, "mp4", "Videos"),
+                                             ("/binary/audio", fixtures.appendingPathComponent("tone.m4a"), "m4a", "Audio"),
+                                             ("/binary/covered", covered, "m4a", "Audio")] {
+            FixtureProtocol.install(.init(headers: ["Content-Type": "application/octet-stream"], body: try Data(contentsOf: file)), path: path)
+            let url = URL(string: "https://example.org" + path)!
+            let result = try await engine.download(DownloadSource.parse(url.absoluteString), to: model.directory, organizeByType: true)
+            let item = DownloadItem(original: url.absoluteString, directURL: url, state: .saved, savedURL: result.url, documentTitle: result.title)
+            try expect(result.url.pathExtension == ext && result.url.deletingLastPathComponent().lastPathComponent == category && MediaLibraryStore.valid(item), "octet-stream without a filename is classified from its container and remains valid library media")
+        }
+        let pdf = root.appendingPathComponent("reverse.pdf"); try createPDF(at: pdf)
+        FixtureProtocol.install(.init(headers: ["Content-Type": "application/pdf"], body: try Data(contentsOf: pdf)), path: "/actually-pdf.mp4")
+        model.input = "https://example.org/actually-pdf.mp4"
+        model.start(); try await waitForQueue(model)
+        try expect(model.items[0].source?.isPaper == true && model.items[0].savedURL?.pathExtension == "pdf" && model.papers.count == 1 && model.mediaLibrary.count == 1, "PDF returned from a media-suffixed URL enters documents")
+        model.clearDownloadRecords()
+        try expect(model.items.isEmpty && model.history.isEmpty && model.papers.count == 1 && model.mediaLibrary.count == 1, "actual content classification keeps both libraries after clearing download history")
+        model.persistWorkspace()
+        try expect(DownloadModel(engine: engine, preferences: prefs, stateURL: state).papers.count == 1, "reverse classification remains in documents after restart")
+        FixtureProtocol.install(.init(headers: ["Content-Type": "video/mp4"], body: try Data(contentsOf: fixtures.appendingPathComponent("video.mp4"))), path: "/silent.mp4")
+        do {
+            _ = try await engine.download(DownloadSource.parse("https://example.org/silent.mp4"), to: destination, mediaFormat: .audio)
+            throw TestFailure.failed("silent video reported successful audio extraction")
+        } catch let e as TestFailure { throw e }
+        catch { try expect(error.localizedDescription.contains("音轨"), "silent video explains missing audio without saving video") }
+        try expect(try FileManager.default.contentsOfDirectory(atPath: destination.path) == [audio.lastPathComponent], "audio mode publishes no source video or partial output")
+        print("PASS direct media regressions: extensionless content, retained library, audio-only MP4 extraction, exact/category destinations, reuse and missing-track failure")
+    }
+
     @MainActor static func mediaRetryPolicyTests(root: URL) throws {
         let platformLinks = [
             ["youtube.com/watch?v=one", "www.youtube.com/watch?v=two", "m.youtube.com/shorts/three", "youtu.be/four"],
             ["bilibili.com/video/BV1one", "www.bilibili.com/video/BV1two", "m.bilibili.com/video/BV1three", "b23.tv/four"],
             ["x.com/user/status/1", "www.x.com/user/status/2", "twitter.com/user/status/3", "www.twitter.com/user/status/4", "mobile.twitter.com/user/status/5"],
-            ["toutiao.com/video/1/", "www.toutiao.com/video/2/", "m.toutiao.com/video/3/"]
+            ["toutiao.com/video/1/", "www.toutiao.com/video/2/", "m.toutiao.com/video/3/"],
+            ["xiaohongshu.com/explore/674051740000000007027a15", "www.xiaohongshu.com/explore/674051740000000007027a15", "xhslink.com/a/abc123"],
+            ["douyin.com/video/1", "www.douyin.com/video/2", "v.douyin.com/abc123/"],
+            ["tiktok.com/@demo/video/1", "www.tiktok.com/@demo/video/2", "vm.tiktok.com/abc123", "vt.tiktok.com/abc123"],
+            ["instagram.com/reel/abc123/", "www.instagram.com/p/abc123/"],
+            ["vimeo.com/1", "www.vimeo.com/2", "player.vimeo.com/video/3"]
         ]
         var sources: [DownloadSource] = []
         for links in platformLinks {

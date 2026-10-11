@@ -269,11 +269,14 @@ struct LibraryRow: View {
                 .font(.system(size: 21, weight: .light)).foregroundStyle(ThemePalette.color(palette.accent))
                 .frame(width: 44, height: 44).background(ThemePalette.color(palette.accent).opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 13))
                 .accessibilityLabel(paper.favorite ? L("已收藏") : L("文档"))
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    if !paper.read { Circle().fill(ThemePalette.color(palette.accent)).frame(width: 5, height: 5).accessibilityLabel(L("未读")) }
-                    Text(paper.title).font(.system(size: 14, weight: .medium)).lineLimit(2).lineSpacing(3).help(paper.title)
+                .overlay(alignment: .topTrailing) {
+                    if !paper.read {
+                        Circle().fill(ThemePalette.color(palette.accent)).frame(width: 5, height: 5)
+                            .padding(6).accessibilityLabel(L("未读"))
+                    }
                 }
+            VStack(alignment: .leading, spacing: 9) {
+                Text(paper.title).font(.system(size: 14, weight: .medium)).lineLimit(2).lineSpacing(3).help(paper.title)
                 HStack(spacing: 10) {
                     if let ref = paper.reference { Text(ref.identifier).font(.system(size: 11, design: .monospaced)) }
                     else { Text(paper.directURL?.host ?? L("本地 PDF")).lineLimit(1) }

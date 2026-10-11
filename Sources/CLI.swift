@@ -125,7 +125,8 @@ struct CLIOptions {
           \(accent("-h, --help"))           显示帮助
           \(accent("--version"))            显示版本
 
-        支持论文、YouTube / Bilibili / X / 今日头条视频，以及 HTTPS 图片、音频、视频直链。
+        支持论文、YouTube / Bilibili / X / 今日头条 / 小红书 / 抖音 / TikTok / Instagram / Vimeo 视频，
+        以及 HTTPS 图片、音频、视频直链。站点登录或验证限制可能影响下载。
         最多 200 条，自动去重；最多同时下载三个来源，同一来源串行。
         无链接参数时自动读取管道；支持 Markdown 与混合文本。
         默认沿用 UI 的保存位置，自动归入 Papers/Videos/Audio/Images。

@@ -29,13 +29,7 @@ enum DownloadSource: Hashable, Sendable {
         if reference != nil { return "arxiv" }
         let host = directURL!.host!.lowercased()
         guard isMedia else { return host }
-        switch host {
-        case "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be": return "media:youtube"
-        case "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv": return "media:bilibili"
-        case "x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com": return "media:x"
-        case "toutiao.com", "www.toutiao.com", "m.toutiao.com", "v.toutiao.com": return "media:toutiao"
-        default: return host
-        }
+        return MediaSite.site(for: host).map { "media:" + $0.rawValue } ?? host
     }
     var webURL: URL { reference?.abstractURL ?? directURL! }
 
@@ -47,8 +41,15 @@ enum DownloadSource: Hashable, Sendable {
         if value.range(of: #"^BV1[1-9A-HJ-NP-Za-km-z]{9}$"#, options: .regularExpression) != nil {
             return .media(URL(string: "https://www.bilibili.com/video/" + value + "/")!)
         }
-        guard value.utf8.count <= 2048, var parts = URLComponents(string: value), let url = parts.url,
-              PublicHTTPS.allows(url), !["arxiv.org", "www.arxiv.org", "export.arxiv.org"].contains(parts.host?.lowercased() ?? "") else {
+        guard value.utf8.count <= 2048, var parts = URLComponents(string: value) else { throw DownloadError.invalidLink(input) }
+        if let host = parts.host?.lowercased(), let site = MediaSite.site(for: host) {
+            // Shared short links often use HTTP. Upgrade known media domains
+            // before validation; arbitrary HTTP files remain disallowed.
+            if parts.scheme?.lowercased() == "http" { parts.scheme = "https" }
+            parts.host = site.canonicalHost(host)
+        }
+        guard let url = parts.url, PublicHTTPS.allows(url),
+              !["arxiv.org", "www.arxiv.org", "export.arxiv.org"].contains(parts.host?.lowercased() ?? "") else {
             throw DownloadError.invalidLink(input)
         }
         if ["huggingface.co", "www.huggingface.co", "hf.co"].contains(parts.host?.lowercased() ?? ""), parts.path.hasPrefix("/papers/") {
@@ -84,7 +85,6 @@ enum DownloadSource: Hashable, Sendable {
             parts.percentEncodedPath = String(parts.percentEncodedPath.replacingOccurrences(of: "/html/", with: "/papers/").dropLast(5)) + ".pdf"
             parts.query = nil
         }
-        if ["toutiao.com", "m.toutiao.com"].contains(parts.host?.lowercased() ?? "") { parts.host = "www.toutiao.com" }
         parts.fragment = nil; parts.scheme = "https"; parts.host = parts.host?.lowercased()
         if parts.port == 443 { parts.port = nil }
         guard let canonical = parts.url else { throw DownloadError.invalidLink(input) }
@@ -93,7 +93,7 @@ enum DownloadSource: Hashable, Sendable {
                 let hint: String
                 if parts.host == "v.toutiao.com" { hint = "请先在浏览器打开头条分享短链，再复制视频详情页地址（/video/…）。" }
                 else if parts.host == "www.toutiao.com" { hint = "请粘贴今日头条的视频详情链接（/video/…）；文章和用户主页暂不支持。" }
-                else { hint = "请粘贴单个视频或 X 帖子的链接。" }
+                else { hint = "请粘贴单个视频或帖子的链接；主页和合集暂不支持。" }
                 throw DownloadError.metadata(hint)
             }
             return .media(canonical)

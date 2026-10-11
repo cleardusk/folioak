@@ -7,10 +7,10 @@
 **A native macOS downloader for papers and media.**
 
 - **Documents** — arXiv, Hugging Face papers, OpenReview, ACL, CVF, GitHub PDFs, and public PDF links.
-- **Media** — individual public videos from YouTube, Bilibili, X, and Toutiao, plus direct image, audio, and video links.
+- **Media** — individual videos from YouTube, Bilibili, X, Toutiao, Xiaohongshu, Douyin, TikTok, Instagram, and Vimeo, plus direct image, audio, and video links.
 - **Organization** — one download folder, with `Papers`, `Videos`, `Audio`, and `Images` subfolders and built-in document and media libraries.
 
-All download components are bundled. No Python or Homebrew required. Playlists, profiles, image-only X posts, and content requiring login are not supported. For Toutiao, use the full `/video/ID/` page URL.
+All download components are bundled. No Python or Homebrew required. Site downloads depend on public access from your network; some sites require login or verification even for public videos. Browser credentials are not imported. Playlists, profiles and image-only posts are not supported. For Xiaohongshu, paste the full video share link, keeping its access parameters; `xhslink.com` short links are also recognized. For Toutiao, use the full `/video/ID/` page URL.
 
 ## Install
 

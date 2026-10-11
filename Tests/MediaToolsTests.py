@@ -140,6 +140,18 @@ with tempfile.TemporaryDirectory(prefix='media-tools-', dir=ROOT / 'build') as t
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        site_video = f'http://127.0.0.1:{server.server_port}/site-video.mp4'
+        shutil.copyfile(FIXTURES / 'h264.mp4', folder / 'site-video.mp4')
+        os.environ['FOLIOAK_SITE_VIDEO'] = site_video
+        site_info = json.loads(run([
+            tools / 'yt-dlp', '--ignore-config', '--no-plugin-dirs', '--plugin-dirs',
+            ROOT / 'Tests/Fixtures/Sites', '--no-remote-components', '--no-update', '--no-cache-dir',
+            '--no-playlist', '--format', 'bv*+ba/b', '--ffmpeg-location', tools,
+            '--output', folder / 'site-result.%(ext)s', '--print', 'after_move:%()j',
+            '--no-simulate', 'folioak-sites:fixture',
+        ]))
+        assert site_info['title'] == '小红书 offline video' and site_info['width'] == 16
+        assert packets(folder / 'site-result.mp4', 'v') == packets(FIXTURES / 'h264.mp4', 'v')
         output = download({'url': f'http://127.0.0.1:{server.server_port}/playlist.m3u8',
                            'ext': 'mp4', 'protocol': 'm3u8_native'}, 'hls')
     finally:
@@ -157,4 +169,5 @@ with tempfile.TemporaryDirectory(prefix='media-tools-', dir=ROOT / 'build') as t
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
 
 print('PASS media tools: relocated signed libraries, eight audio formats, lossless AAC, '
-      'five video merge formats, HLS repair and invalid-file rejection')
+      'five video merge formats, bundled site routing, Xiaohongshu extraction/transfer, '
+      'HLS repair and invalid-file rejection')
