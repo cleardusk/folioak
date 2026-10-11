@@ -12,7 +12,7 @@ struct MenuChevron: NSViewRepresentable {
     }
     final class ChevronView: NSView {
         let mark = CAShapeLayer()
-        private var angle: CGFloat?
+        private var expanded: Bool?
         private var menuTitle = ""
         private var color = NSColor.secondaryLabelColor
         private var animated = true
@@ -22,11 +22,7 @@ struct MenuChevron: NSViewRepresentable {
             super.init(frame: frame)
             wantsLayer = true
             mark.bounds = CGRect(x: 0, y: 0, width: 10, height: 10)
-            let path = CGMutablePath()
-            path.move(to: CGPoint(x: 1.5, y: 6.5))
-            path.addLine(to: CGPoint(x: 5, y: 3.5))
-            path.addLine(to: CGPoint(x: 8.5, y: 6.5))
-            mark.path = path; mark.fillColor = nil; mark.lineWidth = 1.4
+            mark.path = Self.path(expanded: false); mark.fillColor = nil; mark.lineWidth = 1.4
             mark.lineCap = .round; mark.lineJoin = .round
             layer?.addSublayer(mark)
             setAccessibilityElement(false)
@@ -64,25 +60,33 @@ struct MenuChevron: NSViewRepresentable {
             mark.contentsScale = window?.backingScaleFactor ?? 2
             CATransaction.commit()
         }
+        private static func path(expanded: Bool) -> CGPath {
+            let path = CGMutablePath()
+            let wing: CGFloat = expanded ? 3.5 : 6.5
+            let tip: CGFloat = expanded ? 6.5 : 3.5
+            path.move(to: CGPoint(x: 1.5, y: wing))
+            path.addLine(to: CGPoint(x: 5, y: tip))
+            path.addLine(to: CGPoint(x: 8.5, y: wing))
+            return path
+        }
         func update(expanded: Bool, color: NSColor, animated: Bool) {
-            let target: CGFloat = expanded ? .pi : 0
             CATransaction.begin(); CATransaction.setDisableActions(true)
             mark.strokeColor = color.cgColor
             CATransaction.commit()
-            guard angle != target || !animated else { return }
-            let previous = angle
-            let transform = mark.presentation()?.transform ?? mark.transform
-            let start = atan2(transform.m12, transform.m11)
-            angle = target
+            guard self.expanded != expanded || !animated else { return }
+            let previous = self.expanded
+            let start = mark.presentation()?.path ?? mark.path
+            let target = Self.path(expanded: expanded)
+            self.expanded = expanded
             CATransaction.begin(); CATransaction.setDisableActions(true)
-            mark.transform = CATransform3DMakeRotation(target, 0, 0, 1)
+            mark.path = target
             if animated, previous != nil, window != nil {
-                let turn = CABasicAnimation(keyPath: "transform.rotation.z")
-                turn.fromValue = start; turn.toValue = target
-                turn.duration = expanded ? 0.2 : max(0.04, 0.14 * min(1, Double(abs(start)) / Double.pi))
-                turn.timingFunction = CAMediaTimingFunction(name: expanded ? .easeInEaseOut : .easeOut)
-                mark.add(turn, forKey: "turn")
-            } else { mark.removeAnimation(forKey: "turn") }
+                let fold = CABasicAnimation(keyPath: "path")
+                fold.fromValue = start; fold.toValue = target
+                fold.duration = 0.12
+                fold.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                mark.add(fold, forKey: "fold")
+            } else { mark.removeAnimation(forKey: "fold") }
             CATransaction.commit()
         }
     }

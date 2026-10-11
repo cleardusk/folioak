@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+private final class InteractionTestHost<Content: View>: NSHostingView<Content> {
+    // Exercise canvas gestures without activating the test process on the user's desktop.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 @MainActor private final class FilterLayoutProbe: ObservableObject {
     @Published var inset: CGFloat = 190
     @Published var selection = 0
@@ -20,6 +25,91 @@ private struct MovingFilterProbe: View {
 }
 
 extension CoreTests {
+    @MainActor static func blankCanvasFocusTests() async throws {
+        _ = NSApplication.shared
+        let suite = "leafpeak-blank-focus-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        func field(_ root: NSView) -> NSTextField? {
+            if let text = root as? NSTextField, text.placeholderString?.hasPrefix("搜索") == true { return text }
+            return root.subviews.lazy.compactMap(field).first
+        }
+        for page in WorkspacePage.allCases {
+            let model = DownloadModel(preferences: preferences)
+            let item = DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"),
+                                    state: .saved, savedURL: URL(fileURLWithPath: "/tmp/focus-fixture.pdf"), documentTitle: "Focus fixture")
+            model.history = [item]; model.upsertPaper(item)
+            model.mediaLibrary = [DownloadItem(original: "https://example.com/focus.mp4", directURL: URL(string: "https://example.com/focus.mp4"),
+                                               state: .saved, savedURL: URL(fileURLWithPath: "/tmp/focus-fixture.mp4"), documentTitle: "Focus fixture")]
+            model.record(.info, "Focus fixture")
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
+            var endEditingCount = 0
+            let view = InteractionTestHost(rootView: DownloaderView(model: model, page: page, endTextEditing: { [weak window] in
+                endEditingCount += 1
+                if window?.firstResponder is NSTextView { window?.makeFirstResponder(nil) }
+            }))
+            window.isReleasedWhenClosed = false
+            window.contentView = view; window.orderFront(nil)
+            defer { window.close() }
+            func settle() async {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            }
+            func click(_ point: NSPoint, in target: NSView) async {
+                let location = target.convert(point, to: nil)
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                }
+                await settle()
+            }
+            func blank() async { await click(NSPoint(x: 650, y: view.isFlipped ? view.bounds.height - 90 : 90), in: view) }
+            func fromTop(_ x: CGFloat, _ y: CGFloat) async {
+                await click(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y), in: view)
+            }
+            await settle()
+            if page == .downloads {
+                model.focusInput(); await settle()
+                guard let editor = window.firstResponder as? LinkTextView else { throw TestFailure.failed("input gains focus") }
+                editor.insertText("1706.03762", replacementRange: editor.selectedRange())
+                await blank()
+                try expect(window.firstResponder !== editor && model.input == "1706.03762", "canvas ends input editing without clearing the draft (dismissals: \(endEditingCount))")
+                model.objectWillChange.send(); await settle()
+                try expect(window.firstResponder !== editor, "ordinary view updates do not restore dismissed input focus")
+                await fromTop(550, 70)
+                try expect(window.firstResponder is LinkTextView, "clicking the composer background restores editing")
+                await fromTop(75, 158)
+                try expect(editor.window == nil, "document-library navigation removes the input")
+                await fromTop(75, 108)
+                try expect(!(window.firstResponder is LinkTextView), "returning to downloads does not restore stale input focus")
+                await fromTop(75, 158)
+                model.focusInput(); await settle()
+                try expect(window.firstResponder is LinkTextView, "input shortcut still focuses after changing pages")
+                await blank()
+            }
+            model.searchRequest = UUID(); await settle()
+            try expect(field(view)?.currentEditor() === window.firstResponder, "\(page): search opens focused (field: \(field(view) as Any), responder: \(window.firstResponder as Any))")
+            await blank()
+            try expect(field(view) == nil, "\(page): empty search collapses on blank canvas")
+            model.searchRequest = UUID(); await settle()
+            await fromTop(90, 500)
+            try expect(field(view) == nil, "\(page): sidebar blank collapses empty search")
+            model.searchRequest = UUID(); await settle()
+            guard let editor = field(view)?.currentEditor() as? NSTextView else { throw TestFailure.failed("search reopens") }
+            editor.insertText("no-matching-result", replacementRange: editor.selectedRange()); await settle()
+            await blank()
+            try expect(field(view)?.stringValue == "no-matching-result" && field(view)?.currentEditor() == nil,
+                       "\(page): blank no-results view ends editing but preserves the filter")
+            model.searchRequest = UUID(); await settle()
+            guard let reopened = field(view)?.currentEditor() as? NSTextView else { throw TestFailure.failed("filtered search refocuses") }
+            reopened.selectAll(nil); reopened.insertText("", replacementRange: reopened.selectedRange()); await settle()
+            await blank()
+            try expect(field(view) == nil, "\(page): cleared search collapses again")
+        }
+        print("PASS blank canvas: input dismissal, preserved draft, refocus and search closure on every page")
+    }
+
     @MainActor static func initialDirectoryTests() throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("leafpeak-first-launch-\(UUID().uuidString)")
         let suite = "leafpeak-first-launch-\(UUID().uuidString)"
@@ -121,32 +211,42 @@ extension CoreTests {
         let menu = NSMenu(), other = NSMenu()
         menu.addItem(withTitle: "/test/Leafpeak", action: nil, keyEquivalent: "")
         other.addItem(withTitle: "Other menu", action: nil, keyEquivalent: "")
+        func tip(_ path: CGPath?) -> CGFloat {
+            // Core Animation may normalize interpolated paths to cubic curves.
+            // The tip and either wing stay symmetric about y=5 throughout.
+            path.map { 10 - $0.currentPoint.y } ?? -1
+        }
         NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: other)
-        try expect(view.mark.animation(forKey: "turn") == nil, "unrelated menus leave the directory arrow alone")
+        try expect(view.mark.animation(forKey: "fold") == nil, "unrelated menus leave the directory arrow alone")
         NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
-        var middle: CGFloat = 0
+        var middle: CGFloat = 3.5
         let deadline = Date().addingTimeInterval(0.4)
         repeat {
             RunLoop.current.run(mode: .eventTracking, before: Date().addingTimeInterval(0.01))
             CATransaction.flush()
-            if let frame = view.mark.presentation()?.transform { middle = atan2(frame.m12, frame.m11) }
-        } while (middle <= 0.05 || middle >= .pi - 0.05) && Date() < deadline
-        try expect(middle > 0.05 && middle < .pi - 0.05, "chevron renders intermediate angles during native menu tracking")
+            middle = tip(view.mark.presentation()?.path)
+        } while (middle <= 3.55 || middle >= 6.45) && Date() < deadline
+        try expect(middle > 3.55 && middle < 6.45, "chevron renders intermediate shapes during native menu tracking")
         NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: other)
-        try expect(view.mark.transform.m11 < -0.999, "unrelated menu closing cannot reset the directory arrow")
-        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
-        let reversed = (view.mark.animation(forKey: "turn") as? CABasicAnimation)?.fromValue as? CGFloat
-        try expect(reversed.map { abs($0 - middle) < 0.2 } == true, "rapid menu close reverses from the displayed angle")
-        let closing = view.mark.animation(forKey: "turn") as? CABasicAnimation
-        try expect(closing.map { $0.duration >= 0.04 && $0.duration <= 0.14 } == true, "closing starts briskly and scales to the remaining angle")
+        try expect(tip(view.mark.path) == 6.5, "unrelated menu closing cannot reset the directory arrow")
+        for opening in [false, true, false] {
+            let displayed = tip(view.mark.presentation()?.path)
+            NotificationCenter.default.post(name: opening ? NSMenu.didBeginTrackingNotification : NSMenu.didEndTrackingNotification, object: menu)
+            guard let fold = view.mark.animation(forKey: "fold") as? CABasicAnimation,
+                  let fromValue = fold.fromValue else { throw TestFailure.failed("chevron reversal animation") }
+            try expect(abs(tip(fromValue as! CGPath) - displayed) < 0.2, "rapid reversal continues from the displayed shape")
+            try expect(fold.duration == 0.12, "both directions use the same short response")
+            RunLoop.current.run(mode: .eventTracking, before: Date().addingTimeInterval(0.01))
+            CATransaction.flush()
+        }
         view.configure(menuTitle: "/test/Leafpeak", color: .white, animated: false)
-        try expect(view.mark.animation(forKey: "turn") == nil && abs(view.mark.transform.m12) < 0.001 && view.mark.transform.m11 > 0.999,
-                   "reduced motion settles an in-flight turn without leaving an animation")
+        try expect(view.mark.animation(forKey: "fold") == nil && tip(view.mark.path) == 3.5,
+                   "reduced motion settles an in-flight fold without leaving an animation")
         try expect(view.hitTest(.zero) == nil, "decorative chevron cannot steal menu clicks")
         view.removeFromSuperview()
         NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
-        try expect(view.mark.animation(forKey: "turn") == nil && view.mark.transform.m11 > 0.999, "detached arrows stop observing menus")
-        print("PASS menu chevron: tracking interpolation, reversal, reduced motion, menu isolation and observer cleanup")
+        try expect(view.mark.animation(forKey: "fold") == nil && tip(view.mark.path) == 3.5, "detached arrows stop observing menus")
+        print("PASS menu chevron: native tracking, continuous shape reversal, reduced motion and menu isolation")
     }
 
     @MainActor static func inputFocusRaceTests() async throws {

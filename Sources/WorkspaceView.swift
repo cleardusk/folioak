@@ -57,6 +57,7 @@ struct DownloaderView: View {
     @ObservedObject var model: DownloadModel
     @WorkspaceViewState var page: WorkspacePage = .downloads
     var showSettings: () -> Void = {}
+    var endTextEditing: () -> Void = {}
     @WorkspaceViewState private var collapsed = false
     @WorkspaceViewState private var navigationHovered = false
     @WorkspaceViewState private var navigationActivatedAt: Date?
@@ -126,7 +127,7 @@ struct DownloaderView: View {
         .frame(minWidth: 780, minHeight: 540)
         .foregroundStyle(ThemePalette.color(palette.text))
         .tint(accent)
-        .background(ThemePalette.color(palette.canvas))
+        .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture(perform: dismissEditing))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
         .ignoresSafeArea(.container, edges: .top)
@@ -143,6 +144,7 @@ struct DownloaderView: View {
         }
         .onChange(of: page) { _ in
             query = ""; searchExpanded = false; searchFocused = false; selectedID = nil; listFocus = nil
+            if page != .downloads { inputFocused = false; endTextEditing() }
             if focusListOnArrival { focusListOnArrival = false; focusList() }
         }
         .onChange(of: visibleItems.map(\.id)) { _ in
@@ -159,6 +161,13 @@ struct DownloaderView: View {
         guard !visibleItems.isEmpty else { listFocus = nil; return }
         if selectedID == nil { selectedID = visibleItems.first?.id }
         inputFocused = false; listFocus = UUID()
+    }
+
+    private func dismissEditing() {
+        inputFocused = false
+        searchFocused = false
+        searchExpanded = false
+        endTextEditing()
     }
 
     private func openSearch(_ request: UUID) {
@@ -223,6 +232,7 @@ struct DownloaderView: View {
             }.buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary).help("设置（⌘,）").accessibilityLabel("设置")
         }.padding(.horizontal, 12).padding(.bottom, 16).frame(width: collapsed ? 74 : 190)
             .background(ThemePalette.color(palette.sidebar))
+            .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
     }
 
     private var header: some View {
@@ -324,7 +334,9 @@ struct DownloaderView: View {
                 }
             }.padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 18)
         }
-        .background(ThemePalette.color(palette.surface))
+        .background(ThemePalette.color(palette.surface).contentShape(Rectangle()).onTapGesture {
+            if model.busy { dismissEditing() } else { model.focusInput() }
+        })
         .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).stroke((inputFocused || dropTargeted) && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
         .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
@@ -424,6 +436,7 @@ struct DownloaderView: View {
             }
             if rows.isEmpty {
                 empty(icon: query.isEmpty && filter == .all ? "tray" : "magnifyingglass", text: emptyMessage)
+                    .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
             } else {
                 ScrollViewReader { scroll in
                     GeometryReader { viewport in
@@ -444,6 +457,7 @@ struct DownloaderView: View {
                             .frame(minHeight: viewport.size.height, alignment: .top)
                             .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture {
                                 selectedID = nil; listFocus = nil
+                                dismissEditing()
                             })
                     }
                     .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], didFocus: { request in
@@ -491,7 +505,7 @@ struct DownloaderView: View {
     }
 
     private var logContent: some View {
-        LogContent(entries: visibleLogs, hasLogs: !model.logs.isEmpty, query: query, level: $logLevel, palette: palette)
+        LogContent(entries: visibleLogs, hasLogs: !model.logs.isEmpty, query: query, level: $logLevel, palette: palette, dismissEditing: dismissEditing)
     }
 
     private var footer: some View {
@@ -695,6 +709,7 @@ struct LogContent: View {
     let query: String
     @Binding var level: ActivityLevel?
     let palette: ThemePalette
+    var dismissEditing: () -> Void = {}
     @WorkspaceViewState private var position = LogScrollPosition()
     @WorkspaceViewState private var followingLatest = true
     @WorkspaceViewState private var requestedBottom: Bool?
@@ -726,35 +741,39 @@ struct LogContent: View {
                     Image(systemName: "text.alignleft").font(.system(size: 28, weight: .light))
                     Text(query.isEmpty && level == nil ? "暂无日志" : "没有匹配的日志").font(.system(size: 13))
                 }.foregroundStyle(secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(entries) { entry in
-                            VStack(alignment: .leading, spacing: 0) {
-                                if let group = headers[entry.id], group.subject != nil || group.date != nil {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        if let date = group.date {
-                                            Text(date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
-                                        }
-                                        if let subject = group.subject {
-                                            Text(subject).font(.system(size: 12, weight: .medium)).lineLimit(1).help(subject).textSelection(.enabled)
-                                                .padding(.leading, LogRow.messageInset)
-                                        }
-                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 8)
-                                }
-                                LogRow(entry: entry, palette: palette)
-                            }.id(entry.id)
-                        }
-                    }.background(LogScrollObserver(followingLatest: followingLatest, request: scrollRequest,
-                                                   destination: requestedBottom, animated: !reduceMotion, changed: { metrics in
-                        position = metrics
-                        if requestedBottom == true && metrics.atBottom || requestedBottom == false && metrics.atTop { requestedBottom = nil }
-                    }, userScrolled: { metrics in
-                        requestedBottom = nil
-                        followingLatest = metrics.atBottom
-                    }))
+                GeometryReader { viewport in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(entries) { entry in
+                                VStack(alignment: .leading, spacing: 0) {
+                                    if let group = headers[entry.id], group.subject != nil || group.date != nil {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            if let date = group.date {
+                                                Text(date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 11)).foregroundStyle(secondary)
+                                            }
+                                            if let subject = group.subject {
+                                                Text(subject).font(.system(size: 12, weight: .medium)).lineLimit(1).help(subject).textSelection(.enabled)
+                                                    .padding(.leading, LogRow.messageInset)
+                                            }
+                                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 8)
+                                    }
+                                    LogRow(entry: entry, palette: palette)
+                                }.id(entry.id)
+                            }
+                        }.frame(minHeight: viewport.size.height, alignment: .top)
+                            .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture(perform: dismissEditing))
+                            .background(LogScrollObserver(followingLatest: followingLatest, request: scrollRequest,
+                                                       destination: requestedBottom, animated: !reduceMotion, changed: { metrics in
+                            position = metrics
+                            if requestedBottom == true && metrics.atBottom || requestedBottom == false && metrics.atTop { requestedBottom = nil }
+                        }, userScrolled: { metrics in
+                            requestedBottom = nil
+                            followingLatest = metrics.atBottom
+                        }))
+                    }
                 }
-
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: query) { _ in reset() }

@@ -1255,7 +1255,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "Leafpeak"
         window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow")
         windowChrome = WindowChrome(window: window, model: model, title: "Leafpeak", workspace: true)
-        window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }))
+        window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }, endTextEditing: { [weak window] in
+            // End editing only in this workspace, leaving list navigation intact.
+            if window?.firstResponder is NSTextView { window?.makeFirstResponder(nil) }
+        }))
         window.minSize = NSSize(width: 820, height: 600)
         if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
             var frame = window.frame

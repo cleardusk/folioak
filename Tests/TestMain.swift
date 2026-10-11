@@ -103,6 +103,7 @@ struct CoreTests {
                 try await logScrollTests()
                 try await inputColorTransitionTests()
                 try await listFocusTests()
+                try await blankCanvasFocusTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
             }
@@ -148,6 +149,7 @@ struct CoreTests {
             try await logScrollTests()
             try await inputColorTransitionTests()
             try await listFocusTests()
+            try await blankCanvasFocusTests()
             print("PASS: links, metadata, naming, PDF validation, collisions, retries, pacing, cancellation and queue state")
             if CommandLine.arguments.contains("--stress") {
                 try await resourceTests(root: root, pdf: pdf)
