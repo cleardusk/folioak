@@ -62,6 +62,9 @@ struct DownloaderView: View {
     @WorkspaceViewState private var navigationActivatedAt: Date?
     @WorkspaceViewState private var inputFocused = false
     @WorkspaceViewState private var query = ""
+    @WorkspaceViewState private var searchExpanded = false
+    @WorkspaceViewState private var searchFocusRequest: (id: UUID, edit: UUID, list: UUID, page: WorkspacePage)?
+    @FocusState private var searchFocused: Bool
     @WorkspaceViewState private var filter: QueueFilter = .all
     @WorkspaceViewState private var logLevel: ActivityLevel? = nil
     @WorkspaceViewState private var dropTargeted = false
@@ -134,8 +137,12 @@ struct DownloaderView: View {
         .onReceive(model.$editRequest.dropFirst()) { _ in
             listFocus = nil; focusListOnArrival = false; page = .downloads; inputFocused = true
         }
+        .onReceive(model.$searchRequest.dropFirst()) { openSearch($0) }
+        .onChange(of: searchFocused) { focused in
+            if !focused && query.isEmpty { searchExpanded = false }
+        }
         .onChange(of: page) { _ in
-            query = ""; selectedID = nil; listFocus = nil
+            query = ""; searchExpanded = false; searchFocused = false; selectedID = nil; listFocus = nil
             if focusListOnArrival { focusListOnArrival = false; focusList() }
         }
         .onChange(of: visibleItems.map(\.id)) { _ in
@@ -145,13 +152,20 @@ struct DownloaderView: View {
         .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item) }
         .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
-        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; selectedID = nil; listFocus = nil }
+        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selectedID = nil; listFocus = nil }
     }
 
     private func focusList() {
         guard !visibleItems.isEmpty else { listFocus = nil; return }
         if selectedID == nil { selectedID = visibleItems.first?.id }
         inputFocused = false; listFocus = UUID()
+    }
+
+    private func openSearch(_ request: UUID) {
+        guard hasSearchContent else { return }
+        listFocus = nil; focusListOnArrival = false; inputFocused = false
+        searchFocusRequest = (request, model.editRequest, model.listRequest, page)
+        searchExpanded = true
     }
 
     private var sidebar: some View {
@@ -298,7 +312,7 @@ struct DownloaderView: View {
                         if model.cancelling { ProgressView().controlSize(.small).tint(ThemePalette.color(palette.secondary)) }
                         else { Image(systemName: "stop.fill").font(.system(size: 14, weight: .semibold)) }
                     }.buttonStyle(PrimaryActionStyle(palette: palette))
-                        .keyboardShortcut(.cancelAction).disabled(model.cancelling)
+                        .keyboardShortcut(searchFocused ? nil : .cancelAction).disabled(model.cancelling)
                         .help(model.cancelling ? "正在取消" : "取消下载（Esc）")
                         .accessibilityLabel(model.cancelling ? "正在取消" : "取消下载")
                 } else {
@@ -316,18 +330,54 @@ struct DownloaderView: View {
         .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
     }
 
-    private var searchField: some View {
+    private var hasSearchContent: Bool {
+        switch page {
+        case .downloads: return !model.downloads.isEmpty
+        case .library: return !model.papers.isEmpty
+        case .media: return !model.mediaLibrary.isEmpty
+        case .logs: return !model.logs.isEmpty
+        }
+    }
+
+    private var searchLabel: String {
+        switch page {
+        case .downloads: return "搜索下载"
+        case .library: return "搜索文档"
+        case .media: return "搜索媒体"
+        case .logs: return "搜索日志"
+        }
+    }
+
+    @ViewBuilder private var searchField: some View {
+        if searchExpanded || !query.isEmpty {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(secondary)
-            TextField("搜索", text: $query).textFieldStyle(.plain).font(.system(size: 13))
-                .accessibilityLabel(page == .logs ? "搜索日志" : (page == .library ? "搜索文档" : (page == .media ? "搜索媒体" : "搜索下载")))
+            TextField(searchLabel, text: $query).textFieldStyle(.plain).font(.system(size: 13))
+                .accessibilityLabel(searchLabel).focused($searchFocused)
+                .task(id: model.searchRequest) {
+                    guard let request = searchFocusRequest else { return }
+                    await Task.yield()
+                    guard !Task.isCancelled, searchExpanded,
+                          model.searchRequest == request.id, model.editRequest == request.edit,
+                          model.listRequest == request.list, page == request.page else { return }
+                    searchFocused = true
+                }
+                .onExitCommand {
+                    if query.isEmpty { searchFocused = false; searchExpanded = false }
+                    else { query = "" }
+                }
             if !query.isEmpty {
-                Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary).frame(width: 24, height: 24).contentShape(Rectangle()) }
+                Button { query = ""; searchFocused = true } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(secondary).frame(width: 24, height: 24).contentShape(Rectangle()) }
                     .buttonStyle(.plain).accessibilityLabel("清除搜索")
             }
-        }.padding(.horizontal, page == .downloads ? 10 : 13)
-            .frame(width: page == .downloads ? 140 : 178, height: page == .downloads ? 28 : 36)
+        }.padding(.horizontal, 10)
+            .frame(width: 178, height: 32)
             .background(ThemePalette.color(palette.surface)).clipShape(Capsule())
+        } else {
+            Button { model.searchRequest = UUID() } label: { Image(systemName: "magnifyingglass") }
+                .buttonStyle(RoundButtonStyle(palette: palette)).foregroundStyle(secondary)
+                .help("\(searchLabel)（⌘F）").accessibilityLabel(searchLabel)
+        }
     }
 
     private var papers: some View {
@@ -336,10 +386,23 @@ struct DownloaderView: View {
             if page == .library || (page == .downloads && !model.downloads.isEmpty) {
             HStack(spacing: 4) {
                 if page == .downloads {
-                    FilterTabs(options: QueueFilter.allCases, selection: $filter, title: { $0.rawValue }, palette: palette)
+                    Menu {
+                        Text("下载状态")
+                        ForEach(QueueFilter.allCases, id: \.self) { option in
+                            Button { filter = option } label: {
+                                if option == filter { Label(option.rawValue, systemImage: "checkmark") }
+                                else { Text(option.rawValue) }
+                            }
+                        }
+                    } label: {
+                        Text(filter.rawValue).font(.system(size: 13, weight: .medium)).foregroundStyle(secondary)
+                    }
+                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: "下载状态"))
+                    .menuIndicator(.hidden).fixedSize()
+                    .help("筛选下载状态").accessibilityLabel("下载状态：\(filter.rawValue)")
                     Spacer(minLength: 0)
                     if filter == .failed && query.isEmpty && model.retryCount > 1 && !model.busy {
-                        Button("重试未完成") { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
+                        Button("批量重试") { model.retry() }.buttonStyle(.borderless).font(.system(size: 12))
                             .padding(.trailing, 8)
                     }
                     searchField
@@ -363,6 +426,7 @@ struct DownloaderView: View {
                 empty(icon: query.isEmpty && filter == .all ? "tray" : "magnifyingglass", text: emptyMessage)
             } else {
                 ScrollViewReader { scroll in
+                    GeometryReader { viewport in
                     ScrollView {
                         LazyVStack(spacing: page == .library ? 8 : 0) {
                             ForEach(rows) { item in
@@ -377,6 +441,10 @@ struct DownloaderView: View {
                                 }
                             }
                         }.padding(1)
+                            .frame(minHeight: viewport.size.height, alignment: .top)
+                            .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture {
+                                selectedID = nil; listFocus = nil
+                            })
                     }
                     .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], didFocus: { request in
                         if listFocus == request { listFocus = nil }
@@ -397,6 +465,7 @@ struct DownloaderView: View {
                             else if action == .diagnostics { model.diagnosticItem = item }
                         }
                     })
+                    }
                 }.id(page).frame(maxWidth: .infinity, maxHeight: .infinity)
 
             }

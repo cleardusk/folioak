@@ -78,8 +78,9 @@ struct MenuChevron: NSViewRepresentable {
             mark.transform = CATransform3DMakeRotation(target, 0, 0, 1)
             if animated, previous != nil, window != nil {
                 let turn = CABasicAnimation(keyPath: "transform.rotation.z")
-                turn.fromValue = start; turn.toValue = target; turn.duration = 0.2
-                turn.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                turn.fromValue = start; turn.toValue = target
+                turn.duration = expanded ? 0.2 : max(0.04, 0.14 * min(1, abs(start) / .pi))
+                turn.timingFunction = CAMediaTimingFunction(name: expanded ? .easeInEaseOut : .easeOut)
                 mark.add(turn, forKey: "turn")
             } else { mark.removeAnimation(forKey: "turn") }
             CATransaction.commit()

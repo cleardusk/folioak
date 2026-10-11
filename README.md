@@ -1,6 +1,8 @@
-# Leafpeak
-
-**English** · [简体中文](README.zh-CN.md)
+<p align="center">
+  <img src="Resources/LeafpeakMark.png" width="96" height="96" alt="Leafpeak logo">
+</p>
+<h1 align="center">Leafpeak</h1>
+<p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
 A minimal native macOS downloader for papers, videos, images, and audio.
 
@@ -26,12 +28,8 @@ The app creates `~/Downloads/Leafpeak` on first launch; type subfolders are crea
 
 ## Develop
 
-Requires Xcode or Command Line Tools, plus Python 3.
+Build with `./build.command`; test with `./test.command`. Requires Xcode or Command Line Tools and Python 3.9+.
 
-```sh
-./build.command      # Build
-./test.command       # Run regression tests
-./package.command    # Package
-```
+[Development guide](CONTRIBUTING.md) · [Build & release (中文)](RELEASING.md) · [Design (中文)](DESIGN.md) · [Security notes (中文)](SECURITY-AUDIT.md) · [Media components (中文)](Resources/MediaComponents.md)
 
-[Build & release (中文)](RELEASING.md) · [Design (中文)](DESIGN.md) · [Security notes (中文)](SECURITY-AUDIT.md) · [Media components (中文)](Resources/MediaComponents.md)
+Project source: [MIT](LICENSE). Bundled third-party components retain their own licenses.

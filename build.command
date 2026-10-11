@@ -22,6 +22,7 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
 strip "$staged_app/Contents/MacOS/LeafpeakApp"
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 cp -R Resources/en.lproj Resources/zh-Hans.lproj "$staged_app/Contents/Resources/"
+cp LICENSE "$staged_app/Contents/Resources/LICENSE"
 cp -R build/media-tools "$staged_app/Contents/Resources/media-tools"
 # Prepared tools, nested Python framework and shared libraries are already signed.
 "$staged_app/Contents/Resources/media-tools/qjs" --version

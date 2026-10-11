@@ -1,6 +1,8 @@
-# Leafpeak
-
-[English](README.md) · **简体中文**
+<p align="center">
+  <img src="Resources/LeafpeakMark.png" width="96" height="96" alt="Leafpeak logo">
+</p>
+<h1 align="center">Leafpeak</h1>
+<p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
 原生 macOS 下载器。粘贴链接，保存论文、视频、图片和音频。
 
@@ -26,12 +28,8 @@
 
 ## 开发
 
-需要 Xcode 或 Command Line Tools，以及 Python 3。
+运行 `./build.command` 构建，`./test.command` 测试；需要 Xcode 或 Command Line Tools 和 Python 3.9+。
 
-```sh
-./build.command      # 构建
-./test.command       # 回归测试
-./package.command    # 打包
-```
+[开发指南（English）](CONTRIBUTING.md) · [构建与发布](RELEASING.md) · [设计](DESIGN.md) · [安全与实测](SECURITY-AUDIT.md) · [媒体组件](Resources/MediaComponents.md)
 
-[构建与发布](RELEASING.md) · [设计](DESIGN.md) · [安全与实测](SECURITY-AUDIT.md) · [媒体组件](Resources/MediaComponents.md)
+项目源码采用 [MIT 许可证](LICENSE)；内置第三方组件遵循各自许可证。

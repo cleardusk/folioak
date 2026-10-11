@@ -137,6 +137,8 @@ extension CoreTests {
         NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
         let reversed = (view.mark.animation(forKey: "turn") as? CABasicAnimation)?.fromValue as? CGFloat
         try expect(reversed.map { abs($0 - middle) < 0.2 } == true, "rapid menu close reverses from the displayed angle")
+        let closing = view.mark.animation(forKey: "turn") as? CABasicAnimation
+        try expect(closing.map { $0.duration >= 0.04 && $0.duration <= 0.14 } == true, "closing starts briskly and scales to the remaining angle")
         view.configure(menuTitle: "/test/Leafpeak", color: .white, animated: false)
         try expect(view.mark.animation(forKey: "turn") == nil && abs(view.mark.transform.m12) < 0.001 && view.mark.transform.m11 > 0.999,
                    "reduced motion settles an in-flight turn without leaving an animation")
@@ -236,7 +238,7 @@ extension CoreTests {
         model.record(.info, "下载中", item: model.history[1])
         let view = NSHostingView(rootView: DownloaderView(model: model, page: .logs))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
-        window.contentView = view
+        window.contentView = view; window.orderFront(nil)
         defer { window.orderOut(nil) }
         func settle() async {
             view.layoutSubtreeIfNeeded()
@@ -244,12 +246,14 @@ extension CoreTests {
             view.layoutSubtreeIfNeeded()
         }
         func searchField(_ root: NSView) -> NSTextField? {
-            if let field = root as? NSTextField, field.placeholderString == "搜索" { return field }
+            if let field = root as? NSTextField, field.placeholderString?.hasPrefix("搜索") == true { return field }
             return root.subviews.lazy.compactMap { searchField($0) }.first
         }
         func search(_ text: String) async throws -> NSTextView {
-            guard let field = searchField(view), window.makeFirstResponder(field), let editor = field.currentEditor() as? NSTextView else {
-                throw TestFailure.failed("search editor available")
+            model.searchRequest = UUID()
+            await settle()
+            guard let field = searchField(view), let editor = field.currentEditor() as? NSTextView, window.firstResponder === editor else {
+                throw TestFailure.failed("search opens with its editor focused")
             }
             editor.selectAll(nil); editor.insertText(text, replacementRange: editor.selectedRange())
             await settle()
@@ -280,6 +284,28 @@ extension CoreTests {
         editor.selectAll(nil); editor.insertText("", replacementRange: editor.selectedRange())
         await settle()
         try expect(window.firstResponder === editor, "restoring search results does not replay a consumed list focus request")
+        model.busy = true
+        let searching = try await search("1706")
+        searching.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        await settle()
+        try expect(searchField(view)?.stringValue == "" && !model.cancelling, "Escape clears search without cancelling downloads")
+        searching.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        await settle()
+        try expect(searchField(view) == nil && !model.cancelling, "second Escape closes search without cancelling downloads")
+        model.busy = false
+        for fromList in [true, false] {
+            if fromList { model.listRequest = UUID() } else { model.focusInput() }
+            model.searchRequest = UUID()
+            await settle()
+            try expect(searchField(view)?.currentEditor() === window.firstResponder, "new search wins over pending list and input focus")
+        }
+        for toList in [true, false] {
+            model.searchRequest = UUID()
+            if toList { model.listRequest = UUID() } else { model.focusInput() }
+            await settle()
+            try expect(toList ? window.firstResponder is PaperListKeyboard.KeyView : window.firstResponder is LinkTextView,
+                       "new list and input requests win over pending search focus")
+        }
         model.focusInput()
         await settle()
         try expect(window.firstResponder is LinkTextView, "Command L moves focus back to the input without list focus stealing it")
@@ -290,6 +316,23 @@ extension CoreTests {
         model.focusInput()
         await settle()
         try expect(window.firstResponder is LinkTextView, "same-page Command L wins over list focus with populated download rows")
+        model.listRequest = UUID()
+        await settle()
+        guard let list = window.firstResponder as? PaperListKeyboard.KeyView else { throw TestFailure.failed("list focus before deselection") }
+        let blank = list.convert(NSPoint(x: 80, y: list.isFlipped ? list.bounds.height - 24 : 24), to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = NSEvent.mouseEvent(with: type, location: blank, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            window.sendEvent(event)
+        }
+        await settle()
+        try key(34, "i", .command)
+        try expect(model.diagnosticItem == nil, "clicking the list's blank area deselects without opening a stale row")
+        try key(125, "\u{F701}")
+        await settle()
+        try key(34, "i", .command)
+        try expect(model.diagnosticItem?.id == model.downloads.first?.id, "arrow navigation can select again after blank-area deselection")
+        model.diagnosticItem = nil
         model.items = []; model.history = []
         await settle()
         model.listRequest = UUID()

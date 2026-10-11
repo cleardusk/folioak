@@ -3,6 +3,7 @@ set -euo pipefail
 project_dir="${0:A:h}"
 cd "$project_dir"
 mkdir -p build
+python3 Tools/prepare-media.py
 python3 Tests/MediaToolsTests.py
 version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
 [[ "$version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]

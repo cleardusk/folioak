@@ -1,0 +1,40 @@
+# Development
+
+Leafpeak is a native macOS app with an embedded `leafpick` CLI. Both use the same download engine; there is no server to deploy.
+
+## Start
+
+Use an Apple Silicon Mac, Xcode or Command Line Tools, and Python 3.9+. Clone the repository, then run:
+
+```sh
+./build.command          # Build dist/Leafpeak.app and the embedded CLI
+./test.command          # Offline regression tests
+./test.command --stress # Queue lifecycle and resource checks
+./package.command       # Build and verify DMG / ZIP
+```
+
+The first build or test run needs internet access to fetch pinned media dependencies and compile them. Later runs verify and reuse `build/media-tools/`; regression tests themselves run offline. Run the app from `dist/Leafpeak.app`. CI uses the toolchain documented in [Build & release](RELEASING.md).
+
+## Find the code
+
+| Area | Files | Responsibility |
+| --- | --- | --- |
+| Download engine | `Core.swift`, `PDF.swift`, `Media.swift`, `Shared.swift` | Parse links, schedule requests, validate files, run media tools and coordinate concurrent processes |
+| Application state | `App.swift`, `Workspace.swift`, `Library.swift` | Queue lifecycle, preferences, saved history and libraries |
+| Interface | `WorkspaceView.swift`, `Interaction.swift`, `SidebarMotion.swift`, `Theme.swift`, `Shortcuts.swift` | Views, native controls, keyboard interaction and appearance |
+| Command line | `CLI.swift` | Arguments, progress, structured output and exit codes |
+| Packaging | `Tools/`, `build.command`, `package.command` | Pinned dependencies, signing and verified release artifacts |
+
+Swift sources live in `Sources/`; tests live in `Tests/`. `App.swift` also contains the app lifecycle and settings view. The current build uses explicit source lists in `build.command` and `test.command`; add new Swift files to the relevant lists.
+
+## Make a change
+
+- Keep download and file handling in the shared engine so the app and CLI behave consistently.
+- Keep UI mutations on the main actor. Propagate cancellation to network requests and child processes; never mark a file saved before validation.
+- Use isolated temporary directories and preferences in tests. Do not commit personal paths, downloads, credentials, logs, caches, `build/`, or `dist/`.
+- Run checks relevant to the change. Media-engine changes also need the bundled-tool tests; `--live` deliberately contacts real services and is optional.
+- Keep visible controls and copy minimal. Verify changed interactions in light/dark appearance and at the minimum window size.
+
+Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Release and dependency changes follow [Build & release](RELEASING.md); bundled components have [separate licenses](Resources/MediaComponents.md).
+
+Project source is licensed under [MIT](LICENSE). Keep its copyright notice when redistributing source or binaries; third-party component licenses still apply.

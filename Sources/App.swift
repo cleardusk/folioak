@@ -159,6 +159,7 @@ final class DownloadModel: ObservableObject {
     @Published var duplicateCount = 0
     @Published var editRequest = UUID()
     @Published var listRequest = UUID()
+    @Published var searchRequest = UUID()
     @Published var previewURL: URL?
     @Published var diagnosticItem: DownloadItem?
     let shortcuts: ShortcutSettings
@@ -957,9 +958,11 @@ struct LinkInput: NSViewRepresentable {
         editor.focusChanged = { [weak editor, weak coordinator = context.coordinator] value in
             guard let coordinator else { return }
             let editRequest = coordinator.parent.model.editRequest, listRequest = coordinator.parent.model.listRequest
+            let searchRequest = coordinator.parent.model.searchRequest
             DispatchQueue.main.async { [weak coordinator] in
                 guard let editor, let window = editor.window, let coordinator,
                       coordinator.parent.model.editRequest == editRequest, coordinator.parent.model.listRequest == listRequest,
+                      coordinator.parent.model.searchRequest == searchRequest,
                       (window.firstResponder === editor) == value else { return }
                 coordinator.parent.focused = value
             }
@@ -986,9 +989,11 @@ struct LinkInput: NSViewRepresentable {
         context.coordinator.selectionRequest = model.editRequest
         if !model.busy && (selectToken || (focused && editor.window?.firstResponder !== editor)) {
             let editRequest = model.editRequest, listRequest = model.listRequest
+            let searchRequest = model.searchRequest
             DispatchQueue.main.async { [weak editor, weak coordinator = context.coordinator] in
                 guard let editor, let coordinator, coordinator.parent.focused, !coordinator.parent.model.busy,
                       coordinator.parent.model.editRequest == editRequest, coordinator.parent.model.listRequest == listRequest,
+                      coordinator.parent.model.searchRequest == searchRequest,
                       let window = editor.window else { return }
                 window.makeFirstResponder(editor)
                 if selectToken, let range = DownloaderView.inputRange(of: coordinator.parent.model.editTarget, in: editor.string) {
@@ -1295,6 +1300,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard window.attachedSheet == nil else { return }
         window.makeKeyAndOrderFront(nil); model.listRequest = UUID()
     }
+    @objc private func focusSearch() {
+        guard NSApp.keyWindow === window, window.attachedSheet == nil else { return }
+        model.searchRequest = UUID()
+    }
     @objc private func startDownload() {
         guard NSApp.keyWindow === window, window.attachedSheet == nil, !model.busy else { return }
         model.start()
@@ -1340,6 +1349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ("粘贴", #selector(NSText.paste(_:)), "v"), ("全选", #selector(NSText.selectAll(_:)), "a")
         ])
         edit.item(withTitle: "重做")?.keyEquivalentModifierMask = [.command, .shift]
+        let find = NSMenuItem(title: "搜索", action: #selector(focusSearch), keyEquivalent: "f")
+        find.target = self; edit.addItem(.separator()); edit.addItem(find)
         let navigation = add("前往", [("添加链接", #selector(focusInput), "l"), ("文件列表", #selector(focusList), "j")])
         navigation.items.forEach { $0.target = self }
         let start = NSMenuItem(title: "开始下载", action: #selector(startDownload), keyEquivalent: "\r"); start.target = self; navigation.addItem(start)
