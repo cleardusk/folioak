@@ -61,6 +61,8 @@ extension CoreTests {
         let parsed = FileInformation(url: target, groups: try FileInformation.mediaGroups(probe))
         try expect(value(parsed, "时长") == "1:01:01" && value(parsed, "分辨率") == "1080 × 1920" && value(parsed, "帧率")?.hasSuffix(" fps") == true, "rotation, rational frame rate and duration formatting")
         try expect(parsed.groups.contains { $0.title == "视频（首轨）" } && value(parsed, "音频比特率") == nil && value(parsed, "总比特率") != nil, "cover art is excluded and missing stream bitrates never inherit total bitrate")
+        let tagged = FileInformation(url: target, groups: try FileInformation.mediaGroups(Data(#"{"streams":[{"codec_type":"video","width":1920,"height":1080,"tags":{"rotate":"90"}}]}"#.utf8)))
+        try expect(value(tagged, "分辨率") == "1080 × 1920", "legacy rotation tags are parsed explicitly when no side data exists")
         let unknown = FileInformation(url: target, groups: try FileInformation.mediaGroups(Data(#"{"format":{"duration":"N/A","bit_rate":"0"},"streams":[{"codec_type":"video","codec_name":"h264","avg_frame_rate":"0/0","width":0,"height":0},{"codec_type":"audio","sample_rate":"N/A","channels":0,"bit_rate":"N/A"}]}"#.utf8)))
         try expect(value(unknown, "帧率") == nil && value(unknown, "分辨率") == nil && value(unknown, "时长") == nil && value(unknown, "总比特率") == nil, "unknown and zero-valued media fields are omitted")
         try rejects({ _ = try FileInformation.mediaGroups(Data("{}".utf8)) }, "empty probe output fails cleanly")

@@ -123,7 +123,9 @@ struct FileInformation: Equatable, Sendable {
         if let video = videos.first {
             var fields: [Field] = []
             if let width = video.width, let height = video.height, width > 0, height > 0 {
-                let rotation = video.side_data_list?.compactMap(\.rotation).first ?? video.tags?.rotate.flatMap(Double.init) ?? 0
+                let sideRotation: Double? = video.side_data_list?.compactMap { $0.rotation }.first
+                let tagRotation: Double? = video.tags.flatMap { $0.rotate }.flatMap { Double($0) }
+                let rotation: Double = sideRotation ?? tagRotation ?? 0
                 let rotated = rotation.isFinite && abs(rotation.truncatingRemainder(dividingBy: 180)) == 90
                 fields.append(Field(name: "分辨率", value: rotated ? "\(height) × \(width)" : "\(width) × \(height)"))
             }
