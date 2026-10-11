@@ -441,3 +441,12 @@
 "显示 Folioak 图标" = "Show Folioak Icon";
 "关闭主窗口后继续在菜单栏运行。" = "Keep running in the menu bar after closing the main window.";
 "显示 Folioak" = "Show Folioak";
+
+"清除记录" = "Records";
+"同时将对应文件移到废纸篓" = "Also move files to Trash";
+"默认保留文件。开启后，清除单条下载记录时将文件移到废纸篓；清空所有记录仍保留文件。" = "Files are kept by default. When enabled, clearing one download record moves its files to Trash. Clear All still keeps files.";
+"清除这条记录" = "Clear This Record";
+"清除记录并移到废纸篓" = "Clear Record and Trash Files";
+"资料库或下载记录尚未保存，文件和记录均保留。" = "The libraries or download records have not been saved. Files and records were kept.";
+"只可移除普通下载文件。" = "Only regular downloaded files can be moved to Trash.";
+"未能移除全部文件，记录已保留：%@" = "Some files could not be moved to Trash. The record was kept: %@";

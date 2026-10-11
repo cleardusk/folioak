@@ -152,6 +152,7 @@ struct CoreTests {
             try await workspaceTests(root: root, pdf: pdf)
             try await backgroundPersistenceTests(root: root, pdf: pdf)
             try await clearDownloadRecordsTests(root: root, pdf: pdf)
+            try await clearSingleDownloadRecordTests(root: root, pdf: pdf)
             try menuChevronTests()
             try initialDirectoryTests()
             try await sidebarLayoutTests()
@@ -1009,6 +1010,17 @@ struct CoreTests {
             try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 820, height: 600, name: "generic-pdf-\(scheme == .light ? "light" : "dark")")
             try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "generic-settings-\(scheme == .light ? "light" : "dark")", title: "设置")
         }
+        let savedLanguage = model.language
+        for language in [AppLanguage.chinese, .english] {
+            model.language = language
+            for scheme in [ColorScheme.light, .dark] {
+                app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+                model.busy = true
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-records-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
+                model.busy = false
+            }
+        }
+        model.language = savedLanguage
         model.history = completedItems.filter { $0.savedURL != nil }
         model.history.forEach { model.upsertPaper($0) }
         model.record(.info, "开始下载 · 2 项")

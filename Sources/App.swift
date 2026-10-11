@@ -162,6 +162,9 @@ final class DownloadModel: ObservableObject {
     @Published var showsMenuBarIcon: Bool {
         didSet { preferences.set(showsMenuBarIcon, forKey: "showsMenuBarIcon") }
     }
+    @Published var trashFilesWhenClearingRecord: Bool {
+        didSet { preferences.set(trashFilesWhenClearingRecord, forKey: "trashFilesWhenClearingRecord") }
+    }
     @Published var items: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
     @Published var mediaFormat: MediaFormat = .automatic
     @Published var history: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
@@ -193,6 +196,7 @@ final class DownloadModel: ObservableObject {
     let engine: DownloadEngine
     private let preferences: UserDefaults
     let opener: (URL) -> Bool
+    private let recycleFile: (URL) throws -> Void
     private var worker: Task<Void, Never>?
     private var runID = UUID()
     private let stateURL: URL?
@@ -215,11 +219,12 @@ final class DownloadModel: ObservableObject {
         stateURL.map { $0.deletingLastPathComponent().appendingPathComponent($0.deletingPathExtension().lastPathComponent == "workspace" ? "library.json" : $0.lastPathComponent + ".library.json") }
     }
 
-    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil) {
+    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil, recycleFile: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }) {
         self.engine = engine ?? DownloadEngine(cooldownPreferences: preferences, coordinator: RequestCoordinator())
         self.preferences = preferences
         shortcuts = ShortcutSettings(preferences)
         self.opener = opener
+        self.recycleFile = recycleFile
         self.stateURL = stateURL
         let downloadPreferences = DownloadPreferences(preferences)
         naming = downloadPreferences.naming
@@ -227,6 +232,7 @@ final class DownloadModel: ObservableObject {
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
         language = AppLanguage(rawValue: preferences.string(forKey: "language") ?? "") ?? .system
         showsMenuBarIcon = preferences.object(forKey: "showsMenuBarIcon") as? Bool ?? true
+        trashFilesWhenClearingRecord = preferences.bool(forKey: "trashFilesWhenClearingRecord")
         directory = downloadPreferences.directory
         if preferences.string(forKey: "downloadRootDirectory") == nil {
             preferences.set(directory.path, forKey: "downloadRootDirectory")
@@ -248,30 +254,102 @@ final class DownloadModel: ObservableObject {
     var canClearDownloadRecords: Bool { !busy && (!items.isEmpty || !history.isEmpty) }
 
     func clearDownloadRecords() {
-        guard canClearDownloadRecords else { return }
+        guard canClearDownloadRecords, replaceDownloadRecords(items: [], history: []) else { return }
+        duplicateCount = 0; batchID = UUID()
+    }
+
+    func clearDownloadRecord(_ id: UUID) {
+        guard !busy, downloads.contains(where: { $0.id == id }) else { return }
+        if trashFilesWhenClearingRecord {
+            // Keep recovery records until the libraries and current state are durable.
+            persistWorkspace()
+            guard stateURL == nil || (libraryWritable && mediaLibraryWritable && !libraryDirty && !mediaLibraryDirty && persistenceNotice == nil) else {
+                notice = "资料库或下载记录尚未保存，文件和记录均保留。"; return
+            }
+            let records = (items + history).filter { $0.id == id }
+            var retainedMedia = mediaLibrary.filter { $0.id == id }
+            if retainedMedia.isEmpty || retainedMedia.allSatisfy({ $0.incompleteFileList == true }) {
+                // File deduplication can retain an older library ID. Only a unique
+                // exact saved copy may supply attachments pruned from history.
+                let copies = mediaLibrary.filter { entry in
+                    entry.incompleteFileList != true && records.contains { $0.finishedAt != nil && $0.original == entry.original && $0.createdAt == entry.createdAt && $0.finishedAt == entry.finishedAt && $0.mediaFormat == entry.mediaFormat }
+                }
+                if copies.count == 1 { retainedMedia += copies }
+            }
+            let files = Set((records + retainedMedia).flatMap(\.localURLs).map(fileLocation))
+            do {
+                let existing = try files.filter { url in
+                    guard url.isFileURL else { throw DownloadError.storage("只可移除普通下载文件。") }
+                    guard FileManager.default.fileExists(atPath: url.path) else { return false }
+                    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    guard values.isRegularFile == true, values.isSymbolicLink != true else { throw DownloadError.storage("只可移除普通下载文件。") }
+                    return true
+                }
+                // Validate the entire group before moving any file; trash each path once.
+                for file in existing { try recycleFile(file) }
+            } catch {
+                refreshMissingFiles(files)
+                persistWorkspace()
+                notice = "未能移除全部文件，记录已保留：\(error.localizedDescription)"
+                return
+            }
+            refreshMissingFiles(files)
+        }
+        if replaceDownloadRecords(items: items.filter { $0.id != id }, history: history.filter { $0.id != id }), diagnosticItem?.id == id {
+            diagnosticItem = nil
+        }
+    }
+
+    private func fileLocation(_ url: URL) -> URL {
+        guard url.isFileURL else { return url }
+        // Resolve only the parent: the key stays stable after moving the file,
+        // and a final-component symlink remains visible to the safety check.
+        return url.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(url.lastPathComponent)
+    }
+
+    private func refreshMissingFiles(_ files: Set<URL>) {
+        let missing = files.filter { !FileManager.default.fileExists(atPath: $0.path) }
+        guard !missing.isEmpty else { return }
+        func affected(_ item: DownloadItem) -> Bool { item.localURLs.contains { missing.contains(fileLocation($0)) } }
+        func mark(_ item: inout DownloadItem) {
+            item.state = .missing
+            item.restoreReference = item.metadata?.reference
+            item.error = item.localURLs.contains { FileManager.default.fileExists(atPath: $0.path) }
+                ? "部分文件已不在原位置，仍可打开其余文件，或重新下载。" : "原位置的文件不存在，可重新下载。"
+        }
+        for i in items.indices where affected(items[i]) { mark(&items[i]) }
+        for i in history.indices where affected(history[i]) { mark(&history[i]) }
+        for i in mediaLibrary.indices where affected(mediaLibrary[i]) { mark(&mediaLibrary[i]) }
+        for i in papers.indices where papers[i].file.map({ missing.contains(fileLocation($0)) }) == true { papers[i].missing = true }
+        if let previewURL, missing.contains(fileLocation(previewURL)) { self.previewURL = nil }
+    }
+
+    @discardableResult
+    private func replaceDownloadRecords(items remainingItems: [DownloadItem], history remainingHistory: [DownloadItem]) -> Bool {
         saveWork?.cancel(); saveWork = nil
         pendingWorkspaceSave = false
         persistenceSequence += 1; appliedPersistenceSequence = persistenceSequence
-        // Save independently retained libraries before discarding their recovery
-        // records. Do not save the old queue first: it may evict retained logs.
+        // Save independently retained libraries before discarding recovery records.
         persistLibrary(); persistMediaLibrary()
         guard stateURL == nil || (!libraryDirty && !mediaLibraryDirty) else {
             notice = libraryNotice ?? mediaLibraryNotice ?? "资料库尚未保存，下载记录未清空。"
-            return
+            return false
         }
         do {
+            var retainedHistory = remainingHistory
             if let stateURL {
                 try backupDamagedWorkspace()
-                let snapshot = WorkspaceSnapshot(input: input, items: [], history: [], logs: logs)
+                let snapshot = WorkspaceSnapshot(input: input, items: remainingItems, history: remainingHistory, logs: logs)
                 let retained = try persistenceQueue.sync { try WorkspaceStore.write(snapshot, to: stateURL) }
-                logs = retained.logs
+                logs = retained.logs; retainedHistory = retained.history
             }
             saveWork?.cancel(); saveWork = nil
-            items = []; history = []; duplicateCount = 0
+            items = remainingItems; history = retainedHistory
             notice = nil; persistenceNotice = nil
-            batchID = UUID()
+            return true
         } catch {
             persistenceNotice = "下载记录未能清空：\(error.localizedDescription)"
+            return false
         }
     }
 
@@ -1273,9 +1351,9 @@ struct SettingsView: View {
             SlidingSegments(selection: $tab, options: ["通用", "快捷键"], title: { L($0) }, palette: palette)
             Group {
                 if tab == "通用" { general } else { ShortcutSettingsView(shortcuts: model.shortcuts, palette: palette) }
-            }.frame(width: 422, height: 468, alignment: .top)
+            }.frame(width: 422, height: 512, alignment: .top)
         }.padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 24)
-            .frame(width: 470, height: 544, alignment: .top)
+            .frame(width: 470, height: 588, alignment: .top)
             .environment(\.locale, L10n.locale)
             .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))
             .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
@@ -1320,6 +1398,12 @@ struct SettingsView: View {
                 settingLabel(L("菜单栏"))
                 Toggle(L("显示 Folioak 图标"), isOn: $model.showsMenuBarIcon).toggleStyle(.checkbox)
                     .font(.system(size: 12)).help(L("关闭主窗口后继续在菜单栏运行。"))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(height: 28)
+            HStack(spacing: 16) {
+                settingLabel(L("清除记录"))
+                Toggle(L("同时将对应文件移到废纸篓"), isOn: $model.trashFilesWhenClearingRecord).toggleStyle(.checkbox)
+                    .font(.system(size: 12)).help(L("默认保留文件。开启后，清除单条下载记录时将文件移到废纸篓；清空所有记录仍保留文件。"))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
             HStack(spacing: 16) {

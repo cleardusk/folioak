@@ -615,6 +615,7 @@ struct DownloadRow: View {
     let model: DownloadModel
     let busy: Bool
     let theme: AppTheme
+    let trashFilesWhenClearingRecord: Bool
     let inMediaLibrary: Bool
     let selected: Bool
     let selectionActive: Bool
@@ -622,6 +623,7 @@ struct DownloadRow: View {
 
     init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, selectionActive: Bool = true, select: @escaping () -> Void = {}) {
         self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
+        trashFilesWhenClearingRecord = model.trashFilesWhenClearingRecord
         busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
@@ -704,6 +706,12 @@ struct DownloadRow: View {
         }
         if let url = item.savedURL {
             Button(L("复制文件名")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
+        }
+        if !inMediaLibrary {
+            Divider()
+            Button(L(trashFilesWhenClearingRecord ? "清除记录并移到废纸篓" : "清除这条记录"), role: .destructive) {
+                model.clearDownloadRecord(item.id)
+            }.disabled(busy)
         }
     }
 

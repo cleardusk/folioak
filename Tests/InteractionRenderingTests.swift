@@ -354,7 +354,7 @@ extension CoreTests {
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
         let view = NSHostingView(rootView: SettingsView(model: model).id("通用"))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 544), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 588), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         defer { window.orderOut(nil) }
         func header(_ tab: String) async throws -> [Bool] {

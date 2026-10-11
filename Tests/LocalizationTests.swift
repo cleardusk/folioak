@@ -30,7 +30,7 @@ extension CoreTests {
         guard let input = editor(in: view) else { throw TestFailure.failed("localized input view") }
         input.setSelectedRange(NSRange(location: 2, length: 3))
         let settings = NSHostingView(rootView: SettingsView(model: model))
-        let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 544), styleMask: [.borderless], backing: .buffered, defer: false)
+        let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 588), styleMask: [.borderless], backing: .buffered, defer: false)
         settingsWindow.contentView = settings
         defer { settingsWindow.orderOut(nil) }
         func pickerTitles(in view: NSView) -> [String] {
