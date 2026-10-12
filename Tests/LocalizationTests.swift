@@ -8,7 +8,8 @@ extension CoreTests {
         try expect(AppLanguage.system.code(preferred: ["fr"]) == "en", "unsupported system language falls back to English")
         try expect(L10n.english.count > 350, "English resources are packaged in the test executable")
         for (key, value) in L10n.english {
-            try expect(!value.isEmpty && key.components(separatedBy: "%@").count == value.components(separatedBy: "%@").count, "translation arguments are preserved")
+            let template = DiagnosticMessage.ID.allCases.first { key == $0.rawValue || key.hasPrefix($0.rawValue + ".one") }?.template ?? key
+            try expect(!value.isEmpty && template.components(separatedBy: "%@").count == value.components(separatedBy: "%@").count, "translation arguments are preserved")
         }
         let suite = "folioak-language-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite); AppLocalization.shared.language = .chinese }

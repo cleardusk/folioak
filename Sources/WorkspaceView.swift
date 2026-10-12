@@ -41,6 +41,20 @@ struct QuietButtonStyle: ButtonStyle {
     }
 }
 
+// Routine file actions stay discoverable to keyboard and VoiceOver users;
+// only recovery actions receive a filled treatment.
+struct RowActionStyle: ButtonStyle {
+    let palette: ThemePalette
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.callout.weight(.medium))
+            .foregroundStyle(ThemePalette.color(configuration.isPressed ? palette.accent : palette.secondary))
+            .padding(.horizontal, WorkspaceMetrics.Space.compact)
+            .frame(height: WorkspaceMetrics.controlHeight)
+            .contentShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
+    }
+}
+
 struct RoundButtonStyle: ButtonStyle {
     let palette: ThemePalette
     @Environment(\.isEnabled) private var enabled
@@ -60,8 +74,6 @@ struct DownloaderView: View {
     var showSettings: () -> Void = {}
     var endTextEditing: () -> Void = {}
     @WorkspaceViewState private var collapsed = false
-    @WorkspaceViewState private var navigationHovered = false
-    @WorkspaceViewState private var navigationActivatedAt: Date?
     @WorkspaceViewState private var inputFocused = false
     @WorkspaceViewState private var query = ""
     @WorkspaceViewState private var searchExpanded = false
@@ -80,7 +92,8 @@ struct DownloaderView: View {
     @WorkspaceViewState private var libraryTag: String?
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
+    @Environment(\.colorSchemeContrast) private var contrast
+    private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var listSelectionActive: Bool { listFocused && !inputFocused && !searchFocused }
@@ -110,7 +123,7 @@ struct DownloaderView: View {
         }
     }
     private var visibleLogs: [ActivityEntry] {
-        model.logs.filter { (logLevel == nil || $0.level == logLevel) && (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || L($0.message).localizedCaseInsensitiveContains(query) || ($0.subject?.localizedCaseInsensitiveContains(query) ?? false)) }
+        model.logs.filter { (logLevel == nil || $0.level == logLevel) && (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || $0.localizedMessage.localizedCaseInsensitiveContains(query) || ($0.subject?.localizedCaseInsensitiveContains(query) ?? false)) }
     }
 
     var body: some View {
@@ -118,8 +131,7 @@ struct DownloaderView: View {
             sidebar
             Rectangle().fill(ThemePalette.color(palette.border).opacity(0.55)).frame(width: 1)
             VStack(alignment: .leading, spacing: 0) {
-                if page == .downloads { Color.clear.frame(height: 44) }
-                else { header }
+                header
                 VStack(alignment: .leading, spacing: 16) {
                     if page == .downloads { composer }
                     if page == .logs { logContent } else { papers }
@@ -201,7 +213,7 @@ struct DownloaderView: View {
             }.padding(.top, 34).padding(.bottom, 10)
             VStack(spacing: 6) {
                 ForEach(WorkspacePage.navigation, id: \.self) { destination in
-                    Button { page = destination; navigationActivatedAt = Date() } label: {
+                    Button { page = destination } label: {
                         HStack(spacing: 13) {
                             SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: destination == page)
                                 .font(.system(size: 19, weight: .regular)).frame(width: 24, height: 24)
@@ -221,18 +233,18 @@ struct DownloaderView: View {
                     .accessibilityAddTraits(destination == page ? .isSelected : [])
                 }
             }
-            .overlay(alignment: .topLeading) {
-                SidebarSelectionIndicator(index: WorkspacePage.navigation.firstIndex(of: page) ?? 0, color: accent)
-                    .opacity(page != .logs && (navigationHovered || navigationActivatedAt != nil) ? 1 : 0)
-                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: navigationHovered || navigationActivatedAt != nil)
-            }
-            .onHover { navigationHovered = $0 }
-            .task(id: navigationActivatedAt) {
-                guard navigationActivatedAt != nil else { return }
-                do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
-                navigationActivatedAt = nil
-            }
             Spacer()
+            Button { page = .logs } label: {
+                HStack(spacing: WorkspaceMetrics.Space.regular) {
+                    Image(systemName: WorkspacePage.logs.icon).font(.system(size: 19)).frame(width: 24)
+                    Text(L("日志")).font(.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                        .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
+                    Spacer(minLength: 0)
+                }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
+                    .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
+            }.buttonStyle(SidebarButtonStyle(palette: palette, selected: page == .logs))
+                .foregroundStyle(secondary).help(L("查看日志")).accessibilityLabel(L("日志"))
+                .accessibilityAddTraits(page == .logs ? .isSelected : [])
             Button(action: showSettings) {
                 HStack(spacing: 13) {
                     Image(systemName: "gearshape").font(.system(size: 19)).frame(width: 24)
@@ -253,7 +265,7 @@ struct DownloaderView: View {
                 Button { page = .downloads } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(RoundButtonStyle(palette: palette)).help(L("返回下载")).accessibilityLabel(L("返回下载"))
             }
-            if page != .downloads { Text(L(page.rawValue)).font(.system(size: 20, weight: .semibold)) }
+            Text(L(page.rawValue)).font(.title2.weight(.semibold))
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty { searchField }
@@ -282,14 +294,17 @@ struct DownloaderView: View {
                 } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                     .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("文档库操作"))
             } else if page == .media {
-                if !model.mediaLibrary.isEmpty { searchField }
+                if !model.mediaLibrary.isEmpty {
+                    Text(L("\(visibleItems.count) 项")).font(.callout).monospacedDigit().foregroundStyle(secondary)
+                    searchField
+                }
             } else if page == .logs && !model.logs.isEmpty {
                 searchField
                 Button { model.exportLogs(visibleLogs) } label: { Image(systemName: "square.and.arrow.up") }
                     .buttonStyle(RoundButtonStyle(palette: palette))
                     .disabled(visibleLogs.isEmpty).help(L("导出当前筛选的日志")).accessibilityLabel(L("导出日志"))
             }
-        }.frame(height: 76)
+        }.frame(height: WorkspaceMetrics.headerHeight)
     }
 
     private var downloadActions: some View {
@@ -312,49 +327,64 @@ struct DownloaderView: View {
             .help(L("更多下载操作")).accessibilityLabel(L("下载操作"))
     }
 
+    private var pasteButton: some View {
+        Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
+            .buttonStyle(RoundButtonStyle(palette: palette))
+            .help(L("追加剪贴板中的链接")).accessibilityLabel(L("粘贴链接")).disabled(model.busy)
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text(L("添加链接")).font(.system(size: 14, weight: .medium))
+            HStack(spacing: WorkspaceMetrics.Space.compact) {
+                Text(L("添加链接")).font(.body.weight(.medium))
                 Spacer()
                 if model.hasMediaInput && model.mediaFormat == .audio {
                     Button { model.mediaFormat = .automatic } label: {
-                        Label(L("仅音频"), systemImage: "waveform").font(.system(size: 12)).foregroundStyle(secondary)
+                        Label(L("仅音频"), systemImage: "waveform").font(.callout).foregroundStyle(secondary)
                     }.help(L("视频链接仅保存音频，点按恢复下载视频")).accessibilityLabel(L("仅音频模式，点按恢复视频")).disabled(model.busy)
                 }
-                Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
-                    .help(L("追加剪贴板中的链接")).accessibilityLabel(L("粘贴链接")).disabled(model.busy)
+                pasteButton
                 downloadActions
-            }.buttonStyle(.plain).padding(.leading, 20).padding(.trailing, 24).padding(.top, 12)
+            }.buttonStyle(.plain)
+                .padding(.leading, WorkspaceMetrics.Space.inset).padding(.trailing, WorkspaceMetrics.Space.page)
+                .frame(height: WorkspaceMetrics.controlHeight)
+                .padding(.top, WorkspaceMetrics.Space.regular)
             LinkInput(model: model, focused: $inputFocused, palette: palette)
-                .frame(height: 104).padding(.horizontal, 8).padding(.top, 8)
-            HStack(spacing: 12) {
+                .frame(height: WorkspaceMetrics.inputHeight)
+                .padding(.horizontal, WorkspaceMetrics.Space.compact).padding(.top, WorkspaceMetrics.Space.compact)
+            HStack(spacing: WorkspaceMetrics.Space.regular) {
                 DirectoryMenu(model: model, palette: palette)
                     .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                Spacer(minLength: 8)
-                if model.busy {
-                    Button(action: model.cancel) {
-                        if model.cancelling { ProgressView().controlSize(.small).tint(ThemePalette.color(palette.secondary)) }
-                        else { Image(systemName: "stop.fill").font(.system(size: 14, weight: .semibold)) }
-                    }.buttonStyle(PrimaryActionStyle(palette: palette))
-                        .keyboardShortcut(searchFocused ? nil : .cancelAction).disabled(model.cancelling)
-                        .help(model.cancelling ? L("正在取消") : L("取消下载（Esc）"))
-                        .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
-                } else {
-                    Button(action: model.start) { Image(systemName: "arrow.down") }
-                        .buttonStyle(PrimaryActionStyle(palette: palette))
-                        .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
-                        .disabled(model.tokenCount == 0).help(L("开始下载（\(model.shortcuts[.download].label)）"))
-                        .accessibilityLabel(L("开始下载"))
-                }
-            }.padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 18)
+                Spacer(minLength: WorkspaceMetrics.Space.compact)
+                primaryAction
+            }.padding(.horizontal, WorkspaceMetrics.Space.inset)
+                .padding(.top, WorkspaceMetrics.Space.regular)
+                .padding(.bottom, WorkspaceMetrics.Space.section)
         }
         .background(ThemePalette.color(palette.surface).contentShape(Rectangle()).onTapGesture {
             if model.busy { dismissEditing() } else { model.focusInput() }
         })
-        .clipShape(RoundedRectangle(cornerRadius: 24))
-        .overlay(RoundedRectangle(cornerRadius: 24).stroke((inputFocused || dropTargeted) && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel))
+        .overlay(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).stroke((inputFocused || dropTargeted) && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
         .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
+    }
+
+    @ViewBuilder private var primaryAction: some View {
+        if model.busy {
+            Button(action: model.cancel) {
+                if model.cancelling { ProgressView().controlSize(.small).tint(ThemePalette.color(palette.onAction)) }
+                else { Image(systemName: "stop.fill").font(.system(size: 14, weight: .semibold)) }
+            }.buttonStyle(PrimaryActionStyle(palette: palette))
+                .keyboardShortcut(searchFocused ? nil : .cancelAction).disabled(model.cancelling)
+                .help(model.cancelling ? L("正在取消") : L("取消下载（Esc）"))
+                .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
+        } else {
+            Button(action: model.start) { Image(systemName: "arrow.down") }
+                .buttonStyle(PrimaryActionStyle(palette: palette))
+                .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
+                .disabled(model.tokenCount == 0).help(L("开始下载（\(model.shortcuts[.download].label)）"))
+                .accessibilityLabel(L("开始下载"))
+        }
     }
 
     private var hasSearchContent: Bool {
@@ -423,7 +453,7 @@ struct DownloaderView: View {
                             }
                         }
                     } label: {
-                        Text(L(filter.rawValue)).font(.system(size: 13, weight: .medium)).foregroundStyle(secondary)
+                        Text("\(L(filter.rawValue)) · \(L("\(rows.count) 项"))").font(.body.weight(.medium)).foregroundStyle(secondary)
                     }
                     .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: L("下载状态")))
                     .menuIndicator(.hidden).fixedSize()
@@ -440,6 +470,7 @@ struct DownloaderView: View {
                             .buttonStyle(.plain).foregroundStyle(secondary).help(L("返回文档库"))
                     }
                     else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { L($0.rawValue) }, palette: palette) }
+                    Text(L("\(libraryPapers.count) 篇")).font(.callout).monospacedDigit().foregroundStyle(secondary)
                     Spacer()
                     if let tag = libraryTag {
                         Button { libraryTag = nil } label: {
@@ -457,13 +488,13 @@ struct DownloaderView: View {
                 ScrollViewReader { scroll in
                     GeometryReader { viewport in
                     ScrollView {
-                        LazyVStack(spacing: page == .library ? 8 : 0) {
+                        LazyVStack(spacing: 0) {
                             ForEach(rows) { item in
                                 if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
                                     LibraryRow(paper: paper, model: model, selected: selectedID == item.id, selectionActive: listSelectionActive, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                         .id(item.id)
                                 } else {
-                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, selectionActive: listSelectionActive, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
                                     .id(item.id)
@@ -536,16 +567,16 @@ struct DownloaderView: View {
                     else if !model.summary.isEmpty { Circle().fill(accent).frame(width: 5, height: 5) }
                     Text(L(model.summary)).lineLimit(1)
                     Spacer()
-                    if !model.downloads.isEmpty { Text(L("\(visibleItems.count) 项")).monospacedDigit() }
+
                 } else if page == .logs {
                     Text(L("\(visibleLogs.count) 条")).monospacedDigit()
                     Spacer()
                 } else if page == .media {
-                    Spacer(); Text(L("\(visibleItems.count) 项")).monospacedDigit()
+                    Spacer()
                 } else {
                     if model.importingPDFs { Text(L("正在导入…")) }
                     else if !model.checkingVersions.isEmpty { Text(L("正在检查版本 · 剩余 \(model.checkingVersions.count) 篇")) }
-                    Spacer(); Text(L("\(libraryPapers.count) 篇")).monospacedDigit()
+                    Spacer()
                 }
             }.font(.system(size: 11)).foregroundStyle(secondary).frame(height: 18)
         }
@@ -597,11 +628,11 @@ struct LogRow: View {
                 .help(L10n.date(entry.date, dateStyle: .complete))
             Image(systemName: entry.level.symbol).font(.system(size: 12)).foregroundStyle(color).frame(width: 16, height: 16)
                 .accessibilityLabel(L(entry.level.label))
-            Text(L(entry.message)).font(.system(size: 12)).foregroundStyle(entry.level == .info ? ThemePalette.color(palette.text) : color)
+            Text(entry.localizedMessage).font(.system(size: 12)).foregroundStyle(entry.level == .info ? ThemePalette.color(palette.text) : color)
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading).textSelection(.enabled)
         }.padding(.vertical, 8).padding(.horizontal, horizontalInset)
-            .contentShape(Rectangle()).help(entry.subject ?? L(entry.message))
+            .contentShape(Rectangle()).help(entry.subject ?? entry.localizedMessage)
             .accessibilityElement(children: .ignore).accessibilityLabel(entry.line)
             .contextMenu {
                 Button(L("复制日志")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.line, forType: .string) }
@@ -619,34 +650,46 @@ struct DownloadRow: View {
     let inMediaLibrary: Bool
     let selected: Bool
     let selectionActive: Bool
+    let authenticate: () -> Void
     let select: () -> Void
 
-    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, selectionActive: Bool = true, select: @escaping () -> Void = {}) {
+    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, selectionActive: Bool = true, authenticate: @escaping () -> Void = {}, select: @escaping () -> Void = {}) {
+        self.authenticate = authenticate
         self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
         trashFilesWhenClearingRecord = model.trashFilesWhenClearingRecord
         busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
     @Environment(\.displayScale) private var displayScale
-    private var palette: ThemePalette { theme.palette(dark: scheme == .dark) }
+    @Environment(\.colorSchemeContrast) private var contrast
+    private var palette: ThemePalette { theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
+    private var hasAuthenticationIssue: Bool {
+        guard case .media? = item.source else { return false }
+        return BrowserAuthenticationIssue.matches(item.errorMessage)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: item.symbol)
-                .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)
-                .frame(width: 28, height: 34)
-                .accessibilityLabel(L(item.state.label))
+            Group {
+                if inMediaLibrary {
+                    MediaThumbnail(url: item.savedURL, fallbackSymbol: item.symbol, palette: palette)
+                } else {
+                    Image(systemName: item.symbol)
+                        .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)
+                        .frame(width: WorkspaceMetrics.rowIconSize, height: WorkspaceMetrics.rowIconSize)
+                }
+            }.accessibilityLabel(L10n.text(item.state.message))
             VStack(alignment: .leading, spacing: 6) {
-                Text(item.title).font(.system(size: 13, weight: .medium)).lineSpacing(3)
+                Text(item.title).font(.body.weight(.medium)).lineSpacing(3)
                     .lineLimit(2).help(item.title)
                 HStack(spacing: 10) {
                     if let metadata = item.metadata { Text(metadata.reference.identifier).font(.system(size: 11, design: .monospaced)) }
                     else if let host = item.directURL?.host, item.documentTitle != nil { Text(host).lineLimit(1) }
-                    if !inMediaLibrary || item.state == .missing {
+                    if item.state != .saved && item.state != .existing {
                     HStack(spacing: 4) {
                         Image(systemName: item.state.symbol).font(.system(size: 10)).accessibilityHidden(true)
-                        Text(L(item.state.label))
+                        Text(L10n.text(item.state.message))
                     }.foregroundStyle(item.state.color(palette)).lineLimit(1)
                     }
                     if let files = item.additionalURLs, !files.isEmpty { Text(L("\(files.count + 1) 个文件")) }
@@ -657,35 +700,44 @@ struct DownloadRow: View {
                         Text(L(progressText(progress))).font(.system(size: 11)).monospacedDigit().foregroundStyle(secondary)
                     }.frame(maxWidth: 320)
                 }
-                if let error = item.error {
-                    Text(L(error)).font(.system(size: 11)).lineSpacing(3)
+                if let error = item.localizedError {
+                    Text(error).font(.system(size: 11)).lineSpacing(3)
                         .foregroundStyle(item.state == .paused || item.state == .cancelled ? secondary : UIColors.error)
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
-            HStack(spacing: 6) {
-                if let url = item.savedURL, !inMediaLibrary || item.state != .missing || item.localURLs.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
-                    Button(L("打开")) { model.openFile(item) }.buttonStyle(QuietButtonStyle(palette: palette)).help(url.path)
-                } else if item.canRetry {
-                    Button(L("重试"), action: retry)
-                        .buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
-                } else if item.source == nil {
-                    Button(L("修改")) { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
+            VStack(alignment: .trailing, spacing: WorkspaceMetrics.Space.small) {
+                HStack(spacing: WorkspaceMetrics.Space.small) {
+                    if let url = item.savedURL, !inMediaLibrary || item.state != .missing || item.localURLs.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+                        Button(L("打开")) { model.openFile(item) }.buttonStyle(RowActionStyle(palette: palette)).help(url.path)
+                    }
+                    if item.canRetry {
+                        Button(L("重试"), action: retry)
+                            .buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
+                    } else if item.source == nil {
+                        Button(L("修改")) { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
+                    }
+                    Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
+                        .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
+                        .accessibilityLabel(L("\(item.title)的更多操作"))
                 }
-                Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
-                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
-                    .accessibilityLabel(L("\(item.title)的更多操作"))
+                if hasAuthenticationIssue {
+                    Button(L("浏览器认证…"), action: authenticate)
+                        .buttonStyle(RowActionStyle(palette: palette))
+                        .accessibilityIdentifier("browser-authentication-action")
+                }
             }.padding(.top, 1)
-        }.padding(.horizontal, 10).padding(.vertical, 13)
+        }.padding(.horizontal, 10).padding(.vertical, WorkspaceMetrics.Space.regular)
             .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
             .overlay(alignment: .bottom) {
                 Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
-                    .padding(.leading, 50).padding(.trailing, 10)
+                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10)
             }
             .contextMenu { actions }
             .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityElement(children: .contain)
+            .accessibilityValue(L10n.text(item.state.message))
     }
 
     @ViewBuilder private var actions: some View {

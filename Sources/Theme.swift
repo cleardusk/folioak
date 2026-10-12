@@ -1,6 +1,27 @@
 import SwiftUI
 import AppKit
 
+// Shared dimensions for the workspace. Preview artwork may use finer geometry.
+enum WorkspaceMetrics {
+    enum Space {
+        static let small: CGFloat = 4
+        static let compact: CGFloat = 8
+        static let regular: CGFloat = 12
+        static let section: CGFloat = 16
+        static let inset: CGFloat = 20
+        static let page: CGFloat = 24
+    }
+    enum Radius {
+        static let control: CGFloat = 8
+        static let sidebar: CGFloat = 12
+        static let panel: CGFloat = 20
+    }
+    static let headerHeight: CGFloat = 76
+    static let controlHeight: CGFloat = 32
+    static let rowIconSize: CGFloat = 44
+    static let inputHeight: CGFloat = 104
+}
+
 struct ThemePalette {
     let canvas: UInt32
     let surface: UInt32
@@ -12,6 +33,22 @@ struct ThemePalette {
     let onAction: UInt32
 
     var sidebar: UInt32 { surface }
+
+    func accessibilityAdjusted(_ contrast: ColorSchemeContrast) -> ThemePalette {
+        guard contrast == .increased else { return self }
+        // Stronger secondary text and separators retain each theme's hue.
+        func blend(_ first: UInt32, _ second: UInt32) -> UInt32 {
+            var result: UInt32 = 0
+            for shift: UInt32 in [16, 8, 0] {
+                let value = Double((first >> shift) & 255) * 0.65 + Double((second >> shift) & 255) * 0.35
+                result |= UInt32(value.rounded()) << shift
+            }
+            return result
+        }
+        return ThemePalette(canvas: canvas, surface: surface, text: text,
+                            secondary: blend(secondary, text), border: text,
+                            accent: accent, action: action, onAction: onAction)
+    }
 
     static func color(_ hex: UInt32) -> Color { Color(nsColor: nativeColor(hex)) }
     static func nativeColor(_ hex: UInt32) -> NSColor {
@@ -73,9 +110,9 @@ struct PrimaryActionStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 18, weight: .semibold))
-            .foregroundStyle(ThemePalette.color(enabled ? palette.onAction : palette.secondary).opacity(enabled ? 1 : 0.5))
+            .foregroundStyle(ThemePalette.color(palette.onAction).opacity(enabled ? 1 : 0.5))
             .frame(width: 40, height: 40)
-            .background(ThemePalette.color(enabled ? palette.action : palette.border).opacity(enabled ? 1 : 0.4), in: Circle())
+            .background(ThemePalette.color(palette.action), in: Circle())
             .contentShape(Circle())
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.95 : 1)
     }
@@ -88,9 +125,10 @@ struct ThemeChoice: View {
     let selected: Bool
     let action: () -> Void
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
-        let palette = theme.palette(dark: scheme == .dark)
+        let palette = theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast)
         Button(action: action) {
             VStack(alignment: .leading, spacing: 6) {
                 VStack(alignment: .leading, spacing: 6) {

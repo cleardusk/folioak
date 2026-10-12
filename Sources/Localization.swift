@@ -37,8 +37,8 @@ enum L10n {
     }
     static var locale: Locale { Locale(identifier: language.code()) }
 
-    // Chinese source text stays in stored diagnostics. Translate it only when
-    // presenting it, including records written by earlier app versions.
+    // Legacy records retain source text. New diagnostics use stable identifiers
+    // at presentation time without rewriting either stored representation.
     private struct Template {
         let prefix: String
         let suffix: String
@@ -68,6 +68,32 @@ enum L10n {
                                  "历史记录未能保存：%@", "网络连接失败：%@", "已用于“%@”。", "暂无%@任务", "下载状态：%@",
                                  "本次耗时 %@ · 重试 %@ 次", "本次耗时 %@ · 重试 1 次"].contains(key))
     }.sorted { $0.prefix.count == $1.prefix.count ? $0.suffix.count > $1.suffix.count : $0.prefix.count > $1.prefix.count }
+
+    static func text(_ message: DiagnosticMessage) -> String {
+        guard let id = DiagnosticMessage.ID(rawValue: message.id),
+              let source = DiagnosticMessage.formatted(id.template, arguments: message.arguments) else {
+            return text(message.fallback)
+        }
+        guard language.code() == "en" else { return source }
+        var key = message.id
+        switch id {
+        case .start, .retry, .restored:
+            if message.arguments.first == "1" { key += ".one" }
+        case .startDeduplicated:
+            if message.arguments == ["1", "1"] { key += ".oneBoth" }
+            else if message.arguments.first == "1" { key += ".oneItem" }
+            else if message.arguments.last == "1" { key += ".oneDuplicate" }
+        default: break
+        }
+        guard let template = english[key] ?? english[message.id] else { return text(message.fallback) }
+        let arguments: [String]
+        switch id {
+        case .metadata, .storage, .limit, .coordination, .networkFailure:
+            arguments = message.arguments.map { text($0) }
+        default: arguments = message.arguments
+        }
+        return DiagnosticMessage.formatted(template, arguments: arguments) ?? text(message.fallback)
+    }
 
     static func text(_ source: String) -> String {
         guard language.code() == "en" else { return source }

@@ -230,6 +230,7 @@ final class CLIConsole: @unchecked Sendable {
         case .metadata: lastRetry = 0; message = "获取信息"
         case .resolved(let paper): lastRetry = 0; identifier = paper.reference.identifier; message = "准备下载"
         case .document: message = "保存完成"
+        case .browserAuthentication: return
         case .checkingLocal: message = "检查本地文件"
         case .validating: message = "保存中"
         case .waiting(let date): message = "等待至 \(Self.time(date))"

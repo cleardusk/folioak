@@ -91,6 +91,8 @@ final class MediaProcess: @unchecked Sendable {
     private var pid: pid_t = 0
     private var cancelled = false
     private var expired = false
+    private var temporaryDirectoryUnused = true
+    var canRemoveTemporaryDirectory: Bool { lock.lock(); defer { lock.unlock() }; return temporaryDirectoryUnused }
 
     func stop(timeout: Bool = false) {
         lock.lock()
@@ -106,19 +108,19 @@ final class MediaProcess: @unchecked Sendable {
         }
     }
 
-    func run(_ executable: URL, arguments: [String], timeout: Double = 14_400,
+    func run(_ executable: URL, arguments: [String], timeout: Double = 14_400, temporaryDirectory: URL? = nil,
              line: @escaping @Sendable (String) -> Void) async throws -> Int32 {
         try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .utility).async { [self] in
-                    continuation.resume(with: Result { try execute(executable, arguments: arguments, timeout: timeout, line: line) })
+                    continuation.resume(with: Result { try execute(executable, arguments: arguments, timeout: timeout, temporaryDirectory: temporaryDirectory, line: line) })
                 }
             }
         }, onCancel: { self.stop() })
     }
 
-    private func execute(_ executable: URL, arguments: [String], timeout: Double,
+    private func execute(_ executable: URL, arguments: [String], timeout: Double, temporaryDirectory: URL?,
                          line: @escaping @Sendable (String) -> Void) throws -> Int32 {
         var descriptors: [Int32] = [0, 0]
         guard pipe(&descriptors) == 0 else { throw DownloadError.storage("无法建立媒体进程连接。") }
@@ -135,7 +137,7 @@ final class MediaProcess: @unchecked Sendable {
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
         let environment = ["PATH=/usr/bin:/bin", "HOME=\(FileManager.default.homeDirectoryForCurrentUser.path)",
-                           "TMPDIR=\(NSTemporaryDirectory())", "LANG=en_US.UTF-8", "PYTHONUNBUFFERED=1"]
+                           "TMPDIR=\(temporaryDirectory?.path ?? NSTemporaryDirectory())", "LANG=en_US.UTF-8", "PYTHONUNBUFFERED=1"]
         let argv = ([executable.path] + arguments).map { strdup($0) } + [nil]
         let envp = environment.map { strdup($0) } + [nil]
         defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
@@ -145,7 +147,7 @@ final class MediaProcess: @unchecked Sendable {
         let code = argv.withUnsafeBufferPointer { args in envp.withUnsafeBufferPointer { env in
             posix_spawn(&child, executable.path, &actions, &attributes, args.baseAddress!, env.baseAddress!)
         } }
-        if code == 0 { pid = child }
+        if code == 0 { pid = child; temporaryDirectoryUnused = false }
         lock.unlock()
         close(descriptors[1])
         guard code == 0 else { throw DownloadError.metadata("媒体组件无法启动：\(String(cString: strerror(code)))") }
@@ -167,22 +169,96 @@ final class MediaProcess: @unchecked Sendable {
             }
         }
         if !dropping, !pending.isEmpty { line(String(decoding: pending, as: UTF8.self)) }
-        var status: Int32 = 0
-        while waitpid(child, &status, 0) < 0 && errno == EINTR {}
-        lock.lock(); pid = 0; let wasCancelled = cancelled, timedOut = expired; lock.unlock()
+        // EOF alone does not mean the leader exited: a tool can close both
+        // streams and continue working. Observe its exit without reaping it so
+        // its PID remains reserved until the final group signal is sent.
+        var observed = siginfo_t(), observation: Int32
+        repeat { observation = waitid(P_PID, id_t(child), &observed, WEXITED | WNOWAIT) }
+        while observation < 0 && errno == EINTR
+        lock.lock()
+        if observation == 0 { kill(-child, SIGKILL) }
+        // Disarm delayed stop() signals before waitpid can release this PID.
+        pid = 0
+        lock.unlock()
+        var status: Int32 = 0, reaped: pid_t
+        repeat { reaped = waitpid(child, &status, observation == 0 ? 0 : WNOHANG) }
+        while reaped < 0 && errno == EINTR
+        guard observation == 0, reaped == child else {
+            // No group signal after an uncertain observation, and no deletion
+            // of a temporary directory that a process might still be using.
+            throw DownloadError.metadata("媒体进程状态无法确认，请稍后重试。")
+        }
+        // Zombies cannot execute or write files, even if their parent has not
+        // reaped them yet. Wait only for live group members, with a fixed bound.
+        let exitDeadline = Date().addingTimeInterval(2)
+        while Self.hasLiveMembers(in: child) != false, Date() < exitDeadline { usleep(10_000) }
+        let groupUnused = Self.hasLiveMembers(in: child) == false
+        lock.lock(); temporaryDirectoryUnused = groupUnused; let wasCancelled = cancelled, timedOut = expired; lock.unlock()
         if wasCancelled { throw CancellationError() }
         if timedOut { throw DownloadError.metadata("媒体处理超时，可稍后重试。") }
         return status == 0 ? 0 : (status >> 8 == 0 ? 1 : status >> 8)
     }
+
+    // nil means the kernel query failed: do not assume a directory is unused.
+    // No signals are sent here, so a numeric process-group ID being reused can
+    // only delay cleanup; it cannot cause an unrelated process to be killed.
+    static func hasLiveMembers(in group: pid_t) -> Bool? {
+        guard group > 0 else { return nil }
+        if kill(-group, 0) < 0, errno == ESRCH { return false }
+        var query: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group]
+        let stride = MemoryLayout<kinfo_proc>.stride
+        for _ in 0..<3 {
+            var byteCount = 0
+            guard sysctl(&query, u_int(query.count), nil, &byteCount, nil, 0) == 0 else { return nil }
+            if byteCount == 0 { return false }
+            // Allow for a group growing between the size query and the read.
+            var processes = [kinfo_proc](repeating: kinfo_proc(), count: byteCount / stride + 8)
+            let result = processes.withUnsafeMutableBytes { buffer in
+                byteCount = buffer.count
+                return sysctl(&query, u_int(query.count), buffer.baseAddress, &byteCount, nil, 0)
+            }
+            if result == 0 {
+                guard byteCount % stride == 0 else { return nil }
+                return processes.prefix(byteCount / stride).contains { Int32($0.kp_proc.p_stat) != SZOMB }
+            }
+            if errno != ENOMEM { return nil }
+        }
+        return nil
+    }
 }
 
 final class MediaOutput: @unchecked Sendable {
-    // Only the process reader writes; readers access after run() returns.
+    // The process reader owns parsing; lifecycle updates happen before it starts
+    // or after run() has joined it. No raw browser output is retained as status.
+    private let authentication: BrowserAuthenticationSelection?
+    private(set) var authenticationState: BrowserAuthenticationReadState = .ready
+    private static let cookieCount = try! NSRegularExpression(pattern: #"^(?:\[Cookies\] )?Extracted ([0-9]+) cookies?(?: from .*)?$"#)
+
+    init(authentication: BrowserAuthenticationSelection? = nil) { self.authentication = authentication }
+
+    func reportAuthentication(_ state: BrowserAuthenticationReadState, event: @Sendable (DownloadEvent) -> Void) {
+        guard let authentication, authenticationState != state else { return }
+        authenticationState = state
+        event(.browserAuthentication(authentication, state))
+    }
+
     var title: String?
     var files: [URL] = []
     var error = ""
     var text = ""
+    var authenticationIssue: BrowserAuthenticationIssue?
     func receive(_ line: String, event: @Sendable (DownloadEvent) -> Void) {
+        if line.hasPrefix("ERROR:") || line.hasPrefix("WARNING:"),
+           let issue = BrowserAuthenticationIssue.readFailure(in: line) {
+            authenticationIssue = issue
+            reportAuthentication(.failed, event: event)
+        }
+        let range = NSRange(line.startIndex..., in: line)
+        if let match = Self.cookieCount.firstMatch(in: line, range: range),
+           let countRange = Range(match.range(at: 1), in: line), let count = Int(line[countRange]),
+           authenticationIssue == nil {
+            reportAuthentication(count > 0 ? .read : .empty, event: event)
+        }
         func string(_ prefix: String) -> String? {
             guard line.hasPrefix(prefix) else { return nil }
             return try? JSONDecoder().decode(String.self, from: Data(line.dropFirst(prefix.count).utf8))
@@ -413,7 +489,8 @@ enum MediaDownloader {
         return site.accepts(url)
     }
 
-    static func arguments(url: URL, format: MediaFormat, tools: MediaTools, folder: URL) throws -> [String] {
+    static func arguments(url: URL, format: MediaFormat, tools: MediaTools, folder: URL,
+                          authentication: BrowserAuthenticationSelection? = nil) throws -> [String] {
         var args = ["--ignore-config", "--no-plugin-dirs", "--no-remote-components", "--no-update", "--no-cache-dir",
                     "--no-playlist", "--max-downloads", "20", "--no-overwrites", "--continue", "--newline", "--no-colors",
                     "--socket-timeout", "30", "--retries", "3", "--fragment-retries", "3", "--abort-on-unavailable-fragments", "--max-filesize", "16G",
@@ -424,17 +501,29 @@ enum MediaDownloader {
                     "--print", "before_dl:APP_TITLE:%(title)j", "--print", "after_move:APP_FILE:%(filepath)j",
                     "--progress", "--progress-delta", "0.3", "--progress-template", "download:APP_PROGRESS:%(progress)j",
                     "--progress-template", "postprocess:APP_PROCESS:%(progress.status)s", "--no-simulate"]
+        // Never ask yt-dlp to persist the cookie jar. No browser is read unless
+        // the caller explicitly supplies a validated selection for a supported URL.
+        args += ["--no-cookies"]
+        if let authentication {
+            guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
+            // --print otherwise suppresses the cookie reader's normal status.
+            // Keep it observable without enabling verbose or retaining raw output.
+            args += ["--no-quiet", "--cookies-from-browser", authentication.argument]
+        } else { args += ["--no-cookies-from-browser"] }
         if format == .audio { args += ["--extract-audio", "--audio-format", "m4a"] }
         else { args += ["--format", "bv*+ba/b", "--merge-output-format", "mp4/mkv"] }
         return args + ["--", url.absoluteString]
     }
 
     static func download(_ url: URL, to directory: URL, format: MediaFormat, organizeByType: Bool = false,
+                         authentication: BrowserAuthenticationSelection? = nil,
                          event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
         let tools = try MediaTools.installed()
         for name in ["yt-dlp", "ffmpeg", "ffprobe", "qjs"] { _ = try tools.executable(name) }
-        let key = PDFStorage.key(url.absoluteString + "|" + format.rawValue + "|" + directory.standardizedFileURL.path)
+        let identity = url.absoluteString + "|" + format.rawValue + "|" + directory.standardizedFileURL.path
+        // Preserve anonymous resume keys; isolate opt-in profiles from old partials.
+        let key = PDFStorage.key(identity + (authentication.map { "|browser-auth|" + $0.argument } ?? ""))
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(DownloadPreferences.domain).appendingPathComponent("MediaDownloads")
         let coordinator = RequestCoordinator(directory: root)
@@ -443,11 +532,8 @@ enum MediaDownloader {
         let lease = try await RequestCoordinator(directory: folder).acquire { event(.coordinating) }
         defer { withExtendedLifetime(lease) {} }
         event(.metadata)
-        let output = MediaOutput()
-        let status = try await MediaProcess().run(try tools.executable("yt-dlp"), arguments: arguments(url: url, format: format, tools: tools, folder: folder)) {
-            output.receive($0, event: event)
-        }
-        guard status == 0, !output.files.isEmpty else { throw failure(output.error, url: url) }
+        let output = try await runDownloader(url, format: format, tools: tools, folder: folder,
+                                             authentication: authentication, event: event)
         event(.validating)
         var files = try validatedOutputs(output.files, in: folder)
         let scratch = folder.appendingPathComponent(".mp4-" + UUID().uuidString, isDirectory: true)
@@ -463,8 +549,67 @@ enum MediaDownloader {
         return result
     }
 
-    static func failure(_ raw: String, url: URL? = nil) -> DownloadError {
+    static func runDownloader(_ url: URL, format: MediaFormat, tools: MediaTools, folder: URL,
+                              authentication: BrowserAuthenticationSelection? = nil,
+                              event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> MediaOutput {
+        guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
+        let output = MediaOutput(authentication: authentication)
+        output.reportAuthentication(.reading, event: event)
+        defer {
+            if output.authenticationState == .reading {
+                output.reportAuthentication(.ready, event: event)
+            } else if let authentication {
+                // Re-send the final result after progress so bounded event streams
+                // cannot leave the UI reading if an earlier status was dropped.
+                event(.browserAuthentication(authentication, output.authenticationState))
+            }
+        }
+        // yt-dlp makes a temporary SQLite copy while reading browser cookies.
+        // Own its TMPDIR so cancellation also removes copies that its process
+        // may not have had time to clean up. The directory contains no export.
+        let authenticationTemporary = authentication.map { _ in folder.appendingPathComponent(".browser-auth-" + UUID().uuidString, isDirectory: true) }
+        if let authenticationTemporary {
+            do {
+                try FileManager.default.createDirectory(at: authenticationTemporary, withIntermediateDirectories: false,
+                                                        attributes: [.posixPermissions: 0o700])
+            } catch {
+                output.reportAuthentication(.failed, event: event)
+                throw DownloadError.browserAuthentication(.readFailed)
+            }
+        }
+        let process = MediaProcess()
+        defer {
+            if let authenticationTemporary, process.canRemoveTemporaryDirectory {
+                try? FileManager.default.removeItem(at: authenticationTemporary)
+            }
+        }
+        let status = try await process.run(try tools.executable("yt-dlp"),
+                                                 arguments: arguments(url: url, format: format, tools: tools, folder: folder, authentication: authentication),
+                                                 temporaryDirectory: authenticationTemporary) {
+            output.receive($0, event: event)
+        }
+        guard status == 0, !output.files.isEmpty else {
+            if authentication != nil, let issue = output.authenticationIssue {
+                throw DownloadError.browserAuthentication(issue)
+            }
+            let error = failure(output.error, url: url, authentication: authentication)
+            if case .browserAuthentication(let issue) = error {
+                switch issue {
+                case .readFailed, .invalidSelection: output.reportAuthentication(.failed, event: event)
+                case .sessionRejected, .loginRequired: output.reportAuthentication(.rejected, event: event)
+                }
+            }
+            throw error
+        }
+        return output
+    }
+
+    static func failure(_ raw: String, url: URL? = nil,
+                        authentication: BrowserAuthenticationSelection? = nil) -> DownloadError {
         let lower = raw.lowercased()
+        if authentication != nil, let issue = BrowserAuthenticationIssue.readFailure(in: raw) {
+            return .browserAuthentication(issue)
+        }
         // Match an HTTP status rather than digits in a video ID. yt-dlp does not
         // expose Retry-After here; use the native engine's default one-minute pause.
         if lower.range(of: #"\bhttp(?: error)?(?: status(?: code)?)?[:\s]+429\b"#, options: .regularExpression) != nil ||
@@ -476,7 +621,7 @@ enum MediaDownloader {
             return .metadata("此内容当前不可访问，可能已被删除或设为非公开。")
         }
         if lower.contains("sign in") || lower.contains("login") || lower.contains("cookies") || lower.contains("403") || lower.contains("authentication") {
-            return .metadata("此内容需要登录或站点验证，当前无法直接下载。请在浏览器中确认链接可访问，或换一个公开链接。")
+            return .browserAuthentication(authentication == nil ? .loginRequired : .sessionRejected)
         }
         if MediaSite.site(for: url?.host) == .xiaohongshu && lower.contains("no video formats") {
             return .metadata("小红书未返回可下载的视频。请复制完整分享链接并保留访问参数；图文笔记或需要登录、验证的内容当前无法直接下载。")

@@ -271,12 +271,14 @@ struct LibraryRow: View {
     var selectionActive = true
     let select: () -> Void
     @Environment(\.colorScheme) private var scheme
-    private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.displayScale) private var displayScale
+    private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
+        HStack(alignment: .top, spacing: WorkspaceMetrics.Space.regular) {
             Image(systemName: paper.favorite ? "star.fill" : "doc.text")
                 .font(.system(size: 21, weight: .light)).foregroundStyle(ThemePalette.color(palette.accent))
-                .frame(width: 44, height: 44).background(ThemePalette.color(palette.accent).opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 13))
+                .frame(width: WorkspaceMetrics.rowIconSize, height: WorkspaceMetrics.rowIconSize)
                 .accessibilityLabel(paper.favorite ? L("已收藏") : L("文档"))
                 .overlay(alignment: .topTrailing) {
                     if !paper.read {
@@ -284,8 +286,8 @@ struct LibraryRow: View {
                             .padding(6).accessibilityLabel(L("未读"))
                     }
                 }
-            VStack(alignment: .leading, spacing: 9) {
-                Text(paper.title).font(.system(size: 14, weight: .medium)).lineLimit(2).lineSpacing(3).help(paper.title)
+            VStack(alignment: .leading, spacing: WorkspaceMetrics.Space.compact) {
+                Text(paper.title).font(.body.weight(.medium)).lineLimit(2).lineSpacing(3).help(paper.title)
                 HStack(spacing: 10) {
                     if let ref = paper.reference { Text(ref.identifier).font(.system(size: 11, design: .monospaced)) }
                     else { Text(paper.directURL?.host ?? L("本地 PDF")).lineLimit(1) }
@@ -298,15 +300,20 @@ struct LibraryRow: View {
             HStack(spacing: 6) {
                 if paper.removed { Button(L("恢复")) { model.changePaper(paper.id) { $0.removed = false } }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else if paper.missing { Button(L("关联")) { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
-                else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(QuietButtonStyle(palette: palette)) }
+                else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(RowActionStyle(palette: palette)) }
                 if !paper.removed {
                     Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("\(paper.title)的更多操作"))
                 }
-            }.padding(.top, 6)
-        }.padding(20).background(ThemePalette.color(palette.surface)).clipShape(RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.65) : ThemePalette.color(palette.border).opacity(0.4), lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 20)).onTapGesture(perform: select).contextMenu { actions }
+            }.padding(.top, 1)
+        }.padding(.horizontal, 10).padding(.vertical, WorkspaceMetrics.Space.regular)
+            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
+                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10)
+            }
+            .contentShape(Rectangle()).onTapGesture(perform: select).contextMenu { actions }
             .accessibilityElement(children: .contain).accessibilityAddTraits(selected ? .isSelected : [])
     }
     @ViewBuilder private var actions: some View {

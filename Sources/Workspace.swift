@@ -22,6 +22,9 @@ struct ActivityEntry: Identifiable, Codable {
     let message: String
     let subject: String?
     let itemID: UUID?
+    var diagnostic: DiagnosticMessage? = nil
+
+    var localizedMessage: String { diagnostic.map(L10n.text) ?? L(message) }
 
     private static let urlExpression = try! NSRegularExpression(pattern: #"https?://[^\s<>\"]+"#, options: .caseInsensitive)
 
@@ -43,7 +46,13 @@ struct ActivityEntry: Identifiable, Codable {
     }
 
     var line: String {
-        "\(L10n.date(date, dateStyle: .numeric)) [\(L(level.label))] \(subject.map { "\($0) · " } ?? "")\(L(message))"
+        "\(L10n.date(date, dateStyle: .numeric)) [\(L(level.label))] \(subject.map { "\($0) · " } ?? "")\(localizedMessage)"
+    }
+}
+
+extension DiagnosticMessage {
+    var redacted: DiagnosticMessage {
+        DiagnosticMessage(id: id, arguments: arguments.map(ActivityEntry.redacted), fallback: ActivityEntry.redacted(fallback))
     }
 }
 
@@ -132,10 +141,18 @@ enum WorkspaceStore {
             textBytes += item.metadata?.title.utf8.count ?? 0
             textBytes += item.documentTitle?.utf8.count ?? 0
             textBytes += item.error?.utf8.count ?? 0
+            if let message = item.errorMessage {
+                textBytes += message.id.utf8.count + message.fallback.utf8.count
+                textBytes += message.arguments.reduce(0) { $0 + $1.utf8.count }
+            }
         }
         for entry in snapshot.logs {
             textBytes += entry.message.utf8.count
             textBytes += entry.subject?.utf8.count ?? 0
+            if let message = entry.diagnostic {
+                textBytes += message.id.utf8.count + message.fallback.utf8.count
+                textBytes += message.arguments.reduce(0) { $0 + $1.utf8.count }
+            }
         }
         var data: Data? = textBytes <= byteLimit ? try encoder.encode(retained) : nil
         if data.map({ $0.count > byteLimit }) ?? true {

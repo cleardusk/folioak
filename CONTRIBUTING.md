@@ -19,8 +19,8 @@ The first build or test run needs internet access to fetch pinned media dependen
 
 | Area | Files | Responsibility |
 | --- | --- | --- |
-| Download engine | `Core.swift`, `PDF.swift`, `Media.swift`, `Shared.swift` | Parse links, schedule requests, validate files, run media tools and coordinate concurrent processes |
-| Application state | `App.swift`, `Workspace.swift`, `Library.swift` | Queue lifecycle, preferences, saved history and libraries |
+| Download engine | `Core.swift`, `DownloadError.swift`, `Messages.swift`, `BrowserAuthentication.swift`, `PDF.swift`, `Media.swift`, `Shared.swift` | Parse links, schedule requests, validate files, run media tools and coordinate concurrent processes |
+| Application state | `App.swift`, `Workspace.swift`, `WorkspacePersistence.swift`, `Library.swift` | Queue lifecycle, preferences, saved history and libraries; a dedicated component serializes disk access |
 | Interface | `WorkspaceView.swift`, `Interaction.swift`, `SidebarMotion.swift`, `Theme.swift`, `Shortcuts.swift` | Views, native controls, keyboard interaction and appearance |
 | Command line | `CLI.swift` | Arguments, progress, structured output and exit codes |
 | Packaging | `Tools/`, `build.command`, `package.command` | Pinned dependencies, signing and verified release artifacts |
@@ -31,6 +31,8 @@ Swift sources live in `Sources/`; tests live in `Tests/`. `App.swift` also conta
 
 - Keep download and file handling in the shared engine so the app and CLI behave consistently.
 - Keep UI mutations on the main actor. Propagate cancellation to network requests and child processes; never mark a file saved before validation.
+- New download errors and queue diagnostics use stable `DiagnosticMessage` identifiers and arguments. Preserve the legacy `error` / `message` text fields and schema 1 for older readers; optional payloads allow current rendering to evolve without matching stored prose. Unknown identifiers and legacy records keep readable fallbacks.
+- Browser authentication is explicitly injected into the engine and disabled by default. Tests must use synthetic preferences, mock processes and fixtures; never read a developer's browser cookies or test a real signed-in session.
 - Use isolated temporary directories and preferences in tests. Do not commit personal paths, downloads, credentials, logs, caches, `build/`, or `dist/`.
 - Run checks relevant to the change. Media-engine changes also need the bundled-tool tests; `--live` deliberately contacts real services and is optional.
 - Keep visible controls and copy minimal. Verify changed interactions in light/dark appearance and at the minimum window size.

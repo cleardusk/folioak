@@ -96,6 +96,7 @@ struct CoreTests {
     @MainActor static func main() async {
         AppLocalization.shared.language = .chinese
         do {
+            try messageTests()
             try await localizationTests()
             if CommandLine.arguments.contains("--preview-230") { try renderMediaSnapshots(); return }
             if CommandLine.arguments.contains("--ui-only") {
@@ -151,6 +152,7 @@ struct CoreTests {
             try await restoreVersionTests(root: root, pdf: pdf)
             try await workspaceTests(root: root, pdf: pdf)
             try await backgroundPersistenceTests(root: root, pdf: pdf)
+            try await messagePersistenceTests(root: root, pdf: pdf)
             try await clearDownloadRecordsTests(root: root, pdf: pdf)
             try await clearSingleDownloadRecordTests(root: root, pdf: pdf)
             try menuChevronTests()
@@ -972,8 +974,13 @@ struct CoreTests {
                         try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: width, height: 700, name: "rate-paused-\(suffix)-\(width)")
                     }
                 }
+                model.settingsTab = "通用"
                 try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)", title: "设置")
-                try capture(SettingsView(model: model, tab: "快捷键").environment(\.colorScheme, scheme), width: 470, name: "shortcuts-\(suffix)", title: "设置")
+                model.settingsTab = "快捷键"
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "shortcuts-\(suffix)", title: "设置")
+                model.settingsTab = "浏览器认证"
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "browser-authentication-\(suffix)", title: "设置")
+                model.settingsTab = "通用"
             }
         }
         model.theme = .midnight
@@ -1018,6 +1025,13 @@ struct CoreTests {
                 model.busy = true
                 try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-records-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
                 model.busy = false
+                model.settingsTab = "浏览器认证"
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "authentication-anonymous-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
+                model.browserAuthentication.select(.chrome)
+                model.browserAuthentication.setEnabled(true)
+                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "authentication-enabled-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
+                model.browserAuthentication.clear()
+                model.settingsTab = "通用"
             }
         }
         model.language = savedLanguage

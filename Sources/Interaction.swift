@@ -240,7 +240,7 @@ struct TaskDiagnosticView: View {
         else { model.retryFromLibrary(current); dismiss() }
     }
     private var entries: [ActivityEntry] { model.logs.filter { $0.itemID == (paper?.taskID ?? item.id) } }
-    private var hasDiagnostics: Bool { diagnosticTask?.diagnostics != nil || diagnosticTask?.error != nil || !entries.isEmpty }
+    private var hasDiagnostics: Bool { diagnosticTask?.diagnostics != nil || diagnosticTask?.localizedError != nil || !entries.isEmpty }
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark) }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -254,7 +254,7 @@ struct TaskDiagnosticView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(current.title).font(.system(size: 14, weight: .medium)).lineLimit(3).textSelection(.enabled)
-                        Text(L(current.state.label)).font(.system(size: 12)).foregroundStyle(current.state.color(palette))
+                        Text(L10n.text(current.state.message)).font(.system(size: 12)).foregroundStyle(current.state.color(palette))
                     }
                     ForEach(Array(files.enumerated()), id: \.offset) { index, information in
                         if index > 0 { Divider() }
@@ -327,8 +327,8 @@ struct TaskDiagnosticView: View {
                     timings(trace, now: trace.finishedAt ?? context.date)
                 }.transaction { $0.animation = nil }
             }
-            if let error = diagnosticTask?.error {
-                Text(L(ActivityEntry.redacted(error))).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
+            if let error = diagnosticTask?.localizedError {
+                Text(ActivityEntry.redacted(error)).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
             }
             if !entries.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
@@ -356,8 +356,8 @@ struct TaskDiagnosticView: View {
             }
         }.font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
     }
-    private var report: String {
-        var lines = [current.title, L(current.state.label)]
+    var report: String {
+        var lines = [current.title, L10n.text(current.state.message)]
         if let source = current.source { lines.append(ActivityEntry.redacted(source.webURL.absoluteString)) }
         if let trace = diagnosticTask?.diagnostics {
             lines.append(L("本次耗时 \(TaskDiagnostics.time(trace.elapsed())) · 重试 \(trace.retries) 次"))
@@ -365,7 +365,7 @@ struct TaskDiagnosticView: View {
                 lines.append("\(L(phase.label)) \(L(TaskDiagnostics.time(trace.duration(phase))))")
             }
         }
-        if let error = diagnosticTask?.error { lines.append(L(ActivityEntry.redacted(error))) }
+        if let error = diagnosticTask?.localizedError { lines.append(ActivityEntry.redacted(error)) }
         lines.append(contentsOf: entries.map(\.line))
         return lines.map(ActivityEntry.redacted).joined(separator: "\n")
     }

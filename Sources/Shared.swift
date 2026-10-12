@@ -152,7 +152,7 @@ struct TaskDiagnostics: Codable {
             if lastRetry != attempt { retries += 1; lastRetry = attempt }
             next = .waiting
         case .validating: next = .validation
-        case .document: return
+        case .document, .browserAuthentication: return
         }
         guard next != phase else { return }
         accrue(now); phase = next
@@ -183,6 +183,7 @@ struct BatchInput: Sendable {
         let source: DownloadSource?
         var reference: ArxivReference? { source?.reference }
         let error: String?
+        var diagnostic: DiagnosticMessage? = nil
     }
     let entries: [Entry]
     let duplicates: Int
@@ -199,7 +200,7 @@ struct BatchInput: Sendable {
                 let source = try DownloadSource.parse(token)
                 if !seen.insert(source).inserted { duplicates += 1; continue }
                 entries.append(Entry(original: token, source: source, error: nil))
-            } catch { entries.append(Entry(original: token, source: nil, error: error.localizedDescription)) }
+            } catch { entries.append(Entry(original: token, source: nil, error: error.localizedDescription, diagnostic: (error as? DownloadError)?.message)) }
         }
         self.entries = entries; self.duplicates = duplicates
     }

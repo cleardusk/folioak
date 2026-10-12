@@ -13,36 +13,6 @@ enum ResourceLimits {
     static let retryAfterSeconds: Double = 365 * 24 * 60 * 60
 }
 
-enum DownloadError: LocalizedError {
-    case invalidLink(String)
-    case metadata(String)
-    case http(Int, retryAfter: Double?)
-    case cooldown(Double)
-    case invalidPDF
-    case storage(String)
-    case limit(String)
-    case unsafeResponse
-    case coordination(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidLink: return "无法识别：请输入论文、支持站点的视频链接，或 HTTPS 文件直链。"
-        case .metadata(let message), .limit(let message), .coordination(let message): return message
-        case .http(let code, _):
-            if code == 403 { return "下载站点拒绝访问（403），可能需要登录或浏览器验证。" }
-            if code == 404 { return "下载站点未找到文件或指定版本（404）。" }
-            if code == 429 { return "下载站点暂时限流（429），请稍后重试。" }
-            return "下载站点返回 HTTP \(code)，请稍后重试。"
-        case .cooldown(let seconds):
-            guard seconds.isFinite, seconds >= 0, seconds <= ResourceLimits.retryAfterSeconds else { return "arXiv 要求暂停请求，请稍后重试。" }
-            return "arXiv 要求暂停请求，请约 \(String(format: "%.0f", max(1, ceil(seconds / 60)))) 分钟后重试。"
-        case .invalidPDF: return "收到的文件不是完整、可读的 PDF，未保存。"
-        case .storage(let message): return "保存失败：\(message)"
-        case .unsafeResponse: return "连接或重定向不符合安全 HTTPS 要求，已停止请求。"
-        }
-    }
-}
-
 struct ArxivReference: Hashable, Sendable, Codable {
     private static let expression = try! NSRegularExpression(pattern: #"^((?:[0-9]{2}(?:0[1-9]|1[0-2])\.[0-9]{4,5})|(?:[A-Za-z][A-Za-z.\-]*/[0-9]{2}(?:0[1-9]|1[0-2])[0-9]{3}))(?:v([1-9][0-9]*))?$"#)
     let baseID: String
@@ -229,6 +199,7 @@ enum DownloadEvent: Sendable {
     case metadata
     case resolved(PaperMetadata)
     case document(String)
+    case browserAuthentication(BrowserAuthenticationSelection, BrowserAuthenticationReadState)
     case checkingLocal
     case progress(DownloadProgress)
     case retry(Int)
@@ -593,13 +564,14 @@ actor DownloadEngine {
     private let rateLimitDelay: Double
     private let cooldownPreferences: UserDefaults?
     private let coordinator: RequestCoordinator?
+    private let mediaAuthentication: @Sendable () async throws -> BrowserAuthenticationSelection?
     private var lease: RequestLease?
     private var lastRequest: ContinuousClock.Instant?
     private var cooldownUntil: ContinuousClock.Instant?
     private var rateLimitStrikes = 0
     private static let cooldownKey = "requestCooldownUntil"
 
-    init(transport: HTTPTransport = URLSessionTransport(), pdfTransport: HTTPTransport? = nil, requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil) {
+    init(transport: HTTPTransport = URLSessionTransport(), pdfTransport: HTTPTransport? = nil, requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil, mediaAuthentication: @escaping @Sendable () async throws -> BrowserAuthenticationSelection? = { nil }) {
         self.transport = transport
         self.pdfTransport = pdfTransport
         self.requestInterval = requestInterval
@@ -607,6 +579,7 @@ actor DownloadEngine {
         self.rateLimitDelay = rateLimitDelay
         self.cooldownPreferences = cooldownPreferences
         self.coordinator = coordinator
+        self.mediaAuthentication = mediaAuthentication
         if let date = cooldownPreferences?.object(forKey: Self.cooldownKey) as? Date {
             let remaining = date.timeIntervalSinceNow
             if remaining.isFinite, remaining > 0, remaining <= ResourceLimits.retryAfterSeconds {
@@ -818,7 +791,7 @@ actor DownloadEngine {
             return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
         case .media(let url):
             try DownloadFolder.prepareRoot(directory)
-            return try await MediaDownloader.download(url, to: directory, format: mediaFormat, organizeByType: organizeByType, event: event)
+            return try await MediaDownloader.download(url, to: directory, format: mediaFormat, organizeByType: organizeByType, authentication: try await mediaAuthentication(), event: event)
         case .pdf(let url), .file(let url):
             guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
             try DownloadFolder.prepareRoot(directory)

@@ -12,6 +12,8 @@ private final class ProcessProbe: @unchecked Sendable {
 
 extension CoreTests {
     @MainActor static func mediaTests(root: URL) async throws {
+        try browserAuthenticationTests(root: root)
+        try await browserAuthenticationProcessTests(root: root)
         try mediaRetryPolicyTests(root: root)
         let bv = try DownloadSource.parse("BV1MaHp6KENU")
         let bvURL = try DownloadSource.parse("https://www.bilibili.com/video/BV1MaHp6KENU/")
@@ -62,6 +64,7 @@ extension CoreTests {
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         let image = root.appendingPathComponent("photo.png")
         try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+        try await browserAuthenticationProviderTests(root: root, image: image)
         try await githubFileTests(root: root, image: image)
         try await directMediaRegressionTests(root: root, image: image)
         let folder = root.appendingPathComponent("media-output")
@@ -98,6 +101,14 @@ extension CoreTests {
         let result = ProcessProbe()
         let status = try await MediaProcess().run(URL(fileURLWithPath: "/bin/echo"), arguments: ["$(touch should-not-exist)", ";", "hello world"]) { result.append($0) }
         try expect(status == 0 && result.text == "$(touch should-not-exist) ; hello world", "subprocess arguments never pass through shell")
+        let processTemporary = root.appendingPathComponent("mock-authentication-tmp", isDirectory: true)
+        try FileManager.default.createDirectory(at: processTemporary, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        let temporaryProbe = ProcessProbe()
+        let temporaryStatus = try await MediaProcess().run(URL(fileURLWithPath: "/usr/bin/printenv"), arguments: ["TMPDIR"],
+                                                          temporaryDirectory: processTemporary) { temporaryProbe.append($0) }
+        try expect(temporaryStatus == 0 && temporaryProbe.text == processTemporary.path,
+                   "authentication subprocesses can isolate temporary database copies without reading credentials")
         let process = MediaProcess(), child = ProcessProbe()
         let task = Task { try await process.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "sleep 30 & echo $!; wait"]) { child.append($0) } }
         for _ in 0..<100 where child.text.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
@@ -267,7 +278,6 @@ extension CoreTests {
         }
         for (message, detail) in [
             ("ERROR: [youtube] clip429id: Requested format is not available", "下载格式"),
-            ("ERROR: [twitter] 20429429: HTTP Error 403: Forbidden", "登录"),
             ("ERROR: https://example.com/429: Connection timed out", "媒体下载未完成"),
             ("ERROR: HTTP Error 4290", "媒体下载未完成"),
             ("ERROR: Video is unavailable", "不可访问"),

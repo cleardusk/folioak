@@ -140,7 +140,7 @@ extension CoreTests {
                 try expect(window.firstResponder !== editor && model.input == "1706.03762", "canvas ends input editing without clearing the draft (dismissals: \(endEditingCount))")
                 model.objectWillChange.send(); await settle()
                 try expect(window.firstResponder !== editor, "ordinary view updates do not restore dismissed input focus")
-                await fromTop(550, 70)
+                await fromTop(550, 100)
                 try expect(window.firstResponder is LinkTextView, "clicking the composer background restores editing")
                 await fromTop(75, 158)
                 try expect(editor.window == nil, "document-library navigation removes the input")
@@ -260,6 +260,7 @@ extension CoreTests {
             try await settle(); try verify(collapsed: false)
         }
         print("PASS sidebar layout: real fold/unfold actions, 74/190 pt boundaries, input alignment and window resizing")
+        try await workspacePolishTests()
     }
 
     @MainActor static func menuChevronTests() throws {
@@ -353,12 +354,15 @@ extension CoreTests {
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
-        let view = NSHostingView(rootView: SettingsView(model: model).id("通用"))
+        let originalTab = model.settingsTab
+        defer { model.settingsTab = originalTab }
+        model.settingsTab = "通用"
+        let view = NSHostingView(rootView: SettingsView(model: model))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 588), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         defer { window.orderOut(nil) }
         func header(_ tab: String) async throws -> [Bool] {
-            view.rootView = SettingsView(model: model, tab: tab).id(tab)
+            model.settingsTab = tab
             view.layoutSubtreeIfNeeded()
             try await Task.sleep(nanoseconds: 100_000_000)
             view.layoutSubtreeIfNeeded()
@@ -381,7 +385,8 @@ extension CoreTests {
             return root.subviews.flatMap(recorders)
         }
         let frames = recorders(view).map { $0.convert($0.bounds, to: view) }
-        try expect(frames.count == 4 && frames.allSatisfy { abs($0.minX - frames[0].minX) < 1 && abs($0.width - frames[0].width) < 1 && view.bounds.contains($0) }, "shortcut recorders share one column and remain inside the window")
+        try expect(frames.count == 4 && frames.allSatisfy { abs($0.minX - frames[0].minX) < 1 && abs($0.width - frames[0].width) < 1 && view.bounds.contains($0) }, "shortcut recorders share one column and remain inside the window: frames=\(frames), bounds=\(view.bounds)")
+        try expect(try await header("浏览器认证") == general, "authentication shares the settings header without shifting content")
         try expect(try await header("通用") == general, "returning to general preserves header position")
         print("PASS settings layout: stable category header and aligned shortcut column")
     }
@@ -889,5 +894,147 @@ extension CoreTests {
         controller = nil
         try expect(released == nil && preferences.string(forKey: "unrelatedPreference") == "keep draft", "menu controller releases observers and preserves other settings")
         print("PASS About/menu bar: original repo link, author, default on, runtime off/on, persisted preference, localized actions and released controller")
+    }
+}
+
+
+extension CoreTests {
+    @MainActor static func workspacePolishTests() async throws {
+        let suite = "folioak-workspace-polish-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { preferences.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: folder) }
+        func input(_ root: NSView) -> LinkTextView? { (root as? LinkTextView) ?? root.subviews.lazy.compactMap(input).first }
+        let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        for scheme in [ColorScheme.light, .dark] {
+            let model = DownloadModel(preferences: preferences)
+            model.theme = .graphite
+            model.history = [DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"),
+                                          state: .saved, savedURL: folder.appendingPathComponent("fixture.pdf"), documentTitle: "Saved paper")]
+            let window = SelectionTestWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540), styleMask: [.borderless], backing: .buffered, defer: false)
+            let view = InteractionTestHost(rootView: DownloaderView(model: model, endTextEditing: { [weak window] in
+                if window?.firstResponder is NSTextView { window?.makeFirstResponder(nil) }
+            }).environment(\.colorScheme, scheme))
+            window.contentView = view; window.orderFront(nil)
+            defer { window.orderOut(nil) }
+            func settle() async {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            }
+            func clickFromTop(_ x: CGFloat, _ y: CGFloat) async {
+                let point = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y), to: nil)
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    window.sendEvent(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                }
+                await settle()
+            }
+            await settle()
+            guard let editor = input(view), let scroll = editor.enclosingScrollView else { throw TestFailure.failed("full-size native input") }
+            try expect(abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1,
+                       "empty idle composer stays full-size with existing records at minimum window size")
+            model.focusInput(); await settle()
+            try expect(input(view) === editor && window.firstResponder === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1,
+                       "keyboard focus preserves the editor and its full height without moving the layout")
+            editor.insertText("1706.03762", replacementRange: editor.selectedRange())
+            editor.setSelectedRange(NSRange(location: 2, length: 4))
+            model.objectWillChange.send(); await settle()
+            try expect(input(view) === editor && editor.selectedRange() == NSRange(location: 2, length: 4), "ordinary redraw preserves the input selection")
+            await clickFromTop(680, 470)
+            try expect(model.input == "1706.03762" && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1,
+                       "a nonempty draft stays expanded after focus leaves")
+            model.input = ""; await settle()
+            try expect(input(view) === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1, "cleared idle draft stays full-size without replacing its native view")
+            model.input = "https://example.com/video.mp4"; await settle()
+            try expect(input(view) === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1, "pasted and dropped content preserves the full-size input")
+            model.input = ""; await settle()
+            if CommandLine.arguments.contains("--snapshots"), let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/workspace-input-\(scheme == .light ? "light" : "dark")-\(reducedMotion ? "reduced" : "motion").png"))
+            }
+            await clickFromTop(40, view.bounds.height - 88)
+            try expect(editor.window == nil, "the visible sidebar log entry navigates away from downloads")
+            try expect(model.history.count == 1, "layout and navigation preserve every attempt record")
+        }
+        let authenticationModel = DownloadModel(preferences: preferences)
+        let message = BrowserAuthenticationIssue.loginRequired.message
+        let mediaURL = URL(string: "https://www.youtube.com/watch?v=fixture")!
+        authenticationModel.history = [DownloadItem(original: mediaURL.absoluteString, directURL: mediaURL, state: .failed,
+                                                   error: message.fallback, errorMessage: message, documentTitle: "Authentication fixture")]
+        var settingsOpened = 0
+        let authenticationView = InteractionTestHost(rootView: DownloaderView(model: authenticationModel, showSettings: { settingsOpened += 1 }))
+        let authenticationWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
+        authenticationWindow.contentView = authenticationView; authenticationWindow.orderFront(nil)
+        defer { authenticationWindow.orderOut(nil) }
+        try await Task.sleep(nanoseconds: 150_000_000); authenticationView.layoutSubtreeIfNeeded()
+        func keys(_ root: NSView) -> PaperListKeyboard.KeyView? { (root as? PaperListKeyboard.KeyView) ?? root.subviews.lazy.compactMap(keys).first }
+        guard let listKeys = keys(authenticationView) else { throw TestFailure.failed("authentication recovery list") }
+        let listFrame = listKeys.convert(listKeys.bounds, to: authenticationView)
+        let top = authenticationView.isFlipped ? listFrame.minY : authenticationView.bounds.height - listFrame.maxY
+        // A real local mouse event exercises the rendered SwiftUI control.
+        // Background processes may not expose an accessibilityChildren tree.
+        let actionY = top + 1 + WorkspaceMetrics.Space.regular + 1 + WorkspaceMetrics.controlHeight + WorkspaceMetrics.Space.small + WorkspaceMetrics.controlHeight / 2
+        let point = NSPoint(x: listFrame.maxX - 16 - 1 - 10 - 24,
+                            y: authenticationView.isFlipped ? actionY : authenticationView.bounds.height - actionY)
+        func clickAuthenticationAction() async {
+            let location = authenticationView.convert(point, to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                authenticationWindow.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: authenticationWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000); authenticationView.layoutSubtreeIfNeeded()
+        }
+        for language in [AppLanguage.chinese, .english] {
+            let originalLanguage = AppLocalization.shared.language
+            AppLocalization.shared.language = language
+            defer { AppLocalization.shared.language = originalLanguage }
+            try await Task.sleep(nanoseconds: 100_000_000); authenticationView.layoutSubtreeIfNeeded()
+            if CommandLine.arguments.contains("--snapshots"), let bitmap = authenticationView.bitmapImageRepForCachingDisplay(in: authenticationView.bounds) {
+                authenticationView.cacheDisplay(in: authenticationView.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/authentication-recovery-\(language.rawValue).png"))
+            }
+            authenticationModel.settingsTab = "通用"
+            await clickAuthenticationAction()
+            try expect(settingsOpened == (language == .chinese ? 1 : 2) && authenticationModel.settingsTab == "浏览器认证" && authenticationModel.history.count == 1,
+                       "rendered media recovery button opens authentication settings in both languages without retrying or replacing history")
+        }
+        let pdfURL = URL(string: "https://example.com/paper.pdf")!
+        authenticationModel.history = [DownloadItem(original: pdfURL.absoluteString, directURL: pdfURL, state: .failed,
+                                                   error: message.fallback, errorMessage: message, documentTitle: "PDF fixture")]
+        try await Task.sleep(nanoseconds: 100_000_000); authenticationView.layoutSubtreeIfNeeded()
+        await clickAuthenticationAction()
+        try expect(settingsOpened == 2, "PDF failures do not offer browser authentication")
+        for theme in AppTheme.allCases {
+            for dark in [false, true] {
+                let normal = theme.palette(dark: dark), increased = normal.accessibilityAdjusted(.increased)
+                try expect(normal.accessibilityAdjusted(.standard).secondary == normal.secondary && increased.border == increased.text,
+                           "standard themes remain stable while increased contrast strengthens separators")
+                try expect(increased.secondary != normal.secondary && increased.canvas == normal.canvas && increased.accent == normal.accent,
+                           "increased contrast retains each theme's canvas and accent")
+            }
+        }
+        let missing = folder.appendingPathComponent("missing.png")
+        try expect(MediaThumbnailCache.key(url: missing, scale: 2) == nil && MediaThumbnailCache.key(url: URL(string: "https://example.com/image.png")!, scale: 2) == nil,
+                   "thumbnail lookup skips missing and remote paths")
+        let local = folder.appendingPathComponent("thumbnail.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 8, pixelsHigh: 8, bitsPerSample: 8, samplesPerPixel: 4,
+                                      hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for y in 0..<8 { for x in 0..<8 { bitmap.setColor(NSColor(srgbRed: 0.2, green: 0.5, blue: 0.8, alpha: 1), atX: x, y: y) } }
+        try bitmap.representation(using: .png, properties: [:])!.write(to: local)
+        guard let firstKey = MediaThumbnailCache.key(url: local, scale: 2) else { throw TestFailure.failed("local thumbnail key") }
+        let cancelled = Task { await MediaThumbnailCache.shared.image(url: local, key: firstKey, scale: 2) }
+        cancelled.cancel()
+        try expect(await cancelled.value == nil, "a cancelled thumbnail request does not populate the image")
+        // Exercise a real Quick Look request but bound it independently of service
+        // availability; thumbnail failure is an intentional icon fallback.
+        let generation = Task { await MediaThumbnailCache.shared.image(url: local, key: firstKey, scale: 2) }
+        let timeout = Task { try? await Task.sleep(nanoseconds: 2_000_000_000); generation.cancel() }
+        let generated = await generation.value
+        timeout.cancel()
+        if let generated { try expect(generated.size.width > 0 && generated.size.height > 0, "Quick Look produces a usable image when available") }
+        var changed = try Data(contentsOf: local); changed.append(0); try changed.write(to: local)
+        try expect(MediaThumbnailCache.key(url: local, scale: 2) != firstKey, "file replacement invalidates the thumbnail key")
+        try expect(MediaThumbnailCache.countLimit == 96 && MediaThumbnailCache.byteLimit <= 16 * 1024 * 1024, "thumbnail cache has count and byte budgets")
+        print("PASS workspace polish: fixed input height/focus/paste identity and selection, minimum window, sidebar logs, light/dark/current motion setting, increased contrast, authentication recovery and bounded/cancellable local thumbnails")
     }
 }

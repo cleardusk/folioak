@@ -211,8 +211,8 @@ private struct SidebarButtonSurface<Label: View>: View {
     var body: some View {
         label
             .background(ThemePalette.color(palette.text).opacity(selected ? 0.08 : 0))
-            .overlay(RoundedRectangle(cornerRadius: 12).fill(ThemePalette.color(palette.text).opacity(pressed ? 0.06 : hovered ? 0.04 : 0)).allowsHitTesting(false))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.sidebar).fill(ThemePalette.color(palette.text).opacity(pressed ? 0.06 : hovered ? 0.04 : 0)).allowsHitTesting(false))
+            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.sidebar))
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: selected)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: hovered)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: pressed)
