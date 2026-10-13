@@ -326,15 +326,14 @@ extension CoreTests {
     @MainActor static func clearSingleDownloadRecordTests(root: URL, pdf: URL) async throws {
         let suite = "folioak-clear-one-\(UUID().uuidString)", prefs = UserDefaults(suiteName: suite)!
         defer { prefs.removePersistentDomain(forName: suite) }
+        // Older installations may have enabled implicit deletion. Record clearing
+        // must now ignore that preference and leave file trashing to its own API.
+        prefs.set(true, forKey: "trashFilesWhenClearingRecord")
         let folder = root.appendingPathComponent(suite)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var recycled: [URL] = []
-        let recycle: (URL) throws -> Void = { file in
-            recycled.append(file)
-            try FileManager.default.moveItem(at: file, to: folder.appendingPathComponent("trash-" + UUID().uuidString + "-" + file.lastPathComponent))
-        }
         let state = folder.appendingPathComponent("workspace.json")
-        let model = DownloadModel(preferences: prefs, stateURL: state, recycleFile: recycle)
+        let model = DownloadModel(preferences: prefs, stateURL: state, recycleFile: { recycled.append($0) })
         let paper = DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"), state: .saved, savedURL: pdf, documentTitle: "Kept PDF")
         let other = DownloadItem(original: "invalid", reference: nil, state: .failed, error: "invalid")
         model.items = [paper, other]; model.history = [paper]
@@ -342,139 +341,52 @@ extension CoreTests {
         model.input = "unfinished draft"; model.duplicateCount = 3
         model.record(.info, "Keep logs", item: paper); model.persistWorkspace()
         let batch = model.batchID, logs = model.logs.map(\.id), bytes = try Data(contentsOf: pdf)
-        try expect(!model.trashFilesWhenClearingRecord && prefs.object(forKey: "trashFilesWhenClearingRecord") == nil, "single record clear keeps files by default without rewriting preferences")
         model.busy = true; model.clearDownloadRecord(paper.id)
         try expect(model.downloads.count == 2, "busy guard rejects single record clearing")
         model.busy = false; model.clearDownloadRecord(paper.id)
-        try expect(model.items.map(\.id) == [other.id] && model.history.isEmpty && recycled.isEmpty && (try Data(contentsOf: pdf)) == bytes, "default clear removes only the matching ID from current and archived records and keeps the file")
-        try expect(model.papers.count == 1 && model.papers[0].favorite && model.papers[0].read && model.papers[0].tags == ["keep"] && model.input == "unfinished draft" && model.logs.map(\.id) == logs && model.batchID == batch && model.duplicateCount == 3, "single clear preserves libraries, organization, draft, logs and list context")
-        let restored = DownloadModel(preferences: prefs, stateURL: state, recycleFile: recycle)
-        try expect(restored.downloads.map(\.id) == [other.id] && restored.papers.count == 1, "single removal survives restart while the independent library remains")
-        restored.clearDownloadRecord(UUID())
-        try expect(restored.downloads.count == 1 && recycled.isEmpty, "unknown and already-cleared IDs are no-ops")
+        try expect(model.items.map(\.id) == [other.id] && model.history.isEmpty && recycled.isEmpty && (try Data(contentsOf: pdf)) == bytes,
+                   "single clear ignores the legacy trash preference and removes only the requested download record")
+        try expect(model.papers.count == 1 && model.papers[0].favorite && model.papers[0].read && model.papers[0].tags == ["keep"] &&
+                   model.input == "unfinished draft" && model.logs.map(\.id) == logs && model.batchID == batch && model.duplicateCount == 3,
+                   "single clear preserves library organization, draft, logs and list context")
+        let restored = DownloadModel(preferences: prefs, stateURL: state, recycleFile: { recycled.append($0) })
+        try expect(restored.downloads.map(\.id) == [other.id] && restored.papers.count == 1, "single record removal survives restart while the library remains")
+        restored.clearDownloadRecord(UUID()); restored.clearDownloadRecord(paper.id)
+        try expect(restored.downloads.count == 1 && recycled.isEmpty, "unknown and already-cleared IDs are harmless")
 
         let first = folder.appendingPathComponent("group-a.png"), second = folder.appendingPathComponent("group-b.png")
         try Data("a".utf8).write(to: first); try Data("b".utf8).write(to: second)
-        let group = DownloadItem(original: "https://example.org/group.png", directURL: URL(string: "https://example.org/group.png"), state: .saved, savedURL: first, additionalURLs: [first, second])
+        let group = DownloadItem(original: "https://example.org/group.png", directURL: URL(string: "https://example.org/group.png"),
+                                 state: .saved, savedURL: first, additionalURLs: [first, second])
         var shared = group; shared.id = UUID()
-        model.items = [group, shared, other]; model.history = [group]
-        model.upsertMedia(group); model.previewURL = first
-        model.trashFilesWhenClearingRecord = true
-        try expect(DownloadModel(preferences: prefs).trashFilesWhenClearingRecord, "opt-in file deletion persists across models")
+        model.items = [group, shared, other]; model.history = [group]; model.upsertMedia(group); model.previewURL = first
         model.clearDownloadRecord(group.id)
-        try expect(Set(recycled) == Set([first, second]) && recycled.count == 2 && model.downloads.map(\.id) == [shared.id, other.id], "opt-in clears just one record and moves every group file once")
-        try expect(model.items[0].state == .missing && model.mediaLibrary.count == 1 && model.mediaLibrary[0].state == .missing && model.mediaLibrary[0].localURLs == group.localURLs && model.previewURL == nil, "shared records and independent media library retain sources and attachments with missing state")
-        let afterGroup = DownloadModel(preferences: prefs, stateURL: state, recycleFile: recycle)
-        try expect(afterGroup.mediaLibrary[0].state == .missing && !afterGroup.downloads.contains { $0.id == group.id }, "file deletion and remaining records survive restart")
-        let copy = folder.appendingPathComponent("paper.pdf"); try FileManager.default.copyItem(at: pdf, to: copy)
-        let savedVersion = try ArxivReference.parse("2501.12345v2")
-        let removablePaper = DownloadItem(original: "2501.12345", reference: try ArxivReference.parse("2501.12345"), metadata: PaperMetadata(reference: savedVersion, title: "Removable PDF", year: 2025, month: 1), state: .saved, savedURL: copy)
-        var sharedPaper = removablePaper; sharedPaper.id = UUID()
-        model.items = [removablePaper, sharedPaper]; model.history = []; model.upsertPaper(removablePaper)
-        model.changePaper(removablePaper.id) { $0.favorite = true; $0.tags = ["preserved"] }
-        model.clearDownloadRecord(removablePaper.id)
-        try expect(model.papers.first { $0.id == removablePaper.id }?.missing == true && model.papers.first { $0.id == removablePaper.id }?.tags == ["preserved"], "paper entries and tags remain when their file is trashed")
-        try expect(model.items.first { $0.id == sharedPaper.id }?.restoreReference == savedVersion && DownloadModel(preferences: prefs, stateURL: state).items.first { $0.id == sharedPaper.id }?.restoreReference == savedVersion, "shared missing PDF keeps the exact saved version for retry and restart")
-
-        let bulkFile = folder.appendingPathComponent("bulk.png"); try Data("bulk".utf8).write(to: bulkFile)
-        var bulk = group; bulk.id = UUID(); bulk.savedURL = bulkFile; bulk.additionalURLs = nil
-        model.items = [bulk]; model.history = []
-        let count = recycled.count; model.clearDownloadRecords()
-        try expect(recycled.count == count && FileManager.default.fileExists(atPath: bulkFile.path), "Clear All still keeps files even when single-record deletion is enabled")
+        try expect(model.downloads.map(\.id) == [shared.id, other.id] && model.mediaLibrary.count == 1 &&
+                   model.mediaLibrary[0].state == .saved && model.mediaLibrary[0].localURLs == group.localURLs &&
+                   model.previewURL == first && recycled.isEmpty && FileManager.default.fileExists(atPath: second.path),
+                   "clearing a grouped or shared record preserves all files, full library paths and the active preview")
+        let afterGroup = DownloadModel(preferences: prefs, stateURL: state)
+        try expect(afterGroup.mediaLibrary.count == 1 && afterGroup.downloads.map(\.id) == [shared.id, other.id],
+                   "grouped record clearing stays separate from media-library removal after restart")
+        model.clearDownloadRecords()
+        try expect(model.downloads.isEmpty && recycled.isEmpty && FileManager.default.fileExists(atPath: first.path) &&
+                   FileManager.default.fileExists(atPath: second.path), "Clear All also keeps files despite the obsolete trash setting")
 
         for blockedName in ["workspace.json", "library.json", "media-library.json"] {
             let parent = folder.appendingPathComponent("blocked-" + blockedName)
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-            let blockedState = parent.appendingPathComponent("workspace.json")
-            let blocked = DownloadModel(preferences: prefs, stateURL: blockedState, recycleFile: recycle)
-            blocked.items = [bulk, paper]; blocked.upsertPaper(paper); blocked.upsertMedia(bulk)
+            let blocked = DownloadModel(preferences: prefs, stateURL: parent.appendingPathComponent("workspace.json"), recycleFile: { recycled.append($0) })
+            blocked.items = [group, paper]; blocked.upsertPaper(paper); blocked.upsertMedia(group)
             try FileManager.default.createDirectory(at: parent.appendingPathComponent(blockedName), withIntermediateDirectories: true)
-            blocked.clearDownloadRecord(bulk.id)
-            try expect(blocked.items.count == 2 && recycled.count == count && FileManager.default.fileExists(atPath: bulkFile.path), "\(blockedName) save failure preserves files and recovery records before trashing")
+            blocked.clearDownloadRecord(group.id)
+            try expect(blocked.items.count == 2 && recycled.isEmpty && FileManager.default.fileExists(atPath: first.path),
+                       "\(blockedName) save failure preserves the recovery record and never invokes file deletion")
         }
-        let failed = DownloadModel(preferences: prefs, stateURL: folder.appendingPathComponent("failed.json"), recycleFile: { _ in throw CocoaError(.fileWriteNoPermission) })
-        failed.items = [bulk]; failed.clearDownloadRecord(bulk.id)
-        try expect(failed.items.count == 1 && failed.notice != nil && FileManager.default.fileExists(atPath: bulkFile.path), "trash permission failure keeps the record and file")
-        let partialA = folder.appendingPathComponent("partial-a.png"), partialB = folder.appendingPathComponent("partial-b.png")
-        try Data("a".utf8).write(to: partialA); try Data("b".utf8).write(to: partialB)
-        var partial = group; partial.id = UUID(); partial.savedURL = partialA; partial.additionalURLs = [partialB]
-        var calls = 0
-        let partialModel = DownloadModel(preferences: prefs, stateURL: folder.appendingPathComponent("partial.json"), recycleFile: { file in
-            calls += 1
-            if calls == 2 { throw CocoaError(.fileWriteNoPermission) }
-            try recycle(file)
-        })
-        partialModel.items = [partial]; partialModel.upsertMedia(partial); partialModel.clearDownloadRecord(partial.id)
-        try expect(partialModel.items.count == 1 && partialModel.items[0].state == .missing && partialModel.mediaLibrary[0].localURLs.count == 2 && partialModel.notice != nil, "partial trash failure retains the group and retry information")
-        let partialRestored = DownloadModel(preferences: prefs, stateURL: folder.appendingPathComponent("partial.json"))
-        try expect(partialRestored.downloads.count == 1 && partialRestored.mediaLibrary[0].state == .missing, "partial failure state survives restart")
-        for repeated in [false, true] {
-            let restoredA = folder.appendingPathComponent("restored-a-\(repeated).png"), restoredB = folder.appendingPathComponent("restored-b-\(repeated).png")
-            try Data("b".utf8).write(to: restoredB)
-            var recovered = group; recovered.id = UUID(); recovered.savedURL = restoredA; recovered.additionalURLs = [restoredB]
-            recovered.finishedAt = Date()
-            model.upsertMedia(recovered)
-            let originalLibraryID = recovered.id
-            if repeated {
-                recovered.id = UUID(); recovered.createdAt = recovered.createdAt.addingTimeInterval(1); recovered.finishedAt = recovered.finishedAt!.addingTimeInterval(1)
-                model.upsertMedia(recovered)
-                try expect(model.mediaLibrary.first { $0.id == originalLibraryID }?.createdAt == recovered.createdAt, "repeat download keeps the old library ID and the exact new saved-copy identity")
-            }
-            let separate = folder.appendingPathComponent("separate-\(repeated).png"); try Data("unrelated".utf8).write(to: separate)
-            var unrelated = recovered; unrelated.id = UUID(); unrelated.createdAt = recovered.createdAt.addingTimeInterval(2); unrelated.savedURL = separate; unrelated.additionalURLs = nil
-            model.upsertMedia(unrelated)
-            model.items = [recovered]; model.history = []
-            model.preview(recovered)
-            try expect(model.items[0].localURLs == [restoredB] && model.mediaLibrary.first { $0.id == originalLibraryID }?.localURLs.count == 2, "fixture prunes unavailable history attachments while the media library keeps the full group")
-            model.persistWorkspace()
-            let clearing = repeated ? DownloadModel(preferences: prefs, stateURL: state, recycleFile: recycle) : model
-            try Data("a".utf8).write(to: restoredA)
-            let recoveredCalls = recycled.count
-            clearing.clearDownloadRecord(recovered.id)
-            try expect(clearing.downloads.isEmpty && recycled.count == recoveredCalls + 2 && !FileManager.default.fileExists(atPath: restoredA.path) && !FileManager.default.fileExists(atPath: restoredB.path), "restored attachments are trashed for original and deduplicated library identities, including after restart")
-            try expect(FileManager.default.fileExists(atPath: separate.path) && clearing.mediaLibrary.first { $0.id == unrelated.id }?.state == .saved, "same-source independent groups are never included in the selected record's files")
-        }
-
-        let realFolder = folder.appendingPathComponent("real-folder"), aliasFolder = folder.appendingPathComponent("alias-folder")
-        try FileManager.default.createDirectory(at: realFolder, withIntermediateDirectories: true)
-        try FileManager.default.createSymbolicLink(at: aliasFolder, withDestinationURL: realFolder)
-        let realFile = realFolder.appendingPathComponent("shared.png"), aliasFile = aliasFolder.appendingPathComponent("shared.png")
-        try Data("aliased".utf8).write(to: realFile)
-        var aliased = group; aliased.id = UUID(); aliased.savedURL = aliasFile; aliased.additionalURLs = [realFile]
-        var aliasedShared = aliased; aliasedShared.id = UUID(); aliasedShared.savedURL = realFile; aliasedShared.additionalURLs = nil
-        model.items = [aliased, aliasedShared]; model.history = []; model.upsertMedia(aliased); model.previewURL = aliasFile
-        let aliasCalls = recycled.count
-        model.clearDownloadRecord(aliased.id)
-        try expect(recycled.count == aliasCalls + 1 && model.items.map(\.id) == [aliasedShared.id] && model.items[0].state == .missing && model.previewURL == nil, "directory aliases deduplicate file moves and keep shared-record/preview identity stable after trashing")
-        try expect(model.mediaLibrary.first { $0.id == aliased.id }?.state == .missing && DownloadModel(preferences: prefs, stateURL: state).items[0].state == .missing, "aliased missing state persists in independent libraries and workspace")
-
-        let directory = folder.appendingPathComponent("not-a-file.pdf")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let link = folder.appendingPathComponent("symlink.png"); try FileManager.default.createSymbolicLink(at: link, withDestinationURL: bulkFile)
-        var unsafeCalls = 0
-        let unsafeModel = DownloadModel(preferences: prefs, stateURL: folder.appendingPathComponent("unsafe.json"), recycleFile: { _ in unsafeCalls += 1 })
-        for unsafe in [directory, link] {
-            var record = bulk; record.id = UUID(); record.savedURL = unsafe
-            unsafeModel.items = [record]; unsafeModel.clearDownloadRecord(record.id)
-            try expect(unsafeModel.items.count == 1 && unsafeCalls == 0 && FileManager.default.fileExists(atPath: unsafe.path), "folders and symlinks are rejected before calling the recycler")
-        }
-        var missing = bulk; missing.id = UUID(); missing.savedURL = folder.appendingPathComponent("already-gone.png")
-        failed.items = [missing]; failed.clearDownloadRecord(missing.id)
-        try expect(failed.items.isEmpty, "already-missing files do not prevent record clearing")
-        let archived = DownloadItem(original: "archived", reference: nil, state: .failed)
-        restored.items = []; restored.history = [archived, other]
-        restored.clearDownloadRecord(archived.id)
-        try expect(restored.items.isEmpty && restored.history.map(\.id) == [other.id], "history-only record clearing leaves unrelated archived records")
-        let afterTrashFile = folder.appendingPathComponent("after-trash.png"); try Data("a".utf8).write(to: afterTrashFile)
-        let afterTrashState = folder.appendingPathComponent("after-trash.json")
-        let afterTrash = DownloadModel(preferences: prefs, stateURL: afterTrashState, recycleFile: { file in
-            try recycle(file)
-            try FileManager.default.removeItem(at: afterTrashState)
-            try FileManager.default.createDirectory(at: afterTrashState, withIntermediateDirectories: true)
-        })
-        var finalFailure = bulk; finalFailure.id = UUID(); finalFailure.savedURL = afterTrashFile
-        afterTrash.items = [finalFailure]; afterTrash.clearDownloadRecord(finalFailure.id)
-        try expect(afterTrash.items.count == 1 && afterTrash.items[0].state == .missing && afterTrash.persistenceNotice != nil, "a final save failure after trashing keeps the record and reports its missing file")
-        print("PASS single record clear: default keep, opt-in persistence, groups/shared files, independent libraries, restart, bulk isolation, active/save/trash failure and unsafe-file guards")
+        let missing = DownloadItem(original: "missing", state: .missing, savedURL: folder.appendingPathComponent("already-gone.png"))
+        restored.items = [missing]; restored.history = [other]
+        restored.clearDownloadRecord(missing.id)
+        try expect(restored.items.isEmpty && restored.history.map(\.id) == [other.id] && recycled.isEmpty,
+                   "already-missing files do not prevent independent record clearing")
+        print("PASS single record clear: legacy deletion preference ignored, preserved files/libraries/shared groups, restart, active and save-failure guards")
     }
 }

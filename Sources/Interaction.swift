@@ -92,23 +92,72 @@ struct MenuChevron: NSViewRepresentable {
     }
 }
 
+struct FileListSelection {
+    var primary: UUID?
+    var ids: Set<UUID> = []
+    var anchor: UUID?
+
+    mutating func clear() { primary = nil; ids = []; anchor = nil }
+
+    mutating func retainVisible(_ visible: [UUID]) {
+        ids.formIntersection(visible)
+        if let primary, !visible.contains(primary) { self.primary = visible.first { ids.contains($0) } }
+        if let anchor, !visible.contains(anchor) { self.anchor = primary }
+    }
+
+    mutating func select(_ id: UUID, visible: [UUID], modifiers: NSEvent.ModifierFlags = [], multiple: Bool = true) {
+        guard visible.contains(id) else { return }
+        if multiple && modifiers.contains(.shift), let anchor = anchor ?? primary,
+           let start = visible.firstIndex(of: anchor), let end = visible.firstIndex(of: id) {
+            let range = Set(visible[min(start, end)...max(start, end)])
+            ids = modifiers.contains(.command) ? ids.union(range) : range
+            self.anchor = anchor
+        } else if multiple && modifiers.contains(.command) {
+            if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+            anchor = id
+        } else {
+            ids = [id]; anchor = id
+        }
+        primary = ids.contains(id) ? id : visible.first { ids.contains($0) }
+    }
+
+    mutating func selectAll(_ visible: [UUID]) {
+        ids = Set(visible)
+        if primary == nil || !ids.contains(primary!) { primary = visible.first }
+        anchor = primary
+    }
+
+    mutating func move(_ offset: Int, visible: [UUID], extend: Bool) -> UUID? {
+        guard !visible.isEmpty else { return nil }
+        let index = primary.flatMap { visible.firstIndex(of: $0) }
+        let next = index.map { min(visible.count - 1, max(0, $0 + offset)) } ?? 0
+        select(visible[next], visible: visible, modifiers: extend ? .shift : [])
+        return primary
+    }
+}
+
 struct PaperListKeyboard: NSViewRepresentable {
     @ObservedObject private var localization = AppLocalization.shared
-    enum Action { case up, down, preview, open, diagnostics }
+    enum Action { case up, down, extendUp, extendDown, selectAll, preview, open, diagnostics }
     let request: UUID?
     var detailsShortcut = AppShortcut(key: "i")
+    var allowsMultipleSelection = false
     var focusChanged: (Bool) -> Void = { _ in }
     let didFocus: (UUID) -> Void
     let action: (Action) -> Void
     func makeNSView(context: Context) -> KeyView {
         let view = KeyView(request: request, didFocus: didFocus, action: action)
         view.focusChanged = focusChanged
+        view.allowsMultipleSelection = allowsMultipleSelection
         return view
     }
     func updateNSView(_ view: KeyView, context: Context) {
-        view.setAccessibilityLabel(L("文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情"))
+        view.setAccessibilityLabel(L(allowsMultipleSelection ?
+            "文件列表，方向键选择，Shift 方向键连续选择，Command A 全选，空格预览，Return 打开，Command I 查看详情" :
+            "文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情"))
         view.action = action
         view.detailsShortcut = detailsShortcut
+        view.allowsMultipleSelection = allowsMultipleSelection
         view.didFocus = didFocus
         view.focusChanged = focusChanged
         guard view.request != request else { return }
@@ -118,6 +167,7 @@ struct PaperListKeyboard: NSViewRepresentable {
     final class KeyView: NSView {
         var request: UUID?
         var detailsShortcut = AppShortcut(key: "i")
+        var allowsMultipleSelection = false
         private var fulfilledRequest: UUID?
         var didFocus: (UUID) -> Void
         var action: (Action) -> Void
@@ -173,6 +223,14 @@ struct PaperListKeyboard: NSViewRepresentable {
         override func keyDown(with event: NSEvent) {
             let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
             if detailsShortcut.matches(event) { action(.diagnostics); return }
+            if allowsMultipleSelection {
+                if modifiers == .command && event.charactersIgnoringModifiers?.lowercased() == "a" {
+                    action(.selectAll); return
+                }
+                if modifiers == .shift && (event.keyCode == 126 || event.keyCode == 125) {
+                    action(event.keyCode == 126 ? .extendUp : .extendDown); return
+                }
+            }
             guard modifiers.isEmpty else { super.keyDown(with: event); return }
             switch event.keyCode {
             case 126: action(.up)

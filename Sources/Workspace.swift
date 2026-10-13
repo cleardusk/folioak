@@ -191,7 +191,9 @@ enum WorkspaceStore {
 
 // Saved media has its own retention, independent of the download history.
 enum MediaLibraryStore {
-    struct Snapshot: Codable { var schema = 1; var items: [DownloadItem] }
+    // Version 2 preserves removal markers. Older apps reject it read-only
+    // rather than silently dropping those markers when saving again.
+    struct Snapshot: Codable { var schema = 2; var items: [DownloadItem] }
     static func valid(_ item: DownloadItem) -> Bool {
         WorkspaceStore.validItem(item) && item.reference == nil && item.metadata == nil && item.source?.isPaper != true &&
         [.saved, .existing, .missing].contains(item.state) &&
@@ -201,7 +203,7 @@ enum MediaLibraryStore {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let data = try PaperStorage.read(url, limit: LibraryStore.byteLimit, tooLarge: "媒体库超过 32 MB。")
         let saved = try JSONDecoder().decode(Snapshot.self, from: data)
-        guard saved.schema == 1, saved.items.count <= LibraryStore.countLimit,
+        guard [1, 2].contains(saved.schema), saved.items.count <= LibraryStore.countLimit,
               Set(saved.items.map(\.id)).count == saved.items.count, saved.items.allSatisfy(valid) else {
             throw DownloadError.storage("媒体库格式无效。")
         }

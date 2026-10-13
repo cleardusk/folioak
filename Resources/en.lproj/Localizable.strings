@@ -600,3 +600,36 @@
 "项目主页" = "Project Homepage";
 
 "下载的媒体会显示在这里。" = "Downloaded media will appear here.";
+
+"下载结束后可整理资料库。" = "You can organize the library when downloads finish.";
+"资料库当前无法修改，原记录已保留。" = "The library cannot be changed right now. Existing records are preserved.";
+"资料库修改未能保存，原记录已保留：%@" = "Could not save library changes. Existing records are preserved: %@";
+"部分或全部文件已不在原位置，可重新下载。" = "Some or all files are missing from their original locations. You can download them again.";
+"没有可移到废纸篓的文件。" = "There are no files to move to Trash.";
+"文件位置已变化，请重新选择。" = "File locations have changed. Select the files again.";
+"移出当前结果？" = "Remove the current results?";
+"移出" = "Remove";
+"将移出 %@ 项。文件和下载记录都会保留，可从「已移除」中恢复。" = "Remove %@ items from the library. Files and download records will be kept. You can restore the items from Removed.";
+"将文件移到废纸篓？" = "Move files to Trash?";
+"移到废纸篓" = "Move to Trash";
+"下载记录和资料库条目会保留，并更新文件状态。恢复库条目不会恢复文件，可从 Finder 废纸篓找回文件。" = "Download records and library entries will be kept, with their file status updated. Restoring an entry does not restore its files. You can recover files from Trash in Finder.";
+"已选 %@ 项" = "%@ selected";
+"全选当前结果" = "Select All Results";
+"取消选择" = "Deselect All";
+"恢复所选 %@ 项" = "Restore %@ Selected Items";
+"移出所选 %@ 项" = "Remove %@ Selected Items";
+"恢复当前结果 %@ 项" = "Restore All %@ Results";
+"移出当前结果 %@ 项…" = "Remove All %@ Results…";
+"将所选文件移到废纸篓…" = "Move Selected Files to Trash…";
+"媒体库操作" = "Media Library Actions";
+"返回媒体库" = "Back to Media Library";
+"已移除的媒体" = "Removed Media";
+"暂无已移除媒体" = "No removed media";
+"已移出 %@ 项" = "Removed %@ items";
+"已恢复 %@ 项" = "Restored %@ items";
+"撤销移出" = "Undo Removal";
+"撤销恢复" = "Undo Restore";
+"移出媒体库" = "Remove from Media Library";
+"恢复到媒体库" = "Restore to Media Library";
+"将文件移到废纸篓…" = "Move Files to Trash…";
+"文件列表，方向键选择，Shift 方向键连续选择，Command A 全选，空格预览，Return 打开，Command I 查看详情" = "File list. Arrow keys select, Shift-arrow extends selection, Command A selects all results, Space previews, Return opens, Command I shows details.";

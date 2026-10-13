@@ -93,9 +93,33 @@ actor MockTransport: HTTPTransport {
 
 @main
 struct CoreTests {
-    @MainActor static func main() async {
+    @MainActor static func main() {
+        // Native sheets can stop a run-loop iteration. Swift's async-main drain
+        // then exits with status 0, so keep the host alive until the suite returns.
+        var completed = false
+        Task { @MainActor in
+            await runTests()
+            completed = true
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        while !completed { CFRunLoopRun() }
+    }
+
+    @MainActor static func runTests() async {
+        defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--library-management-only") {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-library-management-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let pdf = root.appendingPathComponent("fixture.pdf")
+                try createPDF(at: pdf)
+                try await libraryManagementTests(root: root, pdf: pdf)
+                try fileListSelectionTests()
+                try await librarySelectionUITests()
+                return
+            }
             if CommandLine.arguments.contains("--updates-live") { try await liveUpdateTest(); return }
             try await updateTests()
             try await updateIntegrationTests()
@@ -127,6 +151,8 @@ struct CoreTests {
                 try await listFocusTests()
                 try await selectionFocusTests()
                 try await blankCanvasFocusTests()
+                try fileListSelectionTests()
+                try await librarySelectionUITests()
                 try await thumbnailTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
@@ -150,6 +176,7 @@ struct CoreTests {
             try await cliTests(root: root, pdf: pdf)
             try await featureTests(root: root, pdf: pdf)
             try await libraryTests(root: root, pdf: pdf)
+            try await libraryManagementTests(root: root, pdf: pdf)
             try await sourceSchedulingTests()
             try await coordinatorTests(root: root, pdf: pdf)
             try await processTests(root: root, pdf: pdf)
@@ -165,6 +192,8 @@ struct CoreTests {
             try await messagePersistenceTests(root: root, pdf: pdf)
             try await clearDownloadRecordsTests(root: root, pdf: pdf)
             try await clearSingleDownloadRecordTests(root: root, pdf: pdf)
+            try fileListSelectionTests()
+            try await librarySelectionUITests()
             try menuChevronTests()
             try initialDirectoryTests()
             try await sidebarLayoutTests()

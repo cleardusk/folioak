@@ -15,6 +15,13 @@ xcrun swiftc -parse-as-library -swift-version 5 -framework PDFKit \
   Sources/Messages.swift Sources/BrowserAuthentication.swift Sources/DownloadError.swift Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Douyin.swift Sources/Shared.swift Tests/CoordinationProbe.swift -o build/CoordinationProbe
 xcrun swiftc -parse-as-library -swift-version 5 -D TESTING \
   -framework AppKit -framework SwiftUI -framework PDFKit -framework QuickLookThumbnailing \
-  Sources/Messages.swift Sources/BrowserAuthentication.swift Sources/DownloadError.swift Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Douyin.swift Sources/Shared.swift Sources/CLI.swift Sources/Localization.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspacePersistence.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/MediaThumbnail.swift Sources/SidebarMotion.swift Sources/BrowserAuthenticationSettings.swift Sources/Updates.swift Sources/App.swift Tests/TestMain.swift Tests/UpdateTests.swift Tests/TransportTests.swift Tests/SharedTests.swift Tests/FeatureTests.swift Tests/LibraryTests.swift Tests/PDFTests.swift Tests/WorkspaceTests.swift Tests/InteractionRenderingTests.swift Tests/ThumbnailTests.swift \
+  Sources/Messages.swift Sources/BrowserAuthentication.swift Sources/DownloadError.swift Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Douyin.swift Sources/Shared.swift Sources/CLI.swift Sources/Localization.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspacePersistence.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/MediaThumbnail.swift Sources/SidebarMotion.swift Sources/BrowserAuthenticationSettings.swift Sources/Updates.swift Sources/App.swift Tests/TestMain.swift Tests/UpdateTests.swift Tests/TransportTests.swift Tests/SharedTests.swift Tests/FeatureTests.swift Tests/LibraryTests.swift Tests/PDFTests.swift Tests/WorkspaceTests.swift Tests/InteractionRenderingTests.swift Tests/ThumbnailTests.swift Tests/LibraryManagementTests.swift Tests/LibrarySelectionTests.swift \
   Tests/MediaTests.swift Tests/DouyinTests.swift Tests/BrowserAuthenticationTests.swift Tests/MessageTests.swift Tests/FileInformationTests.swift Tests/LocalizationTests.swift Tests/PersistenceTests.swift -o build/CoreTests
-./build/CoreTests "$@"
+result_log=$(mktemp "${TMPDIR:-/tmp/}folioak-tests.XXXXXX")
+trap 'rm -f "$result_log"' EXIT
+./build/CoreTests "$@" | tee "$result_log"
+# AppKit can terminate a command-line host with status 0 before async tests finish.
+if ! /usr/bin/grep -Fxq 'PASS core test suite completed' "$result_log"; then
+  print -u2 -- 'FAIL: core tests exited before completing the requested suite'
+  exit 1
+fi

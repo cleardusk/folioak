@@ -99,7 +99,9 @@ struct DownloaderView: View {
     @WorkspaceViewState private var filter: QueueFilter = .all
     @WorkspaceViewState private var logLevel: ActivityLevel? = nil
     @WorkspaceViewState private var dropTargeted = false
-    @WorkspaceViewState private var selectedID: UUID?
+    @WorkspaceViewState private var selection = FileListSelection()
+    @WorkspaceViewState private var mediaRemoved = false
+    @WorkspaceViewState private var confirmingLibraryRemoval: LibraryRemovalUndo?
     @WorkspaceViewState private var listFocus: UUID?
     @WorkspaceViewState private var listFocused = false
     @WorkspaceViewState private var focusListOnArrival = false
@@ -115,10 +117,14 @@ struct DownloaderView: View {
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var listSelectionActive: Bool { listFocused && !inputFocused && !searchFocused }
+    private var selectedID: UUID? { selection.primary }
+    private var libraryCollection: LibraryCollection? { page == .library ? .documents : page == .media ? .media : nil }
+    private var showingRemoved: Bool { page == .library ? libraryFilter == .removed : mediaRemoved }
+    private var selectedLibraryIDs: Set<UUID> { selection.ids.intersection(visibleItems.map(\.id)) }
     private var visibleItems: [DownloadItem] {
         if page == .library { return libraryPapers.map(\.downloadItem) }
         if page == .media {
-            return model.mediaLibrary.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || $0.original.localizedCaseInsensitiveContains(query) }
+            return model.mediaLibrary.filter { $0.isLibraryRemoved == mediaRemoved && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || $0.original.localizedCaseInsensitiveContains(query)) }
                 .sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) }
         }
         return model.downloads.filter { item in
@@ -178,14 +184,14 @@ struct DownloaderView: View {
             if !focused && query.isEmpty { searchExpanded = false }
         }
         .onChange(of: page) { _ in
-            query = ""; searchExpanded = false; searchFocused = false; selectedID = nil; listFocus = nil
+            query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil
             if page != .logs { logItem = nil }
             if page != .downloads { inputFocused = false; endTextEditing() }
             if focusListOnArrival { focusListOnArrival = false; focusList() }
         }
-        .onChange(of: visibleItems.map(\.id)) { _ in
-            if let selectedID, !visibleItems.contains(where: { $0.id == selectedID }) { self.selectedID = nil }
-        }
+        .onChange(of: visibleItems.map(\.id)) { selection.retainVisible($0) }
+        .onChange(of: libraryFilter) { _ in selection.clear(); listFocus = nil }
+        .onChange(of: mediaRemoved) { _ in selection.clear(); listFocus = nil }
         .quickLookPreview($model.previewURL)
         .alert(L("清空所有下载记录？"), isPresented: $confirmingClearDownloads) {
             Button(L("取消"), role: .cancel) {}
@@ -194,16 +200,61 @@ struct DownloaderView: View {
         } message: {
             Text(L("将移除全部下载记录，包括失败和取消的任务。\n已下载文件、文档库和媒体库都会保留。"))
         }
+        .alert(L("移出当前结果？"), isPresented: Binding(get: { confirmingLibraryRemoval != nil }, set: { if !$0 { confirmingLibraryRemoval = nil } })) {
+            Button(L("取消"), role: .cancel) { confirmingLibraryRemoval = nil }
+            Button(L("移出"), role: .destructive) {
+                if let request = confirmingLibraryRemoval {
+                    _ = model.setLibraryRemoved(request.ids, in: request.collection, removed: true)
+                }
+                confirmingLibraryRemoval = nil
+            }.disabled(model.busy)
+        } message: {
+            Text(L("将移出 \(confirmingLibraryRemoval?.ids.count ?? 0) 项。文件和下载记录都会保留，可从「已移除」中恢复。"))
+        }
+        .alert(L("将文件移到废纸篓？"), isPresented: Binding(get: { model.pendingFileTrash != nil }, set: { if !$0 { model.pendingFileTrash = nil } })) {
+            Button(L("取消"), role: .cancel) { model.pendingFileTrash = nil }
+            Button(L("移到废纸篓"), role: .destructive) {
+                if let request = model.pendingFileTrash { _ = model.confirmFileTrash(request) }
+            }.disabled(model.busy)
+        } message: {
+            if let request = model.pendingFileTrash {
+                let files = request.existingFiles
+                let names = files.prefix(3).map { file in
+                    let name = file.lastPathComponent
+                    return name.count > 100 ? String(name.prefix(70)) + "…" + String(name.suffix(25)) : name
+                }
+                Text(L("\(files.count) 个文件") + "\n" + names.joined(separator: "\n") +
+                     (files.count > 3 ? "\n…" : "") + "\n\n" +
+                     L("下载记录和资料库条目会保留，并更新文件状态。恢复库条目不会恢复文件，可从 Finder 废纸篓找回文件。"))
+            }
+        }
         .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item, libraryPaperID: page == .library ? item.id : nil, fromMediaLibrary: page == .media) }
         .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
-        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selectedID = nil; listFocus = nil }
+        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
     }
 
     private func focusList() {
         guard !visibleItems.isEmpty else { listFocus = nil; return }
-        if selectedID == nil { selectedID = visibleItems.first?.id }
+        if selectedID == nil, let first = visibleItems.first { selection.select(first.id, visible: visibleItems.map(\.id)) }
         inputFocused = false; listFocus = UUID()
+    }
+
+    private func selectItem(_ id: UUID) {
+        selection.select(id, visible: visibleItems.map(\.id), modifiers: NSApp.currentEvent?.modifierFlags ?? [],
+                         multiple: libraryCollection != nil)
+        inputFocused = false; listFocus = UUID()
+    }
+
+    private func selectAllVisible() {
+        selection.selectAll(visibleItems.map(\.id))
+        inputFocused = false; searchFocused = false; listFocus = UUID()
+    }
+
+    private func toggleRemoved() {
+        if page == .library { libraryFilter = showingRemoved ? .all : .removed; libraryTag = nil }
+        else { mediaRemoved.toggle() }
+        query = ""; selection.clear(); listFocus = nil
     }
 
     private func dismissEditing() {
@@ -292,7 +343,8 @@ struct DownloaderView: View {
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty {
-                    Text(L("\(libraryPapers.count) 篇")).font(.callout).monospacedDigit().foregroundStyle(secondary)
+                    Text(selectedLibraryIDs.isEmpty ? L("\(libraryPapers.count) 篇") : L("已选 \(selectedLibraryIDs.count) 项"))
+                        .font(.callout).monospacedDigit().foregroundStyle(secondary)
                     searchField
                 }
                 Menu {
@@ -314,16 +366,26 @@ struct DownloaderView: View {
                             .disabled(!libraryPapers.contains { $0.reference != nil })
                     } else { Button(L("停止检查版本"), action: model.cancelVersionCheck) }
                     Divider()
+                    libraryBatchActions
+                    Divider()
                     Button(libraryFilter == .removed ? L("返回文档库") : L("已移除的文档")) {
-                        libraryFilter = libraryFilter == .removed ? .all : .removed; query = ""; libraryTag = nil
+                        toggleRemoved()
                     }
                 } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                     .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("文档库操作"))
             } else if page == .media {
                 if !model.mediaLibrary.isEmpty {
-                    Text(L("\(visibleItems.count) 项")).font(.callout).monospacedDigit().foregroundStyle(secondary)
+                    Text(selectedLibraryIDs.isEmpty ? L("\(visibleItems.count) 项") : L("已选 \(selectedLibraryIDs.count) 项"))
+                        .font(.callout).monospacedDigit().foregroundStyle(secondary)
                     searchField
                 }
+                Menu {
+                    libraryBatchActions
+                    Divider()
+                    Button(mediaRemoved ? L("返回媒体库") : L("已移除的媒体"), action: toggleRemoved)
+                } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
+                    .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
+                    .accessibilityLabel(L("媒体库操作"))
             } else if page == .logs && !model.logs.isEmpty {
                 searchField
                 Button { model.exportLogs(visibleLogs) } label: { Image(systemName: "square.and.arrow.up") }
@@ -331,6 +393,26 @@ struct DownloaderView: View {
                     .disabled(visibleLogs.isEmpty).help(L("导出当前筛选的日志")).accessibilityLabel(L("导出日志"))
             }
         }.frame(height: WorkspaceMetrics.headerHeight)
+    }
+
+    @ViewBuilder private var libraryBatchActions: some View {
+        if let collection = libraryCollection {
+            Button(L("全选当前结果"), action: selectAllVisible).disabled(visibleItems.isEmpty)
+            Button(L("取消选择")) { selection.clear() }.disabled(selection.ids.isEmpty)
+            Divider()
+            Button(L(showingRemoved ? "恢复所选 \(selectedLibraryIDs.count) 项" : "移出所选 \(selectedLibraryIDs.count) 项")) {
+                _ = model.setLibraryRemoved(selectedLibraryIDs, in: collection, removed: !showingRemoved)
+            }.disabled(selectedLibraryIDs.isEmpty || !model.canManageLibrary(collection))
+            Button(L(showingRemoved ? "恢复当前结果 \(visibleItems.count) 项" : "移出当前结果 \(visibleItems.count) 项…")) {
+                let ids = Set(visibleItems.map(\.id))
+                if showingRemoved { _ = model.setLibraryRemoved(ids, in: collection, removed: false) }
+                else { confirmingLibraryRemoval = LibraryRemovalUndo(collection: collection, ids: ids, removed: true) }
+            }.disabled(visibleItems.isEmpty || !model.canManageLibrary(collection))
+            Divider()
+            Button(L("将所选文件移到废纸篓…"), role: .destructive) {
+                model.requestFileTrash(selectedLibraryIDs, in: collection == .documents ? .documents : .media)
+            }.disabled(!model.canTrashFiles(selectedLibraryIDs, in: collection == .documents ? .documents : .media))
+        }
     }
 
     private var downloadActions: some View {
@@ -467,7 +549,7 @@ struct DownloaderView: View {
         let listPage = page
         let rows = visibleItems
         return VStack(spacing: 14) {
-            if page == .library || (page == .downloads && !model.downloads.isEmpty) {
+            if page == .library || (page == .media && mediaRemoved) || (page == .downloads && !model.downloads.isEmpty) {
             HStack(spacing: 4) {
                 if page == .downloads {
                     Menu {
@@ -491,9 +573,9 @@ struct DownloaderView: View {
                     }
                     searchField
                 } else {
-                    if libraryFilter == .removed {
-                        Button { libraryFilter = .all } label: { Label(L("已移除"), systemImage: "chevron.left").font(.system(size: 13)) }
-                            .buttonStyle(.plain).foregroundStyle(secondary).help(L("返回文档库"))
+                    if showingRemoved {
+                        Button(action: toggleRemoved) { Label(L("已移除"), systemImage: "chevron.left").font(.system(size: 13)) }
+                            .buttonStyle(.plain).foregroundStyle(secondary).help(page == .library ? L("返回文档库") : L("返回媒体库"))
                     }
                     else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { L($0.rawValue) }, palette: palette) }
                     Spacer()
@@ -516,35 +598,40 @@ struct DownloaderView: View {
                         LazyVStack(spacing: 0) {
                             ForEach(rows) { item in
                                 if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
-                                    LibraryRow(paper: paper, model: model, selected: selectedID == item.id, selectionActive: listSelectionActive, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                    LibraryRow(paper: paper, model: model, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, select: { selectItem(item.id) })
                                         .id(item.id)
                                 } else {
-                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectItem(item.id) })
                                     .contentShape(Rectangle())
-                                    .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
+                                    .onTapGesture { selectItem(item.id) }
                                     .id(item.id)
                                 }
                             }
                         }.padding(1).padding(.trailing, 16)
                             .frame(minHeight: viewport.size.height, alignment: .top)
                             .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture {
-                                selectedID = nil; listFocus = nil
+                                selection.clear(); listFocus = nil
                                 dismissEditing()
                             })
                     }
-                    .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], focusChanged: { if page == listPage { listFocused = $0 } }, didFocus: { request in
+                    .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], allowsMultipleSelection: libraryCollection != nil, focusChanged: { if page == listPage { listFocused = $0 } }, didFocus: { request in
                         if listFocus == request { listFocus = nil }
                     }) { action in
                         guard !rows.isEmpty else { return }
-                        if action == .up || action == .down {
-                            let index = selectedID.flatMap { id in rows.firstIndex { $0.id == id } }
-                            let next = index.map { min(rows.count - 1, max(0, $0 + (action == .down ? 1 : -1))) } ?? 0
-                            selectedID = rows[next].id
-                            scroll.scrollTo(rows[next].id)
+                        if action == .selectAll {
+                            selection.selectAll(rows.map(\.id))
+                        } else if [.up, .down, .extendUp, .extendDown].contains(action) {
+                            let down = action == .down || action == .extendDown
+                            if let id = selection.move(down ? 1 : -1, visible: rows.map(\.id), extend: action == .extendUp || action == .extendDown) {
+                                scroll.scrollTo(id)
+                            }
                         } else if let item = rows.first(where: { $0.id == selectedID }) {
                             if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
                                 if action == .diagnostics { model.showPaperDetails(paper) }
                                 else if !paper.removed { model.openPaper(paper, preview: action == .preview) }
+                            }
+                            else if page == .media && item.isLibraryRemoved {
+                                if action == .diagnostics { model.diagnosticItem = item }
                             }
                             else if action == .preview { model.preview(item) }
                             else if action == .open { model.openFile(item) }
@@ -560,7 +647,7 @@ struct DownloaderView: View {
 
     private var emptyMessage: String {
         if !query.isEmpty { return L("没有匹配的结果") }
-        if page == .media { return L("暂无媒体") }
+        if page == .media { return mediaRemoved ? L("暂无已移除媒体") : L("暂无媒体") }
         if page == .library {
             if libraryTag != nil { return L("没有匹配的结果") }
             switch libraryFilter { case .all: return L("暂无文档"); case .favorites: return L("暂无收藏"); case .unread: return L("暂无未读文档"); case .removed: return L("暂无已移除文档") }
@@ -576,7 +663,7 @@ struct DownloaderView: View {
             if page == .library && model.papers.isEmpty && query.isEmpty {
                 Button(L("导入 PDF…"), action: importPDFs).buttonStyle(QuietButtonStyle(palette: palette))
                     .disabled(model.importingPDFs || !model.libraryWritable)
-            } else if page == .media && model.mediaLibrary.isEmpty && query.isEmpty {
+            } else if page == .media && model.mediaLibrary.isEmpty && query.isEmpty && !mediaRemoved {
                 Text(L("下载的媒体会显示在这里。")).font(WorkspaceMetrics.TypeScale.supporting).foregroundStyle(secondary)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -609,7 +696,12 @@ struct DownloaderView: View {
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                if page == .downloads {
+                if let collection = libraryCollection, let undo = model.libraryUndo, undo.collection == collection {
+                    Text(L(undo.removed ? "已移出 \(undo.ids.count) 项" : "已恢复 \(undo.ids.count) 项")).lineLimit(1)
+                    Spacer()
+                    Button(L(undo.removed ? "撤销移出" : "撤销恢复")) { _ = model.undoLibraryRemoval() }
+                        .buttonStyle(.plain).foregroundStyle(accent).disabled(!model.canManageLibrary(collection))
+                } else if page == .downloads {
                     if model.busy { ProgressView().controlSize(.mini).frame(width: 12) }
                     else if !model.summary.isEmpty { Circle().fill(accent).frame(width: 5, height: 5) }
                     Text(L(model.summary)).lineLimit(1)
@@ -693,7 +785,6 @@ struct DownloadRow: View {
     let model: DownloadModel
     let busy: Bool
     let theme: AppTheme
-    let trashFilesWhenClearingRecord: Bool
     let inMediaLibrary: Bool
     let selected: Bool
     let selectionActive: Bool
@@ -705,7 +796,6 @@ struct DownloadRow: View {
         self.authenticate = authenticate
         self.showLogs = showLogs
         self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
-        trashFilesWhenClearingRecord = model.trashFilesWhenClearingRecord
         busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
     }
     @Environment(\.colorScheme) private var scheme
@@ -758,20 +848,23 @@ struct DownloadRow: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
             VStack(alignment: .trailing, spacing: WorkspaceMetrics.Space.small) {
                 HStack(spacing: WorkspaceMetrics.Space.small) {
-                    if let url = item.savedURL, !inMediaLibrary || item.state != .missing || item.localURLs.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+                    if inMediaLibrary && item.isLibraryRemoved {
+                        Button(L("恢复")) { _ = model.setLibraryRemoved([item.id], in: .media, removed: false) }
+                            .buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.media))
+                    } else if let url = item.savedURL, !inMediaLibrary || item.state != .missing || item.localURLs.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
                         Button(L("打开")) { model.openFile(item) }.buttonStyle(RowActionStyle(palette: palette)).help(url.path)
                     }
-                    if item.canRetry {
+                    if item.canRetry && !item.isLibraryRemoved {
                         Button(L("重试"), action: retry)
                             .buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
-                    } else if item.source == nil {
+                    } else if item.source == nil && !(inMediaLibrary && item.isLibraryRemoved) {
                         Button(L("修改")) { model.edit(item) }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy)
                     }
                     Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
                         .accessibilityLabel(L("\(item.title)的更多操作"))
                 }
-                if hasAuthenticationIssue {
+                if hasAuthenticationIssue && !(inMediaLibrary && item.isLibraryRemoved) {
                     Button(L("浏览器认证…"), action: authenticate)
                         .buttonStyle(RowActionStyle(palette: palette))
                         .accessibilityIdentifier("browser-authentication-action")
@@ -791,6 +884,13 @@ struct DownloadRow: View {
     }
 
     @ViewBuilder private var actions: some View {
+        if inMediaLibrary && item.isLibraryRemoved {
+            Button(L("恢复到媒体库")) { _ = model.setLibraryRemoved([item.id], in: .media, removed: false) }
+                .disabled(!model.canManageLibrary(.media))
+            Divider()
+            Button(L("将文件移到废纸篓…"), role: .destructive) { model.requestFileTrash([item.id], in: .media) }
+                .disabled(!model.canTrashFiles([item.id], in: .media))
+        } else {
         if !item.localURLs.isEmpty {
             Button(L("快速预览")) { select(); model.preview(item) }.help(L("选中文件后按空格"))
             Button(L("在 Finder 中显示")) { model.openFile(item, reveal: true) }
@@ -814,11 +914,21 @@ struct DownloadRow: View {
         if let url = item.savedURL {
             Button(L("复制文件名")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
         }
+        Divider()
+        if inMediaLibrary {
+            Button(L(item.isLibraryRemoved ? "恢复到媒体库" : "移出媒体库")) {
+                _ = model.setLibraryRemoved([item.id], in: .media, removed: !item.isLibraryRemoved)
+            }.disabled(!model.canManageLibrary(.media))
+        }
+        Button(L("将文件移到废纸篓…"), role: .destructive) {
+            model.requestFileTrash([item.id], in: inMediaLibrary ? .media : .downloads)
+        }.disabled(!model.canTrashFiles([item.id], in: inMediaLibrary ? .media : .downloads))
         if !inMediaLibrary {
             Divider()
-            Button(L(trashFilesWhenClearingRecord ? "清除记录并移到废纸篓" : "清除这条记录"), role: .destructive) {
+            Button(L("清除这条记录"), role: .destructive) {
                 model.clearDownloadRecord(item.id)
             }.disabled(busy)
+        }
         }
     }
 

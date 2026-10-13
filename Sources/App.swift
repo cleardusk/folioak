@@ -95,6 +95,9 @@ struct DownloadItem: Identifiable, Codable {
     var mediaFormat: MediaFormat? = nil
     var additionalURLs: [URL]? = nil
     var incompleteFileList: Bool? = nil
+    // Optional so records written before library removal remain decodable.
+    var libraryRemovedAt: Date? = nil
+    var isLibraryRemoved: Bool { libraryRemovedAt != nil }
     var localURLs: [URL] { (savedURL.map { [$0] } ?? []) + (additionalURLs ?? []) }
     var source: DownloadSource? {
         if let reference { return .arxiv(reference) }
@@ -122,6 +125,23 @@ struct DownloadItem: Identifiable, Codable {
         error = message.fallback
         errorMessage = message
     }
+}
+
+enum LibraryCollection { case documents, media }
+enum RecordCollection { case downloads, documents, media }
+
+struct LibraryRemovalUndo {
+    let collection: LibraryCollection
+    let ids: Set<UUID>
+    let removed: Bool
+}
+
+struct FileTrashRequest: Identifiable {
+    let id = UUID()
+    let collection: RecordCollection
+    let ids: Set<UUID>
+    let files: [URL]
+    var existingFiles: [URL] { files.filter { FileManager.default.fileExists(atPath: $0.path) } }
 }
 
 @MainActor
@@ -169,9 +189,8 @@ final class DownloadModel: ObservableObject {
     @Published var showsMenuBarIcon: Bool {
         didSet { preferences.set(showsMenuBarIcon, forKey: "showsMenuBarIcon") }
     }
-    @Published var trashFilesWhenClearingRecord: Bool {
-        didSet { preferences.set(trashFilesWhenClearingRecord, forKey: "trashFilesWhenClearingRecord") }
-    }
+    @Published private(set) var libraryUndo: LibraryRemovalUndo?
+    @Published var pendingFileTrash: FileTrashRequest?
     @Published var items: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
     @Published var mediaFormat: MediaFormat = .automatic
     @Published var history: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
@@ -243,7 +262,6 @@ final class DownloadModel: ObservableObject {
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
         language = AppLanguage(rawValue: preferences.string(forKey: "language") ?? "") ?? .system
         showsMenuBarIcon = preferences.object(forKey: "showsMenuBarIcon") as? Bool ?? true
-        trashFilesWhenClearingRecord = preferences.bool(forKey: "trashFilesWhenClearingRecord")
         directory = downloadPreferences.directory
         if preferences.string(forKey: "downloadRootDirectory") == nil {
             preferences.set(directory.path, forKey: "downloadRootDirectory")
@@ -271,43 +289,151 @@ final class DownloadModel: ObservableObject {
 
     func clearDownloadRecord(_ id: UUID) {
         guard !busy, downloads.contains(where: { $0.id == id }) else { return }
-        if trashFilesWhenClearingRecord {
-            // Keep recovery records until the libraries and current state are durable.
-            persistWorkspace()
-            guard stateURL == nil || (libraryWritable && mediaLibraryWritable && !libraryDirty && !mediaLibraryDirty && persistenceNotice == nil) else {
-                notice = "资料库或下载记录尚未保存，文件和记录均保留。"; return
-            }
-            let records = (items + history).filter { $0.id == id }
-            var retainedMedia = mediaLibrary.filter { $0.id == id }
-            if retainedMedia.isEmpty || retainedMedia.allSatisfy({ $0.incompleteFileList == true }) {
-                // File deduplication can retain an older library ID. Only a unique
-                // exact saved copy may supply attachments pruned from history.
-                let copies = mediaLibrary.filter { entry in
-                    entry.incompleteFileList != true && records.contains { $0.finishedAt != nil && $0.original == entry.original && $0.createdAt == entry.createdAt && $0.finishedAt == entry.finishedAt && $0.mediaFormat == entry.mediaFormat }
-                }
-                if copies.count == 1 { retainedMedia += copies }
-            }
-            let files = Set((records + retainedMedia).flatMap(\.localURLs).map(fileLocation))
-            do {
-                let existing = try files.filter { url in
-                    guard url.isFileURL else { throw DownloadError.storage("只可移除普通下载文件。") }
-                    guard FileManager.default.fileExists(atPath: url.path) else { return false }
-                    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-                    guard values.isRegularFile == true, values.isSymbolicLink != true else { throw DownloadError.storage("只可移除普通下载文件。") }
-                    return true
-                }
-                // Validate the entire group before moving any file; trash each path once.
-                for file in existing { try recycleFile(file) }
-            } catch {
-                refreshMissingFiles(files)
-                persistWorkspace()
-                notice = "未能移除全部文件，记录已保留：\(error.localizedDescription)"
-                return
-            }
-            refreshMissingFiles(files)
-        }
         if replaceDownloadRecords(items: items.filter { $0.id != id }, history: history.filter { $0.id != id }), diagnosticItem?.id == id {
             diagnosticItem = nil
+        }
+    }
+
+    func canManageLibrary(_ collection: LibraryCollection) -> Bool {
+        !busy && (collection == .documents ? libraryWritable && !importingPDFs : mediaLibraryWritable)
+    }
+
+    @discardableResult
+    func setLibraryRemoved(_ ids: Set<UUID>, in collection: LibraryCollection, removed: Bool) -> Bool {
+        changeLibraryRemoval(ids, in: collection, removed: removed, registerUndo: true)
+    }
+
+    private func changeLibraryRemoval(_ ids: Set<UUID>, in collection: LibraryCollection, removed: Bool, registerUndo: Bool) -> Bool {
+        guard canManageLibrary(collection) else {
+            notice = busy ? "下载结束后可整理资料库。" : "资料库当前无法修改，原记录已保留。"
+            return false
+        }
+        do {
+            let changed: Set<UUID>
+            switch collection {
+            case .documents:
+                var updated = papers
+                changed = Set(updated.filter { ids.contains($0.id) && $0.removed != removed }.map(\.id))
+                guard !changed.isEmpty else { return false }
+                for i in updated.indices where changed.contains(updated[i].id) {
+                    updated[i].removed = removed
+                    if !removed { updated[i].missing = updated[i].file.map { !FileManager.default.fileExists(atPath: $0.path) } ?? true }
+                }
+                // The serial writer drains older saves before this commit. Publish
+                // only after it succeeds; revision checks reject late completions.
+                try persistence?.writeLibrary(updated)
+                papers = updated; libraryDirty = false; libraryNotice = nil
+            case .media:
+                var updated = mediaLibrary
+                changed = Set(updated.filter { ids.contains($0.id) && $0.isLibraryRemoved != removed }.map(\.id))
+                guard !changed.isEmpty else { return false }
+                let date = removed ? Date() : nil
+                for i in updated.indices where changed.contains(updated[i].id) {
+                    updated[i].libraryRemovedAt = date
+                    if !removed {
+                        let complete = updated[i].incompleteFileList != true &&
+                            updated[i].localURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
+                        if !complete {
+                            updated[i].state = .missing
+                            updated[i].error = "部分或全部文件已不在原位置，可重新下载。"
+                        } else if updated[i].state == .missing {
+                            updated[i].state = .saved; updated[i].error = nil
+                        }
+                    }
+                }
+                try persistence?.writeMediaLibrary(updated)
+                mediaLibrary = updated; mediaLibraryDirty = false; mediaLibraryNotice = nil
+            }
+            if registerUndo { libraryUndo = LibraryRemovalUndo(collection: collection, ids: changed, removed: removed) }
+            notice = nil
+            return true
+        } catch {
+            notice = "资料库修改未能保存，原记录已保留：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
+    func undoLibraryRemoval() -> Bool {
+        guard let undo = libraryUndo,
+              changeLibraryRemoval(undo.ids, in: undo.collection, removed: !undo.removed, registerUndo: false) else { return false }
+        libraryUndo = nil
+        return true
+    }
+
+    private func sameMediaSave(_ lhs: DownloadItem, _ rhs: DownloadItem) -> Bool {
+        lhs.finishedAt != nil && lhs.original == rhs.original && lhs.createdAt == rhs.createdAt &&
+            lhs.finishedAt == rhs.finishedAt && lhs.mediaFormat == rhs.mediaFormat
+    }
+
+    private func filesForRecords(_ ids: Set<UUID>, in collection: RecordCollection) -> Set<URL> {
+        switch collection {
+        case .documents:
+            return Set(papers.filter { ids.contains($0.id) }.compactMap(\.file).map(fileLocation))
+        case .media:
+            return Set(mediaLibrary.filter { ids.contains($0.id) }.flatMap(\.localURLs).map(fileLocation))
+        case .downloads:
+            let records = downloads.filter { ids.contains($0.id) }
+            var retained = mediaLibrary.filter { ids.contains($0.id) }
+            for record in records {
+                let copies = mediaLibrary.filter { $0.incompleteFileList != true && sameMediaSave(record, $0) }
+                if copies.count == 1 { retained += copies }
+            }
+            return Set((records + retained).flatMap(\.localURLs).map(fileLocation))
+        }
+    }
+
+    func canTrashFiles(_ ids: Set<UUID>, in collection: RecordCollection) -> Bool {
+        !busy && (stateURL == nil || (libraryWritable && mediaLibraryWritable)) &&
+            filesForRecords(ids, in: collection).contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    func requestFileTrash(_ ids: Set<UUID>, in collection: RecordCollection) {
+        guard !busy else { return }
+        let files = filesForRecords(ids, in: collection).sorted { $0.path < $1.path }
+        guard files.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            notice = "没有可移到废纸篓的文件。"; return
+        }
+        pendingFileTrash = FileTrashRequest(collection: collection, ids: ids, files: files)
+    }
+
+    @discardableResult
+    func confirmFileTrash(_ request: FileTrashRequest) -> Bool {
+        guard !busy, pendingFileTrash?.id == request.id else { return false }
+        defer { if pendingFileTrash?.id == request.id { pendingFileTrash = nil } }
+        let files = Set(request.files)
+        guard files == filesForRecords(request.ids, in: request.collection), !files.isEmpty else {
+            notice = "文件位置已变化，请重新选择。"; return false
+        }
+        // Keep all recovery records durable before moving any file.
+        persistWorkspace()
+        guard stateURL == nil || (libraryWritable && mediaLibraryWritable && !libraryDirty && !mediaLibraryDirty && persistenceNotice == nil) else {
+            notice = "资料库或下载记录尚未保存，文件和记录均保留。"; return false
+        }
+        do {
+            let existing = try request.files.filter { url in
+                guard url.isFileURL else { throw DownloadError.storage("只可移除普通下载文件。") }
+                let values: URLResourceValues
+                do { values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) }
+                catch {
+                    if !FileManager.default.fileExists(atPath: url.path) { return false }
+                    throw error
+                }
+                guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                    throw DownloadError.storage("只可移除普通下载文件。")
+                }
+                return true
+            }
+            for file in existing { try recycleFile(file) }
+            refreshMissingFiles(files)
+            persistWorkspace()
+            if persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil { notice = nil }
+            return persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil
+        } catch {
+            refreshMissingFiles(files)
+            persistWorkspace()
+            notice = "未能移除全部文件，记录已保留：\(error.localizedDescription)"
+            return false
         }
     }
 
@@ -386,12 +512,16 @@ final class DownloadModel: ObservableObject {
     }
     func upsertMedia(_ item: DownloadItem) {
         guard mediaLibraryWritable, MediaLibraryStore.valid(item) else { return }
-        if let index = mediaLibrary.firstIndex(where: { $0.id == item.id || Set($0.localURLs) == Set(item.localURLs) }) {
+        let exact = mediaLibrary.firstIndex { $0.id == item.id } ??
+            mediaLibrary.firstIndex { Set($0.localURLs) == Set(item.localURLs) }
+        let copies = mediaLibrary.indices.filter { sameMediaSave(item, mediaLibrary[$0]) }
+        if let index = exact ?? (copies.count == 1 ? copies[0] : nil) {
             // Replaying older history must not roll back a newer save or
             // replace a complete file collection with a pruned history entry.
             let old = mediaLibrary[index]
             if (item.finishedAt ?? item.createdAt) <= (old.finishedAt ?? old.createdAt) { return }
             var saved = item; saved.id = mediaLibrary[index].id
+            saved.libraryRemovedAt = old.libraryRemovedAt
             mediaLibrary[index] = saved
         } else {
             guard mediaLibrary.count < LibraryStore.countLimit else { mediaLibraryNotice = "媒体库已满，下载文件仍已保存。"; return }
@@ -1406,12 +1536,6 @@ struct SettingsView: View {
                 settingLabel(L("菜单栏"))
                 Toggle(L("显示 Folioak 图标"), isOn: $model.showsMenuBarIcon).toggleStyle(.checkbox)
                     .font(.system(size: 12)).help(L("关闭主窗口后继续在菜单栏运行。"))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(height: 28)
-            HStack(spacing: 16) {
-                settingLabel(L("清除记录"))
-                Toggle(L("同时将对应文件移到废纸篓"), isOn: $model.trashFilesWhenClearingRecord).toggleStyle(.checkbox)
-                    .font(.system(size: 12)).help(L("默认保留文件。开启后，清除单条下载记录时将文件移到废纸篓；清空所有记录仍保留文件。"))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
             HStack(spacing: 16) {

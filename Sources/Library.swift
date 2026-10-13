@@ -128,6 +128,7 @@ extension DownloadModel {
             updated.id = old.id; updated.addedAt = old.addedAt; updated.tags = old.tags; updated.favorite = old.favorite; updated.read = old.read
             updated.title = old.title
             updated.latest = old.latest; updated.checkedAt = old.checkedAt
+            updated.removed = old.removed
             papers[index] = updated
         } else {
             guard papers.count < LibraryStore.countLimit else { libraryNotice = "文档库已满，下载文件仍已保存。"; return }
@@ -306,13 +307,12 @@ struct LibraryRow: View {
                 if !paper.tags.isEmpty { Text(paper.tags.joined(separator: " · ")).font(.system(size: 11)).lineLimit(1).foregroundStyle(ThemePalette.color(palette.secondary)) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
             HStack(spacing: WorkspaceMetrics.Space.small) {
-                if paper.removed { Button(L("恢复")) { model.changePaper(paper.id) { $0.removed = false } }.buttonStyle(QuietButtonStyle(palette: palette)) }
+                if paper.removed { Button(L("恢复")) { _ = model.setLibraryRemoved([paper.id], in: .documents, removed: false) }
+                    .buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.documents)) }
                 else if paper.missing { Button(L("关联")) { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(RowActionStyle(palette: palette)) }
-                if !paper.removed {
-                    Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
+                Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("\(paper.title)的更多操作"))
-                }
             }.padding(.top, 1)
         }.padding(.horizontal, 10).padding(.vertical, WorkspaceMetrics.Space.regular)
             .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
@@ -345,7 +345,14 @@ struct LibraryRow: View {
             Button(L("重新关联 PDF…")) { model.relinkPaper(paper.id) }
             Button(L("详情…")) { select(); model.showPaperDetails(paper) }
             Divider()
-            Button(L("移出文档库")) { model.changePaper(paper.id) { $0.removed = true } }.help(L("保留 PDF，可从已移除的文档中恢复"))
-        } else { Button(L("恢复到文档库")) { model.changePaper(paper.id) { $0.removed = false } } }
+            Button(L("移出文档库")) { _ = model.setLibraryRemoved([paper.id], in: .documents, removed: true) }
+                .help(L("保留 PDF，可从已移除的文档中恢复")).disabled(!model.canManageLibrary(.documents))
+        } else {
+            Button(L("恢复到文档库")) { _ = model.setLibraryRemoved([paper.id], in: .documents, removed: false) }
+                .disabled(!model.canManageLibrary(.documents))
+        }
+        Divider()
+        Button(L("将文件移到废纸篓…"), role: .destructive) { model.requestFileTrash([paper.id], in: .documents) }
+            .disabled(!model.canTrashFiles([paper.id], in: .documents))
     }
 }
