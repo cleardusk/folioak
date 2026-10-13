@@ -1,35 +1,5 @@
 import SwiftUI
 
-struct SidebarToggleGlyph: View {
-    let expanded: Bool
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 3).stroke(lineWidth: 1.5)
-            SidebarToggleDetail(progress: expanded ? 1 : 0)
-                .stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-        }.frame(width: 22, height: 18).accessibilityHidden(true)
-    }
-}
-
-// The pane narrows while the chevron folds toward the next available action.
-struct SidebarToggleDetail: Shape {
-    var progress: Double
-    var animatableData: Double { get { progress } set { progress = newValue } }
-    func path(in rect: CGRect) -> Path {
-        let p = min(1, max(0, progress))
-        let divider = rect.minX + 2 + 5 * p
-        let center = rect.minX + 11 + 3 * p
-        let direction = 1 - 2 * p
-        return Path { path in
-            path.move(to: CGPoint(x: divider, y: rect.minY + 1))
-            path.addLine(to: CGPoint(x: divider, y: rect.maxY - 1))
-            path.move(to: CGPoint(x: center - 2 * direction, y: rect.midY - 3))
-            path.addLine(to: CGPoint(x: center + 2 * direction, y: rect.midY))
-            path.addLine(to: CGPoint(x: center - 2 * direction, y: rect.midY + 3))
-        }
-    }
-}
-
 // FlClash's two-edge indicator timing, expressed independently for SwiftUI.
 // Using the current geometry as the origin keeps quick reversals continuous.
 struct SelectionIndicatorMotion {

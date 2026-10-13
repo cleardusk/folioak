@@ -225,7 +225,7 @@ struct DownloaderView: View {
             HStack(spacing: 0) {
                 Button {
                     withAnimation(reduceMotion ? nil : .timingCurve(0.2, 0, 0, 1, duration: 0.25)) { collapsed.toggle() }
-                } label: { SidebarToggleGlyph(expanded: !collapsed).frame(width: 50, height: 42).contentShape(Rectangle()) }
+                } label: { Image(systemName: "sidebar.left").font(.system(size: 18)).frame(width: 50, height: 42).contentShape(Rectangle()) }
                     .buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary)
                     .help(collapsed ? L("展开侧栏") : L("收起侧栏")).accessibilityLabel(collapsed ? L("展开侧栏") : L("收起侧栏"))
                 Text("Folioak").font(.system(size: 14, weight: .semibold))
@@ -291,7 +291,10 @@ struct DownloaderView: View {
             Text(L(page.rawValue)).font(WorkspaceMetrics.TypeScale.page)
             Spacer()
             if page == .library {
-                if !model.papers.isEmpty { searchField }
+                if !model.papers.isEmpty {
+                    Text(L("\(libraryPapers.count) 篇")).font(.callout).monospacedDigit().foregroundStyle(secondary)
+                    searchField
+                }
                 Menu {
                     Button(L("导入 PDF…"), action: importPDFs)
                         .disabled(model.importingPDFs || !model.libraryWritable)
@@ -493,7 +496,6 @@ struct DownloaderView: View {
                             .buttonStyle(.plain).foregroundStyle(secondary).help(L("返回文档库"))
                     }
                     else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { L($0.rawValue) }, palette: palette) }
-                    Text(L("\(libraryPapers.count) 篇")).font(.callout).monospacedDigit().foregroundStyle(secondary)
                     Spacer()
                     if let tag = libraryTag {
                         Button { libraryTag = nil } label: {
