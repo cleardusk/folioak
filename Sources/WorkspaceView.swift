@@ -721,7 +721,7 @@ struct DownloadRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Group {
-                if inMediaLibrary || item.savedURL?.pathExtension.lowercased() == "pdf" {
+                if inMediaLibrary || item.savedURL != nil {
                     FileThumbnail(url: item.savedURL, fallbackSymbol: item.symbol, palette: palette)
                 } else {
                     Image(systemName: item.symbol)

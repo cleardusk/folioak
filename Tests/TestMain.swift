@@ -127,6 +127,7 @@ struct CoreTests {
                 try await listFocusTests()
                 try await selectionFocusTests()
                 try await blankCanvasFocusTests()
+                try await thumbnailTests()
                 if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
                 return
             }
@@ -137,6 +138,7 @@ struct CoreTests {
             try createPDF(at: pdf)
             try await mediaTests(root: root)
             try await fileInformationTests(root: root, pdf: pdf)
+            try await thumbnailTests()
             if CommandLine.arguments.contains("--media-only") { return }
             try parseTests()
             try await huggingFaceTests(root: root, pdf: pdf)
