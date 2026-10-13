@@ -833,6 +833,10 @@ final class DownloadModel: ObservableObject {
     private func receive(_ event: DownloadEvent, for id: UUID, run: UUID) {
         guard run == runID else { return }
         guard let before = items.first(where: { $0.id == id }), !before.state.terminal else { return }
+        if case .diagnostic(let message) = event {
+            record(.info, message, item: before); schedulePersistence()
+            return
+        }
         if case .browserAuthentication(let selection, let state) = event {
             browserAuthentication.receive(state, for: selection, host: before.source?.webURL.host)
             if state != .ready {
@@ -866,7 +870,7 @@ final class DownloadModel: ObservableObject {
             case .metadata: item.state = .metadata
             case .resolved(let metadata): item.metadata = metadata; item.state = .downloading
             case .document(let title): item.documentTitle = title
-            case .browserAuthentication, .anonymousFallback: break
+            case .browserAuthentication, .anonymousFallback, .diagnostic: break
             case .checkingLocal: item.state = .checkingLocal
             case .progress(let progress):
                 let now = Date()
@@ -1524,11 +1528,56 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
 @MainActor
 enum AboutInformation {
     static let repository = URL(string: "https://github.com/cleardusk/folioak")!
+    struct Component {
+        let name: String
+        let version: String
+        let license: String
+        let url: URL
+    }
+    static func components(in tools: MediaTools) -> [Component] {
+        // Read the prepared bundle, so updating a pinned component cannot leave
+        // an independently hardcoded version behind in the About panel.
+        let data = try? Data(contentsOf: tools.directory.appendingPathComponent("versions.json"))
+        let manifest = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let versions = manifest?["versions"] as? [String: Any] ?? [:]
+        let definitions = [("yt-dlp", "yt-dlp", "Unlicense / GPLv3+", "https://github.com/yt-dlp/yt-dlp/releases/tag/"),
+                           ("ffmpeg", "FFmpeg / ffprobe", "LGPL", "https://github.com/FFmpeg/FFmpeg/tree/n"),
+                           ("quickjs", "QuickJS-NG", "MIT", "https://github.com/quickjs-ng/quickjs/releases/tag/v")]
+        var components = definitions.compactMap { key, name, license, base -> Component? in
+            guard let version = versions[key] as? String, let url = URL(string: base + version) else { return nil }
+            return Component(name: name, version: version, license: license, url: url)
+        }
+        let python = tools.directory.appendingPathComponent("_internal/Python.framework/Resources/Info.plist")
+        if let data = try? Data(contentsOf: python),
+           let values = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+           let version = values["CFBundleShortVersionString"] as? String,
+           let url = URL(string: "https://www.python.org/downloads/release/python-" + version.replacingOccurrences(of: ".", with: "") + "/") {
+            components.append(Component(name: "CPython", version: version, license: "PSF", url: url))
+        }
+        return components
+    }
     static var credits: NSAttributedString {
         let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center
         let text = NSMutableAttributedString(string: L("作者") + ": Jianzhu Guo & Codex (GPT)\n\n",
                                              attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph])
         text.append(NSAttributedString(string: repository.absoluteString, attributes: [.link: repository, .font: NSFont.systemFont(ofSize: 12), .paragraphStyle: paragraph]))
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
+        func append(_ string: String, link: URL? = nil) {
+            var style = attributes
+            if let link { style[.link] = link }
+            text.append(NSAttributedString(string: string, attributes: style))
+        }
+        append("\n\n" + L("开源组件") + "\n")
+        if let tools = try? MediaTools.installed() {
+            for component in components(in: tools) {
+                append(component.name + " " + component.version, link: component.url)
+                append(" · " + component.license + "\n")
+            }
+            append(L("许可证与第三方声明"), link: tools.directory.appendingPathComponent("licenses", isDirectory: true))
+        } else { append(L("组件版本信息不可用")) }
+        append("\n\n" + L("实现参考") + "\n")
+        append("parse-video-py · " + String(DouyinResolver.referenceRevision.prefix(7)), link: DouyinResolver.referenceURL)
+        append(" · MIT\n" + L("抖音匿名接口参考；未内置该工具。"))
         return text
     }
 }

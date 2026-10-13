@@ -201,6 +201,7 @@ enum DownloadEvent: Sendable {
     case document(String)
     case browserAuthentication(BrowserAuthenticationSelection, BrowserAuthenticationReadState)
     case anonymousFallback(BrowserAuthenticationIssue, AnonymousFallbackState)
+    case diagnostic(DiagnosticMessage)
     case checkingLocal
     case progress(DownloadProgress)
     case retry(Int)
@@ -797,6 +798,11 @@ actor DownloadEngine {
         case .media(let url):
             guard MediaDownloader.accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
             try DownloadFolder.prepareRoot(directory)
+            if MediaSite.site(for: url.host) == .douyin {
+                // This backend is anonymous even when another site's browser
+                // authentication is enabled or its saved selection is invalid.
+                return try await mediaDownload(url, directory, mediaFormat, organizeByType, nil, event)
+            }
             return try await MediaDownloader.withAuthenticationFallback(authentication: mediaAuthentication, event: event) { authentication in
                 try await self.mediaDownload(url, directory, mediaFormat, organizeByType, authentication, event)
             }

@@ -65,6 +65,7 @@ struct DiagnosticMessage: Codable, Equatable, Sendable {
         case browserAuthFallbackSucceeded = "browser_auth.fallback.succeeded"
         case browserAuthFallbackFailed = "browser_auth.fallback.failed"
         case browserAuthFallbackCancelled = "browser_auth.fallback.cancelled"
+        case douyinAnonymous = "media.douyin.anonymous"
 
         var template: String {
             switch self {
@@ -125,6 +126,7 @@ struct DiagnosticMessage: Codable, Equatable, Sendable {
             case .browserAuthFallbackSucceeded: return "匿名重试成功，文件已验证并保存。"
             case .browserAuthFallbackFailed: return "匿名重试也未完成，请查看最终错误。"
             case .browserAuthFallbackCancelled: return "匿名重试已取消。"
+            case .douyinAnonymous: return "使用抖音匿名解析，不读取浏览器 Cookie。"
             }
         }
     }

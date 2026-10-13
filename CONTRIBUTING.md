@@ -19,7 +19,7 @@ The first build or test run needs internet access to fetch pinned media dependen
 
 | Area | Files | Responsibility |
 | --- | --- | --- |
-| Download engine | `Core.swift`, `DownloadError.swift`, `Messages.swift`, `BrowserAuthentication.swift`, `PDF.swift`, `Media.swift`, `Shared.swift` | Parse links, schedule requests, validate files, run media tools and coordinate concurrent processes |
+| Download engine | `Core.swift`, `DownloadError.swift`, `Messages.swift`, `BrowserAuthentication.swift`, `PDF.swift`, `Media.swift`, `Douyin.swift`, `Shared.swift` | Parse links, schedule requests, validate files, run media tools and coordinate concurrent processes |
 | Application state | `App.swift`, `Workspace.swift`, `WorkspacePersistence.swift`, `Library.swift` | Queue lifecycle, preferences, saved history and libraries; a dedicated component serializes disk access |
 | Interface | `WorkspaceView.swift`, `Interaction.swift`, `SidebarMotion.swift`, `Theme.swift`, `Shortcuts.swift` | Views, native controls, keyboard interaction and appearance |
 | Command line | `CLI.swift` | Arguments, progress, structured output and exit codes |

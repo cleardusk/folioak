@@ -453,14 +453,14 @@ private actor AnonymousFallbackProbe {
 extension CoreTests {
     @MainActor static func anonymousFallbackTests(root: URL, image: URL) async throws {
         let selection = try BrowserAuthenticationSelection(browser: .chrome, profile: "Private Fixture Profile")
-        let url = URL(string: "https://v.douyin.com/YiTAtQNlyeE/")!
+        let url = URL(string: "https://youtu.be/anonymous-fallback-fixture")!
         let anonymousKey = MediaDownloader.stagingKey(url, directory: root, format: .automatic, authentication: nil)
         try expect(anonymousKey == PDFStorage.key(url.absoluteString + "|" + MediaFormat.automatic.rawValue + "|" + root.standardizedFileURL.path) &&
                    anonymousKey != MediaDownloader.stagingKey(url, directory: root, format: .automatic, authentication: selection),
                    "anonymous fallback retains the old resume key and cannot use authenticated partials")
         let fresh = MediaDownloader.failure("ERROR: Fresh cookies (not necessarily logged in) are needed", url: url)
         try expect(fresh.message.id == DiagnosticMessage.ID.browserAuthFreshCookiesRequired.rawValue &&
-                   BrowserAuthenticationIssue.matches(fresh.message), "Douyin's fresh-cookie request is not falsely reported as confirmed login failure")
+                   BrowserAuthenticationIssue.matches(fresh.message), "a fresh-cookie request is not falsely reported as confirmed login failure")
         for issue in [BrowserAuthenticationIssue.readFailed, .sessionRejected, .freshCookiesRequired] {
             var attempts: [Bool] = []
             let events = BrowserAuthenticationEvents()

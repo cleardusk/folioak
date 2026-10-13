@@ -103,6 +103,7 @@ struct CoreTests {
                 if CommandLine.arguments.contains("--snapshots") { try renderUpdateSnapshots() }
                 return
             }
+            if CommandLine.arguments.contains("--about-only") { try await aboutAndMenuBarTests(); return }
             try messageTests()
             try await localizationTests()
             if CommandLine.arguments.contains("--preview-230") { try renderMediaSnapshots(); return }

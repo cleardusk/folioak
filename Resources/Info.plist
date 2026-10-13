@@ -2,35 +2,35 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>Folioak</string>
 	<key>CFBundleDisplayName</key>
 	<string>Folioak</string>
-	<key>CFBundleIdentifier</key>
-	<string>local.paperrepo.arxiv-downloader</string>
 	<key>CFBundleExecutable</key>
 	<string>FolioakApp</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.paperrepo.arxiv-downloader</string>
+	<key>CFBundleName</key>
+	<string>Folioak</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.6.1</string>
+	<string>2.6.2</string>
 	<key>CFBundleVersion</key>
-	<string>44</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>45</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 Jianzhu Guo</string>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>将你选择的文件保存到指定目录。</string>
-	<key>NSDownloadsFolderUsageDescription</key>
 	<string>将你选择的文件保存到指定目录。</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>将你选择的文件保存到指定目录。</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>将你选择的文件保存到指定目录。</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Jianzhu Guo</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>

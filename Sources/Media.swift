@@ -533,7 +533,8 @@ enum MediaDownloader {
     }
 
     static func arguments(url: URL, format: MediaFormat, tools: MediaTools, folder: URL,
-                          authentication: BrowserAuthenticationSelection? = nil) throws -> [String] {
+                          authentication: BrowserAuthenticationSelection? = nil, informationFile: URL? = nil) throws -> [String] {
+        let authentication = MediaSite.site(for: url.host) == .douyin ? nil : authentication
         var args = ["--ignore-config", "--no-plugin-dirs", "--no-remote-components", "--no-update", "--no-cache-dir",
                     "--no-playlist", "--max-downloads", "20", "--no-overwrites", "--continue", "--newline", "--no-colors",
                     "--socket-timeout", "30", "--retries", "3", "--fragment-retries", "3", "--abort-on-unavailable-fragments", "--max-filesize", "16G",
@@ -555,6 +556,9 @@ enum MediaDownloader {
         } else { args += ["--no-cookies-from-browser"] }
         if format == .audio { args += ["--extract-audio", "--audio-format", "m4a"] }
         else { args += ["--format", "bv*+ba/b", "--merge-output-format", "mp4/mkv"] }
+        // Supplying the original URL as well would run the broken extractor a
+        // second time after successfully downloading the resolved information.
+        if let informationFile { return args + ["--load-info-json", informationFile.path] }
         return args + ["--", url.absoluteString]
     }
 
@@ -562,6 +566,7 @@ enum MediaDownloader {
                          authentication: BrowserAuthenticationSelection? = nil,
                          event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
+        let authentication = MediaSite.site(for: url.host) == .douyin ? nil : authentication
         let tools = try MediaTools.installed()
         for name in ["yt-dlp", "ffmpeg", "ffprobe", "qjs"] { _ = try tools.executable(name) }
         let key = stagingKey(url, directory: directory, format: format, authentication: authentication)
@@ -598,8 +603,11 @@ enum MediaDownloader {
 
     static func runDownloader(_ url: URL, format: MediaFormat, tools: MediaTools, folder: URL,
                               authentication: BrowserAuthenticationSelection? = nil,
+                              douyinResolver: DouyinResolver? = nil,
                               event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> MediaOutput {
         guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
+        let isDouyin = MediaSite.site(for: url.host) == .douyin
+        let authentication = isDouyin ? nil : authentication
         let output = MediaOutput(authentication: authentication)
         output.reportAuthentication(.reading, event: event)
         defer {
@@ -625,13 +633,25 @@ enum MediaDownloader {
             }
         }
         let process = MediaProcess()
+        let resolutionTemporary = isDouyin ? folder.appendingPathComponent(".douyin-" + UUID().uuidString, isDirectory: true) : nil
         defer {
             if let authenticationTemporary, process.canRemoveTemporaryDirectory {
                 try? FileManager.default.removeItem(at: authenticationTemporary)
             }
+            if let resolutionTemporary, process.canRemoveTemporaryDirectory { try? FileManager.default.removeItem(at: resolutionTemporary) }
+        }
+        var informationFile: URL?
+        if let resolutionTemporary {
+            event(.diagnostic(DiagnosticMessage(.douyinAnonymous)))
+            let information = try await (douyinResolver ?? DouyinResolver()).resolve(url)
+            try Task.checkCancellation()
+            try FileManager.default.createDirectory(at: resolutionTemporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let file = resolutionTemporary.appendingPathComponent("video.json")
+            try JSONEncoder().encode(information).write(to: file, options: .atomic)
+            informationFile = file
         }
         let status = try await process.run(try tools.executable("yt-dlp"),
-                                                 arguments: arguments(url: url, format: format, tools: tools, folder: folder, authentication: authentication),
+                                                 arguments: arguments(url: url, format: format, tools: tools, folder: folder, authentication: authentication, informationFile: informationFile),
                                                  temporaryDirectory: authenticationTemporary) {
             output.receive($0, event: event)
         }
@@ -661,6 +681,10 @@ enum MediaDownloader {
             return .metadata("此内容当前不可访问，可能已被删除或设为非公开。")
         }
         if lower.contains("space left") { return .metadata("磁盘空间不足，请释放空间后重试。") }
+        if MediaSite.site(for: url?.host) == .douyin,
+           ["sign in", "login", "cookies", "403", "authentication"].contains(where: lower.contains) {
+            return .metadata("抖音暂未提供可用的匿名播放地址，请稍后重试或确认原链接可公开播放。")
+        }
         if authentication != nil, let issue = BrowserAuthenticationIssue.readFailure(in: raw) {
             return .browserAuthentication(issue)
         }

@@ -12,6 +12,7 @@ private final class ProcessProbe: @unchecked Sendable {
 
 extension CoreTests {
     @MainActor static func mediaTests(root: URL) async throws {
+        try await douyinTests(root: root)
         try browserAuthenticationTests(root: root)
         try await browserAuthenticationProcessTests(root: root)
         try mediaRetryPolicyTests(root: root)

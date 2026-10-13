@@ -232,6 +232,9 @@ final class CLIConsole: @unchecked Sendable {
         case .document: message = "保存完成"
         case .browserAuthentication: return
         case .anonymousFallback(_, let state): message = state.message.fallback
+        case .diagnostic(let diagnostic):
+            if verbose { write(diagnostic.fallback + "\n") }
+            return
         case .checkingLocal: message = "检查本地文件"
         case .validating: message = "保存中"
         case .waiting(let date): message = "等待至 \(Self.time(date))"

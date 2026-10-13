@@ -865,6 +865,60 @@ extension CoreTests {
         let credits = AboutInformation.credits
         let link = (credits.string as NSString).range(of: AboutInformation.repository.absoluteString)
         try expect(credits.string.contains("Jianzhu Guo & Codex (GPT)") && link.location != NSNotFound && credits.attribute(.link, at: link.location, effectiveRange: nil) as? URL == URL(string: "https://github.com/cleardusk/folioak"), "About credits expose the licensed author and clickable original repository")
+        let components = AboutInformation.components(in: try MediaTools.installed())
+        try expect(components.count == 4, "About reads all bundled tool and Python versions")
+        for component in components {
+            let range = (credits.string as NSString).range(of: component.name + " " + component.version)
+            try expect(!component.version.isEmpty && range.location != NSNotFound &&
+                       credits.attribute(.link, at: range.location, effectiveRange: nil) as? URL == component.url,
+                       "About displays each actual bundled version with its upstream link")
+        }
+        let reference = (credits.string as NSString).range(of: "parse-video-py · " + String(DouyinResolver.referenceRevision.prefix(7)))
+        try expect(reference.location != NSNotFound && credits.attribute(.link, at: reference.location, effectiveRange: nil) as? URL == DouyinResolver.referenceURL,
+                   "implementation reference links the exact revision rather than claiming it is a bundled tool")
+        if CommandLine.arguments.contains("--snapshots") {
+            let originalAppearance = NSApp.appearance
+            defer { NSApp.appearance = originalAppearance; AppLocalization.shared.language = .chinese }
+            for (language, suffix) in [(AppLanguage.chinese, "zh"), (.english, "en")] {
+                AppLocalization.shared.language = language
+                for (appearance, theme) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                    NSApp.appearance = NSAppearance(named: appearance)
+                    var options: [NSApplication.AboutPanelOptionKey: Any] = [.applicationName: "Folioak", .applicationVersion: "QA", .credits: AboutInformation.credits]
+                    if let icon = NSImage(contentsOfFile: "Resources/AppIcon.icns") { options[.applicationIcon] = icon }
+                    NSApp.orderFrontStandardAboutPanel(options: options)
+                    // A locked/inactive desktop need not assign a key window.
+                    // Locate the actual credits view instead of depending on focus.
+                    let expectedCredits = AboutInformation.credits.string
+                    func creditsView(_ view: NSView) -> NSTextView? {
+                        if let text = view as? NSTextView, text.string == expectedCredits { return text }
+                        return view.subviews.lazy.compactMap(creditsView).first
+                    }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    guard let panel = NSApp.windows.first(where: { $0.isVisible && $0.contentView.flatMap(creditsView) != nil }),
+                          let content = panel.contentView, let credits = creditsView(content),
+                          let scroll = credits.enclosingScrollView, let layout = credits.layoutManager,
+                          let container = credits.textContainer else { throw TestFailure.failed("native About panel") }
+                    content.layoutSubtreeIfNeeded()
+                    guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { throw TestFailure.failed("About snapshot") }
+                    content.cacheDisplay(in: content.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/about-credits-\(suffix)-\(theme).png"))
+                    try expect(credits.isSelectable && !credits.isEditable, "native credits support links without allowing edits")
+                    for style in [NSScroller.Style.overlay, .legacy] {
+                        scroll.scrollerStyle = style; scroll.tile(); layout.ensureLayout(for: container)
+                        credits.scrollRangeToVisible(NSRange(location: (credits.string as NSString).length - 1, length: 1))
+                        content.layoutSubtreeIfNeeded()
+                        let reference = (credits.string as NSString).range(of: "parse-video-py · " + String(DouyinResolver.referenceRevision.prefix(7)))
+                        let glyphs = layout.glyphRange(forCharacterRange: reference, actualCharacterRange: nil)
+                        let bounds = layout.boundingRect(forGlyphRange: glyphs, in: container)
+                            .offsetBy(dx: credits.textContainerOrigin.x, dy: credits.textContainerOrigin.y)
+                        try expect(credits.visibleRect.contains(bounds), "the complete reference link is reachable at the bottom in both scrollbar modes")
+                    }
+                    content.cacheDisplay(in: content.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/about-credits-\(suffix)-\(theme)-bottom.png"))
+                    panel.orderOut(nil)
+                }
+            }
+        }
         let suite = "folioak-menu-bar-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite); AppLocalization.shared.language = .chinese }
         preferences.set("keep draft", forKey: "unrelatedPreference")
