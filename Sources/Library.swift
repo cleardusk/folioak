@@ -276,15 +276,22 @@ struct LibraryRow: View {
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     var body: some View {
         HStack(alignment: .top, spacing: WorkspaceMetrics.Space.regular) {
-            Image(systemName: paper.favorite ? "star.fill" : "doc.text")
-                .font(.system(size: 21, weight: .light)).foregroundStyle(ThemePalette.color(palette.accent))
-                .frame(width: WorkspaceMetrics.rowIconSize, height: WorkspaceMetrics.rowIconSize)
-                .background(ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
-                .accessibilityLabel(paper.favorite ? L("已收藏") : L("文档"))
+            FileThumbnail(url: paper.missing ? nil : paper.file, fallbackSymbol: "doc.text", palette: palette)
+                .accessibilityHidden(false)
+                .accessibilityLabel(L("文档"))
                 .overlay(alignment: .topTrailing) {
                     if !paper.read {
                         Circle().fill(ThemePalette.color(palette.accent)).frame(width: 5, height: 5)
                             .padding(6).accessibilityLabel(L("未读"))
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if paper.favorite {
+                        Image(systemName: "star.fill").font(.system(size: 9))
+                            .foregroundStyle(ThemePalette.color(palette.accent))
+                            .frame(width: 14, height: 14)
+                            .background(ThemePalette.color(palette.canvas), in: Circle())
+                            .accessibilityLabel(L("已收藏"))
                     }
                 }
             VStack(alignment: .leading, spacing: 6) {

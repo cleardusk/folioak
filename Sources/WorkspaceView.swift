@@ -719,8 +719,8 @@ struct DownloadRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Group {
-                if inMediaLibrary {
-                    MediaThumbnail(url: item.savedURL, fallbackSymbol: item.symbol, palette: palette)
+                if inMediaLibrary || item.savedURL?.pathExtension.lowercased() == "pdf" {
+                    FileThumbnail(url: item.savedURL, fallbackSymbol: item.symbol, palette: palette)
                 } else {
                     Image(systemName: item.symbol)
                         .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)

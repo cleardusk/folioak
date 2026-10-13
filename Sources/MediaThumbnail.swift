@@ -70,7 +70,7 @@ private typealias ThumbnailState<Value> = SwiftUI.State<Value>
     }
 }
 
-struct MediaThumbnail: View {
+struct FileThumbnail: View {
     let url: URL?
     let fallbackSymbol: String
     let palette: ThemePalette
@@ -88,6 +88,7 @@ struct MediaThumbnail: View {
             }
         }
         .frame(width: WorkspaceMetrics.rowIconSize, height: WorkspaceMetrics.rowIconSize)
+        .background(ThemePalette.color(palette.surface))
         .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
         .accessibilityHidden(true)
         .task(id: key) {
