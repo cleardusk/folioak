@@ -117,9 +117,35 @@ import SwiftUI
             }
             return data
         }
-        let fallbackPixels = try fallback(nil)
+        func rgba(_ data: Data) throws -> Data {
+            guard let image = NSBitmapImageRep(data: data)?.cgImage else { throw TestFailure.failed("fallback image decoding") }
+            let side = Int(WorkspaceMetrics.rowIconSize * 2)
+            try expect(image.width == side && image.height == side, "fallback keeps the expected icon size and display scale")
+            var pixels = Data(count: image.width * image.height * 4)
+            let decoded = pixels.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: image.width, height: image.height,
+                    bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+                context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+                return true
+            }
+            try expect(decoded, "fallback image decodes to normalized sRGB RGBA pixels")
+            return pixels
+        }
+        // On SDK 27, repeated nil-URL renders differ at seven SF-symbol edge
+        // pixels by one RGB level. Normalize encoding, compare the full icon,
+        // and allow only that observed 8-bit quantization; alpha stays exact.
+        let fallbackPixels = try rgba(fallback(nil))
+        let inkPixels = stride(from: 0, to: fallbackPixels.count, by: 4).filter {
+            fallbackPixels[$0 + 3] > 128 && fallbackPixels[$0] < 200
+        }.count
+        try expect(inkPixels > 50 && inkPixels < fallbackPixels.count / 8, "fallback contains a visible document glyph rather than an empty or solid image")
         for url in [missing, remote, root] {
-            try expect(try fallback(url) == fallbackPixels, "unusable file URLs render the same FileThumbnail fallback as no file")
+            let rendered = try rgba(fallback(url))
+            let sameIcon = zip(rendered, fallbackPixels).enumerated().allSatisfy { offset, pair in
+                offset % 4 == 3 ? pair.0 == pair.1 : abs(Int(pair.0) - Int(pair.1)) <= 1
+            }
+            try expect(sameIcon, "unusable file URLs preserve the entire fallback glyph and alpha within one RGB quantization level")
         }
         let cache = MediaThumbnailCache()
         var results: [Result] = []
