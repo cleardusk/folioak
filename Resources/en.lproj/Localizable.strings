@@ -595,3 +595,8 @@
 "打开发布页" = "Open Releases Page";
 "多账号时，请确认打开的是所选配置。" = "If you use multiple profiles, confirm that the selected profile is open.";
 "无法创建下载临时目录，请检查磁盘空间和目录权限。" = "Could not create the download temporary folder. Check disk space and folder permissions.";
+
+"版本 %@（%@）" = "Version %@ (%@)";
+"项目主页" = "Project Homepage";
+
+"下载的媒体会显示在这里。" = "Downloaded media will appear here.";

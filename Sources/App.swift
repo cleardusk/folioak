@@ -1370,7 +1370,7 @@ struct SettingsView: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
     }
     private var general: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 16) {
                 settingLabel(L("保存位置"))
                 HStack(spacing: 12) {
@@ -1382,7 +1382,6 @@ struct SettingsView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
                 .help(L("自动归入 Papers、Videos、Audio、Images；首次下载时创建。"))
-            Divider()
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 16) {
                     settingLabel(L("论文命名"))
@@ -1419,6 +1418,7 @@ struct SettingsView: View {
                 settingLabel(L("更新"))
                 UpdateSettingsControls(checker: model.updates)
             }.frame(height: 28)
+            Divider()
             HStack(spacing: 16) {
                 settingLabel(L("外观"))
                 SlidingSegments(selection: $model.appearance, options: AppAppearance.allCases, title: { L($0.label) },
@@ -1556,29 +1556,112 @@ enum AboutInformation {
         }
         return components
     }
-    static var credits: NSAttributedString {
-        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center
-        let text = NSMutableAttributedString(string: L("作者") + ": Jianzhu Guo & Codex (GPT)\n\n",
-                                             attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph])
-        text.append(NSAttributedString(string: repository.absoluteString, attributes: [.link: repository, .font: NSFont.systemFont(ofSize: 12), .paragraphStyle: paragraph]))
-        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
-        func append(_ string: String, link: URL? = nil) {
-            var style = attributes
-            if let link { style[.link] = link }
-            text.append(NSAttributedString(string: string, attributes: style))
+}
+
+@MainActor
+final class AboutWindowController: NSWindowController {
+    private var links: [NSButton: URL] = [:]
+    private var languageObservation: AnyCancellable?
+
+    init() {
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
+                             styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        super.init(window: panel)
+        rebuild()
+        panel.center()
+        languageObservation = AppLocalization.shared.$language.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.rebuild() }
         }
-        append("\n\n" + L("开源组件") + "\n")
+    }
+    required init?(coder: NSCoder) { return nil }
+
+    private func label(_ text: String, size: CGFloat = 12, weight: NSFont.Weight = .regular,
+                       secondary: Bool = false) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: size, weight: weight)
+        field.textColor = secondary ? .secondaryLabelColor : .labelColor
+        field.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return field
+    }
+    private func link(_ title: String, url: URL, identifier: String) -> NSButton {
+        let button = NSButton(title: title, target: self, action: #selector(openLink(_:)))
+        button.isBordered = false
+        button.font = .systemFont(ofSize: 12)
+        button.contentTintColor = .linkColor
+        button.alignment = .left
+        button.image = url.isFileURL ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil) : nil
+        button.imagePosition = .imageTrailing
+        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+        button.toolTip = url.isFileURL ? url.path : url.absoluteString
+        button.identifier = NSUserInterfaceItemIdentifier(identifier)
+        button.setAccessibilityLabel(title)
+        links[button] = url
+        return button
+    }
+    private func vertical(_ views: [NSView], spacing: CGFloat = 8) -> NSStackView {
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = spacing
+        return stack
+    }
+    private func rebuild() {
+        guard let window else { return }
+        links.removeAll()
+        window.title = L("关于 Folioak")
+        let icon = NSImageView()
+        icon.image = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap { NSImage(contentsOf: $0) }
+            ?? NSImage(contentsOfFile: "Resources/AppIcon.icns")
+        icon.setAccessibilityLabel("Folioak")
+        icon.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 64).isActive = true
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "QA"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        let identity = vertical([label("Folioak", size: 24, weight: .semibold),
+                                 label(String(format: L("版本 %@（%@）"), version, build), secondary: true),
+                                 label("Jianzhu Guo & Codex (GPT)", secondary: true)], spacing: 4)
+        let header = NSStackView(views: [icon, identity]); header.spacing = 16; header.alignment = .centerY
+
+        var componentViews: [NSView] = [label(L("开源组件"), size: 13, weight: .semibold)]
         if let tools = try? MediaTools.installed() {
-            for component in components(in: tools) {
-                append(component.name + " " + component.version, link: component.url)
-                append(" · " + component.license + "\n")
+            let rows = AboutInformation.components(in: tools).map { component -> [NSView] in
+                let version = label(component.version)
+                version.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+                return [link(component.name, url: component.url, identifier: "about.component." + component.name),
+                        version, label(component.license, size: 11, secondary: true)]
             }
-            append(L("许可证与第三方声明"), link: tools.directory.appendingPathComponent("licenses", isDirectory: true))
-        } else { append(L("组件版本信息不可用")) }
-        append("\n\n" + L("实现参考") + "\n")
-        append("parse-video-py · " + String(DouyinResolver.referenceRevision.prefix(7)), link: DouyinResolver.referenceURL)
-        append(" · MIT\n" + L("抖音匿名接口参考；未内置该工具。"))
-        return text
+            if !rows.isEmpty {
+                let grid = NSGridView(views: rows)
+                grid.columnSpacing = 18; grid.rowSpacing = 10
+                grid.xPlacement = .leading; grid.rowAlignment = .firstBaseline
+                componentViews.append(grid)
+            } else { componentViews.append(label(L("组件版本信息不可用"), secondary: true)) }
+            componentViews.append(link(L("许可证与第三方声明"), url: tools.directory.appendingPathComponent("licenses", isDirectory: true), identifier: "about.licenses"))
+        } else { componentViews.append(label(L("组件版本信息不可用"), secondary: true)) }
+        let components = vertical(componentViews, spacing: 12)
+        let divider = NSBox(); divider.boxType = .separator
+        let footer = NSStackView(views: [label("© 2026 Jianzhu Guo", size: 11, secondary: true), NSView(),
+                                       link(L("项目主页"), url: AboutInformation.repository, identifier: "about.repository")])
+        let stack = vertical([header, components, divider, footer], spacing: 22)
+        let content = NSView()
+        window.contentView = content
+        content.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.widthAnchor.constraint(equalToConstant: 412),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
+            divider.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            footer.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        window.setContentSize(NSSize(width: 460, height: stack.fittingSize.height + 48))
+        content.layoutSubtreeIfNeeded()
+    }
+    @objc private func openLink(_ sender: NSButton) {
+        if let url = links[sender] { NSWorkspace.shared.open(url) }
     }
 }
 
@@ -1637,6 +1720,7 @@ final class MenuBarController: NSObject {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var window: NSWindow!
     private var settingsWindow: NSWindow?
+    private var aboutController: AboutWindowController?
     private var windowChrome: WindowChrome?
     private var settingsChrome: WindowChrome?
     private let model: DownloadModel
@@ -1803,16 +1887,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc private func showAbout() {
-        var options: [NSApplication.AboutPanelOptionKey: Any] = [.credits: AboutInformation.credits]
-        // Use the original multi-resolution artwork instead of the system's
-        // processed application icon, which softens the mark on newer macOS.
-        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let icon = NSImage(contentsOf: url) {
-            options[.applicationIcon] = icon
-        }
-        NSApp.orderFrontStandardAboutPanel(options: options)
-        NSApp.keyWindow?.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        NSApp.keyWindow?.standardWindowButton(.zoomButton)?.isHidden = true
+        if aboutController == nil { aboutController = AboutWindowController() }
+        aboutController?.showWindow(nil)
     }
 
     @objc private func showSettings() {

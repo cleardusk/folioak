@@ -14,7 +14,14 @@ enum WorkspaceMetrics {
     enum Radius {
         static let control: CGFloat = 8
         static let sidebar: CGFloat = 12
-        static let panel: CGFloat = 20
+        static let panel: CGFloat = 16
+    }
+    enum TypeScale {
+        static let page = Font.system(size: 20, weight: .semibold)
+        static let title = Font.system(size: 13, weight: .medium)
+        static let rowTitle = Font.system(size: 13)
+        static let body = Font.system(size: 13)
+        static let supporting = Font.system(size: 11)
     }
     static let headerHeight: CGFloat = 76
     static let controlHeight: CGFloat = 32
@@ -110,9 +117,9 @@ struct PrimaryActionStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 18, weight: .semibold))
-            .foregroundStyle(ThemePalette.color(palette.onAction).opacity(enabled ? 1 : 0.5))
+            .foregroundStyle(ThemePalette.color(enabled ? palette.onAction : palette.secondary).opacity(enabled ? 1 : 0.65))
             .frame(width: 40, height: 40)
-            .background(ThemePalette.color(palette.action), in: Circle())
+            .background(ThemePalette.color(enabled ? palette.action : palette.border), in: Circle())
             .contentShape(Circle())
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.95 : 1)
     }

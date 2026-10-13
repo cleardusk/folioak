@@ -279,6 +279,7 @@ struct LibraryRow: View {
             Image(systemName: paper.favorite ? "star.fill" : "doc.text")
                 .font(.system(size: 21, weight: .light)).foregroundStyle(ThemePalette.color(palette.accent))
                 .frame(width: WorkspaceMetrics.rowIconSize, height: WorkspaceMetrics.rowIconSize)
+                .background(ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
                 .accessibilityLabel(paper.favorite ? L("已收藏") : L("文档"))
                 .overlay(alignment: .topTrailing) {
                     if !paper.read {
@@ -286,8 +287,8 @@ struct LibraryRow: View {
                             .padding(6).accessibilityLabel(L("未读"))
                     }
                 }
-            VStack(alignment: .leading, spacing: WorkspaceMetrics.Space.compact) {
-                Text(paper.title).font(.body.weight(.medium)).lineLimit(2).lineSpacing(3).help(paper.title)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(paper.title).font(WorkspaceMetrics.TypeScale.rowTitle).lineLimit(2).lineSpacing(3).help(paper.title)
                 HStack(spacing: 10) {
                     if let ref = paper.reference { Text(ref.identifier).font(.system(size: 11, design: .monospaced)) }
                     else { Text(paper.directURL?.host ?? L("本地 PDF")).lineLimit(1) }
@@ -297,7 +298,7 @@ struct LibraryRow: View {
                 }.font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
                 if !paper.tags.isEmpty { Text(paper.tags.joined(separator: " · ")).font(.system(size: 11)).lineLimit(1).foregroundStyle(ThemePalette.color(palette.secondary)) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
-            HStack(spacing: 6) {
+            HStack(spacing: WorkspaceMetrics.Space.small) {
                 if paper.removed { Button(L("恢复")) { model.changePaper(paper.id) { $0.removed = false } }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else if paper.missing { Button(L("关联")) { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(RowActionStyle(palette: palette)) }

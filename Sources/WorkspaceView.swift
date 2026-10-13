@@ -47,11 +47,12 @@ struct RowActionStyle: ButtonStyle {
     let palette: ThemePalette
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.medium))
+            .font(WorkspaceMetrics.TypeScale.body)
             .foregroundStyle(ThemePalette.color(configuration.isPressed ? palette.accent : palette.secondary))
             .padding(.horizontal, WorkspaceMetrics.Space.compact)
             .frame(height: WorkspaceMetrics.controlHeight)
             .contentShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
+            .modifier(ControlFeedback(palette: palette, pressed: configuration.isPressed))
     }
 }
 
@@ -62,8 +63,23 @@ struct RoundButtonStyle: ButtonStyle {
         configuration.label.font(.system(size: 15, weight: .medium))
             .foregroundStyle(ThemePalette.color(palette.text).opacity(enabled ? 1 : 0.35))
             .frame(width: 32, height: 32)
-            .background(ThemePalette.color(palette.accent).opacity(configuration.isPressed ? 0.14 : 0))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .modifier(ControlFeedback(palette: palette, pressed: configuration.isPressed))
+    }
+}
+
+// Shared, quiet hover/press feedback for text actions and icon controls.
+struct ControlFeedback: ViewModifier {
+    let palette: ThemePalette
+    let pressed: Bool
+    @WorkspaceViewState private var hovered = false
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func body(content: Content) -> some View {
+        content
+            .background(ThemePalette.color(palette.text).opacity(enabled ? (pressed ? 0.09 : hovered ? 0.05 : 0) : 0))
+            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
+            .onHover { hovered = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovered)
     }
 }
 
@@ -91,6 +107,7 @@ struct DownloaderView: View {
     @WorkspaceViewState private var libraryFilter = LibraryFilter.all
     @WorkspaceViewState private var librarySort = LibrarySort.newest
     @WorkspaceViewState private var libraryTag: String?
+    @Environment(\.displayScale) private var displayScale
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
@@ -205,12 +222,16 @@ struct DownloaderView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(spacing: 0) {
                 Button {
                     withAnimation(reduceMotion ? nil : .timingCurve(0.2, 0, 0, 1, duration: 0.25)) { collapsed.toggle() }
                 } label: { SidebarToggleGlyph(expanded: !collapsed).frame(width: 50, height: 42).contentShape(Rectangle()) }
                     .buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary)
                     .help(collapsed ? L("展开侧栏") : L("收起侧栏")).accessibilityLabel(collapsed ? L("展开侧栏") : L("收起侧栏"))
+                Text("Folioak").font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                    .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
+                    .frame(width: collapsed ? 0 : nil, alignment: .leading).clipped()
                 Spacer(minLength: 0)
             }.padding(.top, 34).padding(.bottom, 10)
             VStack(spacing: 6) {
@@ -218,9 +239,9 @@ struct DownloaderView: View {
                     Button { page = destination } label: {
                         HStack(spacing: 13) {
                             SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: destination == page)
-                                .font(.system(size: 19, weight: .regular)).frame(width: 24, height: 24)
+                                .font(.system(size: 17, weight: .regular)).frame(width: 24, height: 24)
                             HStack {
-                                Text(L(destination.rawValue)).font(.system(size: 14)).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                                Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
                                 Spacer(minLength: 0)
                                 if destination == .downloads && model.busy { Circle().fill(accent).frame(width: 5, height: 5) }
                             }.modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
@@ -238,8 +259,8 @@ struct DownloaderView: View {
             Spacer()
             Button { logItem = nil; page = .logs } label: {
                 HStack(spacing: WorkspaceMetrics.Space.regular) {
-                    Image(systemName: WorkspacePage.logs.icon).font(.system(size: 19)).frame(width: 24)
-                    Text(L("日志")).font(.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                    Image(systemName: WorkspacePage.logs.icon).font(.system(size: 17)).frame(width: 24)
+                    Text(L("日志")).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
                         .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     Spacer(minLength: 0)
                 }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
@@ -249,8 +270,8 @@ struct DownloaderView: View {
                 .accessibilityAddTraits(page == .logs ? .isSelected : [])
             Button(action: showSettings) {
                 HStack(spacing: 13) {
-                    Image(systemName: "gearshape").font(.system(size: 19)).frame(width: 24)
-                    Text(L("设置")).font(.system(size: 14)).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                    Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 24)
+                    Text(L("设置")).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
                         .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     Spacer(minLength: 0)
                 }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
@@ -267,12 +288,12 @@ struct DownloaderView: View {
                 Button { page = .downloads } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(RoundButtonStyle(palette: palette)).help(L("返回下载")).accessibilityLabel(L("返回下载"))
             }
-            Text(L(page.rawValue)).font(.title2.weight(.semibold))
+            Text(L(page.rawValue)).font(WorkspaceMetrics.TypeScale.page)
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty { searchField }
                 Menu {
-                    Button(L("导入 PDF…")) { libraryFilter = .all; libraryTag = nil; query = ""; model.importPDFs() }
+                    Button(L("导入 PDF…"), action: importPDFs)
                         .disabled(model.importingPDFs || !model.libraryWritable)
                     Picker(L("排序"), selection: $librarySort) { ForEach(LibrarySort.allCases, id: \.self) { Text(L($0.rawValue)).tag($0) } }.id(localization.language)
                     if !libraryTags.isEmpty {
@@ -338,7 +359,7 @@ struct DownloaderView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: WorkspaceMetrics.Space.compact) {
-                Text(L("添加链接")).font(.body.weight(.medium))
+                Text(L("添加链接")).font(WorkspaceMetrics.TypeScale.title)
                 Spacer()
                 if model.hasMediaInput && model.mediaFormat == .audio {
                     Button { model.mediaFormat = .automatic } label: {
@@ -367,7 +388,7 @@ struct DownloaderView: View {
             if model.busy { dismissEditing() } else { model.focusInput() }
         })
         .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel))
-        .overlay(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).stroke((inputFocused || dropTargeted) && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).stroke((inputFocused || dropTargeted) && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: (inputFocused || dropTargeted) ? 1 : 1 / displayScale))
         .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
     }
 
@@ -455,7 +476,7 @@ struct DownloaderView: View {
                             }
                         }
                     } label: {
-                        Text("\(L(filter.rawValue)) · \(L("\(rows.count) 项"))").font(.body.weight(.medium)).foregroundStyle(secondary)
+                        Text("\(L(filter.rawValue)) · \(L("\(rows.count) 项"))").font(WorkspaceMetrics.TypeScale.body).foregroundStyle(secondary)
                     }
                     .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: L("下载状态")))
                     .menuIndicator(.hidden).fixedSize()
@@ -549,8 +570,19 @@ struct DownloaderView: View {
     private func empty(icon: String, text: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(secondary)
-            Text(text).font(.system(size: 13)).foregroundStyle(secondary)
+            Text(text).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(secondary)
+            if page == .library && model.papers.isEmpty && query.isEmpty {
+                Button(L("导入 PDF…"), action: importPDFs).buttonStyle(QuietButtonStyle(palette: palette))
+                    .disabled(model.importingPDFs || !model.libraryWritable)
+            } else if page == .media && model.mediaLibrary.isEmpty && query.isEmpty {
+                Text(L("下载的媒体会显示在这里。")).font(WorkspaceMetrics.TypeScale.supporting).foregroundStyle(secondary)
+            }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func importPDFs() {
+        libraryFilter = .all; libraryTag = nil; query = ""
+        model.importPDFs()
     }
 
     private var logContent: some View {
@@ -693,10 +725,11 @@ struct DownloadRow: View {
                     Image(systemName: item.symbol)
                         .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)
                         .frame(width: WorkspaceMetrics.rowIconSize, height: WorkspaceMetrics.rowIconSize)
+                        .background(ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
                 }
             }.accessibilityLabel(L10n.text(item.state.message))
             VStack(alignment: .leading, spacing: 6) {
-                Text(item.title).font(.body.weight(.medium)).lineSpacing(3)
+                Text(item.title).font(WorkspaceMetrics.TypeScale.rowTitle).lineSpacing(3)
                     .lineLimit(2).help(item.title)
                 HStack(spacing: 10) {
                     if let metadata = item.metadata { Text(metadata.reference.identifier).font(.system(size: 11, design: .monospaced)) }
