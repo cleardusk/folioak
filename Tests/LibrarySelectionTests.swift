@@ -152,9 +152,13 @@ extension CoreTests {
         func menu(_ title: String, perform: Bool = true) async throws {
             var found = false
             var titles: [String] = []
+            var trackedMenu: NSMenu?
+            var actionFinished = false
+            var trackingEnded = false
             let point = NSPoint(x: view.bounds.width - 40, y: view.isFlipped ? 38 : view.bounds.height - 38)
             let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { notification in
-                guard let menu = notification.object as? NSMenu else { return }
+                guard let menu = notification.object as? NSMenu, trackedMenu == nil else { return }
+                trackedMenu = menu
                 titles = menu.items.map(\.title)
                 let index = menu.items.firstIndex(where: { $0.title == title })
                 found = index.map { menu.items[$0].isEnabled } ?? false
@@ -164,27 +168,52 @@ extension CoreTests {
                 DispatchQueue.main.async {
                     if perform, found, let index { menu.performActionForItem(at: index) }
                     menu.cancelTrackingWithoutAnimation()
+                    actionFinished = true
                 }
             }
-            defer { NotificationCenter.default.removeObserver(observer) }
+            let endObserver = NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: nil) { notification in
+                guard let menu = notification.object as? NSMenu, menu === trackedMenu else { return }
+                trackingEnded = true
+            }
+            defer {
+                NotificationCenter.default.removeObserver(observer)
+                NotificationCenter.default.removeObserver(endObserver)
+            }
             clickFromTop(view.bounds.width - 40, 38)
-            await settle()
-            if !found {
+            // A following search request must not race native tracking teardown
+            // and its responder restoration on slower AppKit/CI environments.
+            for _ in 0..<20 {
+                await settle()
+                if actionFinished && trackingEnded { break }
+            }
+            if !found || !actionFinished || !trackingEnded {
                 try snapshot("menu-failure")
-                print("LIBRARY MENU AFTER", title, "hit", String(describing: view.hitTest(point)),
+                print("LIBRARY MENU AFTER", page.rawValue, language.rawValue, scheme, title,
+                      "actionFinished", actionFinished, "trackingEnded", trackingEnded, "hit", String(describing: view.hitTest(point)),
                       "responder", String(describing: window.firstResponder), "actualKey", NSApp.keyWindow === window)
             }
             try expect(found, "native \(page.rawValue) menu exposes enabled \(title): \(titles)")
+            try expect(actionFinished && trackingEnded, "native library menu finishes tracking before the next UI action")
         }
         func search(_ query: String) async throws {
-            model.searchRequest = UUID(); await settle()
+            model.searchRequest = UUID()
             let placeholder = L(page == .library ? "搜索文档" : "搜索媒体")
-            guard let field = descendants(view).compactMap({ $0 as? NSTextField }).first(where: { $0.placeholderString == placeholder }),
-                  let editor = field.currentEditor() as? NSTextView, window.firstResponder === editor else {
-                throw TestFailure.failed("native library search field owns the editor")
+            var field: NSTextField?
+            // SwiftUI mounts the search field before its task and AppKit focus
+            // transition finish. Re-query after each bounded wait because the
+            // native field can be replaced during those updates, especially on CI.
+            for _ in 0..<20 {
+                await settle()
+                field = descendants(view).compactMap({ $0 as? NSTextField }).first(where: { $0.placeholderString == placeholder })
+                guard let field, field.window === window,
+                      let editor = field.currentEditor() as? NSTextView, window.firstResponder === editor else { continue }
+                editor.selectAll(nil); editor.insertText(query, replacementRange: editor.selectedRange())
+                await settle()
+                try expect(field.stringValue == query, "native library search applies the requested text")
+                return
             }
-            editor.selectAll(nil); editor.insertText(query, replacementRange: editor.selectedRange())
-            await settle()
+            try snapshot("search-failure")
+            throw TestFailure.failed("native library search field owns the editor: page=\(page.rawValue), language=\(language.rawValue), scheme=\(scheme), field=\(String(describing: field)), editor=\(String(describing: field?.currentEditor())), responder=\(String(describing: window.firstResponder)), sheet=\(String(describing: window.attachedSheet))")
         }
         func snapshot(_ suffix: String, panel: NSWindow? = nil) throws {
             guard CommandLine.arguments.contains("--snapshots") else { return }
