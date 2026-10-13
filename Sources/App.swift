@@ -200,6 +200,7 @@ final class DownloadModel: ObservableObject {
     @Published var diagnosticItem: DownloadItem?
     let shortcuts: ShortcutSettings
     let browserAuthentication: BrowserAuthenticationSettings
+    let updates: UpdateChecker
     @Published var settingsTab = "通用"
     private(set) var editTarget = ""
     let engine: DownloadEngine
@@ -225,9 +226,10 @@ final class DownloadModel: ObservableObject {
     private var shortcutChanges: AnyCancellable?
     private var libraryURL: URL? { persistence?.libraryURL }
 
-    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil, recycleFile: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }) {
+    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil, recycleFile: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }, updates: UpdateChecker? = nil) {
         let authenticationSettings = BrowserAuthenticationSettings(preferences)
         browserAuthentication = authenticationSettings
+        self.updates = updates ?? UpdateChecker(preferences: preferences)
         self.engine = engine ?? DownloadEngine(cooldownPreferences: preferences, coordinator: RequestCoordinator(),
             mediaAuthentication: { try await authenticationSettings.activeSelection() })
         self.preferences = preferences
@@ -1387,6 +1389,10 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
             HStack(spacing: 16) {
+                settingLabel(L("更新"))
+                UpdateSettingsControls(checker: model.updates)
+            }.frame(height: 28)
+            HStack(spacing: 16) {
                 settingLabel(L("外观"))
                 SlidingSegments(selection: $model.appearance, options: AppAppearance.allCases, title: { L($0.label) },
                                 segmentWidth: (422 - labelWidth - 20) / 3, accessibilityName: L("外观"), palette: palette)
@@ -1407,6 +1413,21 @@ struct SettingsView: View {
 
     private func settingLabel(_ text: String) -> some View {
         Text(text).font(.system(size: 12, weight: .medium)).frame(width: labelWidth, alignment: .leading)
+    }
+}
+
+private struct UpdateSettingsControls: View {
+    @ObservedObject private var localization = AppLocalization.shared
+    @ObservedObject var checker: UpdateChecker
+    var body: some View {
+        HStack {
+            Toggle(L("自动检查更新"), isOn: $checker.automaticallyChecks).toggleStyle(.checkbox)
+                .font(.system(size: 12)).help(L("运行期间每天检查一次正式版，有新版时提醒。"))
+            Spacer(minLength: 8)
+            Button(checker.isChecking ? L("检查中…") : L("检查…")) {
+                NSApp.sendAction(#selector(AppDelegate.checkForUpdates), to: NSApp.delegate, from: nil)
+            }.controlSize(.small).disabled(checker.isChecking).accessibilityLabel(L("检查更新…"))
+        }
     }
 }
 
@@ -1541,7 +1562,7 @@ final class MenuBarController: NSObject {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var window: NSWindow!
     private var settingsWindow: NSWindow?
     private var windowChrome: WindowChrome?
@@ -1551,6 +1572,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var terminationPending = false
     private var shortcutObservation: AnyCancellable?
     private var languageObservation: AnyCancellable?
+    private var updateObservation: AnyCancellable?
+    private var automaticUpdateObservation: AnyCancellable?
+    private var updateTimer: Timer?
+    private var presentingUpdate = false
 
     init(model: DownloadModel? = nil) {
         self.model = model ?? DownloadModel(stateURL: WorkspaceStore.defaultURL)
@@ -1592,6 +1617,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        updateObservation = model.updates.$notice.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.presentUpdateIfPossible() }
+        }
+        automaticUpdateObservation = model.updates.$automaticallyChecks.dropFirst().sink { [weak self] enabled in
+            if enabled { DispatchQueue.main.async { self?.checkUpdatesAutomatically() } }
+        }
+        updateTimer = Timer.scheduledTimer(timeInterval: 15 * 60, target: self,
+                                          selector: #selector(checkUpdatesAutomatically), userInfo: nil, repeats: true)
+        checkUpdatesAutomatically()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard window != nil else { return }
+        checkUpdatesAutomatically()
+        presentUpdateIfPossible()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) { updateTimer?.invalidate() }
+
+    func windowDidEndSheet(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in self?.presentUpdateIfPossible() }
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) { presentUpdateIfPossible() }
+
+    @objc private func checkUpdatesAutomatically() {
+        Task { [weak self] in await self?.model.updates.check() }
+        presentUpdateIfPossible()
+    }
+
+    @objc func checkForUpdates() {
+        guard !presentingUpdate else { return }
+        model.updates.dismiss()
+        if settingsWindow?.isKeyWindow != true { showMainWindow() }
+        Task { [weak self] in await self?.model.updates.check(manual: true) }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action != #selector(checkForUpdates) || (!model.updates.isChecking && !presentingUpdate)
+    }
+
+    private func presentUpdateIfPossible() {
+        guard !presentingUpdate, NSApp.isActive, NSApp.modalWindow == nil,
+              let notice = model.updates.notice, let window = window,
+              window.attachedSheet == nil, settingsWindow?.attachedSheet == nil else { return }
+        // Background results wait until Folioak is active; they never bring it to the front.
+        let parent = settingsWindow?.isKeyWindow == true ? settingsWindow! : window
+        guard parent.isVisible else { return }
+        presentingUpdate = true
+        let alert = UpdatePresentation.alert(for: notice, currentVersion: model.updates.currentVersion)
+        alert.beginSheetModal(for: parent) { [weak self] response in
+            guard let self else { return }
+            self.presentingUpdate = false
+            if let failure = UpdatePresentation.respond(to: notice, response: response, checker: self.model.updates, open: self.model.opener) {
+                failure.beginSheetModal(for: parent)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !model.showsMenuBarIcon }
@@ -1624,6 +1706,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
     private func showMainWindow() {
+        guard let window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -1670,6 +1753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.contentView = view
             panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
             panel.isReleasedWhenClosed = false
+            panel.delegate = self
             panel.center()
             settingsWindow = panel
         }
@@ -1677,7 +1761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func makeMenu() {
+    func makeMenu() {
         let menu = NSMenu()
         func add(_ title: String, _ items: [(String, Selector?, String)]) -> NSMenu {
             let submenu = NSMenu(title: title)
@@ -1689,12 +1773,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return submenu
         }
         let app = add("", [
-            (L("关于 Folioak"), #selector(showAbout), ""), ("", nil, ""),
+            (L("关于 Folioak"), #selector(showAbout), ""),
+            (L("检查更新…"), #selector(checkForUpdates), ""), ("", nil, ""),
             (L("设置…"), #selector(showSettings), ","), ("", nil, ""),
             (L("隐藏 Folioak"), #selector(NSApplication.hide(_:)), "h"), ("", nil, ""),
             (L("退出 Folioak"), #selector(NSApplication.terminate(_:)), "q")
         ])
         app.item(withTitle: L("关于 Folioak"))?.target = self
+        app.item(withTitle: L("检查更新…"))?.target = self
         app.item(withTitle: L("设置…"))?.target = self
         let edit = add(L("编辑"), [
             (L("撤销"), Selector(("undo:")), "z"), (L("重做"), Selector(("redo:")), "z"), ("", nil, ""),

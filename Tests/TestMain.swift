@@ -96,6 +96,13 @@ struct CoreTests {
     @MainActor static func main() async {
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--updates-live") { try await liveUpdateTest(); return }
+            try await updateTests()
+            try await updateIntegrationTests()
+            if CommandLine.arguments.contains("--updates-only") {
+                if CommandLine.arguments.contains("--snapshots") { try renderUpdateSnapshots() }
+                return
+            }
             try messageTests()
             try await localizationTests()
             if CommandLine.arguments.contains("--preview-230") { try renderMediaSnapshots(); return }

@@ -18,6 +18,8 @@ All download components are bundled. No Python or Homebrew required. Site downlo
 
 Open the DMG and drag Folioak into Applications. The app is not yet notarized by Apple; you may need to allow it in System Settings → Privacy & Security on first launch.
 
+Folioak checks for stable updates once a day while running. Use **Folioak → Check for Updates…** to check manually, or turn automatic checks off in Settings → General. Update reminders open the release page for manual installation; you can postpone or skip a version.
+
 ## Use
 
 Paste or drop links, then click the download button or press `⌘ Return`. Click again to stop. Batch downloads, retries, and Quick Look previews are supported.
