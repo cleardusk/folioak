@@ -1,5 +1,7 @@
 import Foundation
 import Darwin
+import AppKit
+import SwiftUI
 
 private actor BrowserAuthenticationProviderProbe {
     private var issue = BrowserAuthenticationIssue.readFailed
@@ -16,10 +18,14 @@ private actor BrowserAuthenticationProviderProbe {
 private final class BrowserAuthenticationEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [BrowserAuthenticationReadState] = []
+    private var fallbackValues: [AnonymousFallbackState] = []
     func receive(_ event: DownloadEvent) {
-        guard case .browserAuthentication(_, let state) = event else { return }
         lock.lock(); defer { lock.unlock() }
-        values.append(state)
+        if case .browserAuthentication(_, let state) = event { values.append(state) }
+        if case .anonymousFallback(_, let state) = event { fallbackValues.append(state) }
+    }
+    var fallbacks: [AnonymousFallbackState] {
+        lock.lock(); defer { lock.unlock() }; return fallbackValues
     }
     var states: [BrowserAuthenticationReadState] {
         lock.lock(); defer { lock.unlock() }
@@ -36,7 +42,10 @@ extension CoreTests {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let engine = DownloadEngine(transport: MockTransport(sourcePDF: pdf),
                                     pdfTransport: MockTransport(sourcePDF: pdf), requestInterval: 0, retryDelay: 0,
-                                    mediaAuthentication: { try await probe.selection() })
+                                    mediaAuthentication: { try await probe.selection() }, mediaDownload: { _, _, _, _, selection, _ in
+                                        try expect(selection == nil, "a failed provider only reaches the anonymous attempt")
+                                        throw DownloadError.browserAuthentication(.loginRequired)
+                                    })
         let reference = try ArxivReference.parse("2501.12345v2")
         for source in [DownloadSource.arxiv(reference), .pdf(URL(string: "https://example.org/provider.pdf")!)] {
             let saved = try await engine.download(source, to: folder)
@@ -49,8 +58,8 @@ extension CoreTests {
         try expect(savedImage.url.pathExtension == "png" && nativeCalls == 0,
                    "native arXiv, PDF and file routes never invoke the browser authentication provider")
 
-        // Throwing from the provider exercises the real media queue boundary
-        // before yt-dlp can start; no browser or credential files are accessed.
+        // Both the provider and media operation are fixtures; no browser or
+        // network access occurs when the real queue retries anonymously.
         let suite = "folioak-authentication-provider-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
@@ -62,8 +71,10 @@ extension CoreTests {
         guard let failed = model.items.first else { throw TestFailure.failed("missing provider failure record") }
         let firstCalls = await probe.calls
         try expect(firstCalls == 1 && failed.state == .failed &&
-                   failed.errorMessage?.id == DiagnosticMessage.ID.browserAuthReadFailed.rawValue,
-                   "the first media attempt awaits the provider and preserves its typed failure")
+                   failed.errorMessage?.id == DiagnosticMessage.ID.browserAuthLoginRequired.rawValue &&
+                   model.logs.contains(where: { $0.diagnostic?.id == DiagnosticMessage.ID.browserAuthReadFailed.rawValue }) &&
+                   model.logs.contains(where: { $0.diagnostic?.id == DiagnosticMessage.ID.browserAuthFallbackFailed.rawValue }),
+                   "provider failure retries anonymously and retains both the first cause and final outcome")
 
         await probe.setIssue(.sessionRejected)
         model.retry(failed.id)
@@ -72,8 +83,9 @@ extension CoreTests {
         try await waitForQueue(model)
         let retryCalls = await probe.calls
         try expect(retryCalls == 2 && model.items[0].state == .failed &&
-                   model.items[0].errorMessage?.id == DiagnosticMessage.ID.browserAuthSessionRejected.rawValue,
-                   "retry invokes the async provider again and reports its new value instead of a cached failure")
+                   model.items[0].errorMessage?.id == DiagnosticMessage.ID.browserAuthLoginRequired.rawValue &&
+                   model.logs.contains(where: { $0.diagnostic?.id == DiagnosticMessage.ID.browserAuthSessionRejected.rawValue }),
+                   "retry rereads the provider and logs its new value before the final anonymous error")
         print("PASS authentication provider: native-route bypass, awaited media failure and fresh queue-retry selection without credentials")
     }
 
@@ -146,7 +158,7 @@ extension CoreTests {
         try expect(settings.readState == .rejected, "site rejection remains distinct from cookie reading")
         _ = settings.setProfile("Default")
         settings.receive(.read, for: active)
-        try expect(settings.readState == .ready && settings.status == "Chrome · 已启用",
+        try expect(settings.readState == .ready && settings.status == "Chrome · 已启用，下载时读取",
                    "changing profile clears old results and ignores late events from the previous profile")
         _ = settings.setProfile("Profile 1")
         settings.setEnabled(false)
@@ -197,6 +209,10 @@ extension CoreTests {
         guard case .cooldown(60) = MediaDownloader.failure("ERROR: HTTP Error 429: Too Many Requests", authentication: chrome) else {
             throw TestFailure.failed("browser authentication must preserve platform rate-limit handling")
         }
+        try expect(MediaDownloader.failure("ERROR: Unable to extract video data", authentication: chrome, readIssue: .readFailed).message.id == "browser_auth.read_failed",
+                   "generic extraction errors retain a preceding cookie-read failure so anonymous fallback remains available")
+        try expect(MediaDownloader.failure("ERROR: No space left on device", authentication: chrome, readIssue: .readFailed).message.id == DiagnosticMessage.ID.metadata.rawValue,
+                   "cookie warnings cannot turn disk failures into authentication retries")
         let output = MediaOutput()
         output.receive("WARNING: find-generic-password failed") { _ in }
         try expect(output.authenticationIssue?.message.id == "browser_auth.read_failed" && output.error.isEmpty,
@@ -247,6 +263,15 @@ extension CoreTests {
                 ;;
             failure)
                 printf 'Extracted 22 cookies from chrome\nERROR: HTTP Error 403: Forbidden\n'; exit 1
+                ;;
+            fallback)
+                if [ "$auth" = selected ]; then
+                    printf 'ERROR: HTTP Error 403: Forbidden\n'; exit 1
+                fi
+                /bin/cat "$mock_dir/file-message"; exit 0
+                ;;
+            rate-limit)
+                printf 'WARNING: failed to decrypt cookies; fixture only\nWARNING: HTTP Error 429: Too Many Requests\nERROR: Fresh cookies are needed\n'; exit 1
                 ;;
             empty)
                 printf 'Extracted 0 cookies from chrome\n'
@@ -342,6 +367,29 @@ extension CoreTests {
             try confirmCleaned(probe(), scenario)
         }
 
+        try mode("fallback")
+        let fallbackFolder = mock.appendingPathComponent("anonymous-staging")
+        try FileManager.default.createDirectory(at: fallbackFolder, withIntermediateDirectories: true)
+        let fallbackEvents = BrowserAuthenticationEvents()
+        _ = try await MediaDownloader.withAuthenticationFallback(authentication: { selection }, event: { fallbackEvents.receive($0) }) { auth in
+            if auth == nil { try confirmCleaned(probe(), "before anonymous fallback") }
+            return try await MediaDownloader.runDownloader(url, format: .automatic, tools: tools,
+                folder: auth == nil ? fallbackFolder : staging, authentication: auth, event: { fallbackEvents.receive($0) })
+        }
+        try expect(try probe()[2] == "anonymous" && fallbackEvents.fallbacks == [.started, .succeeded],
+                   "the fallback launches a fresh process without browser arguments after authenticated temporary data is gone")
+        try mode("rate-limit")
+        let limitedEvents = BrowserAuthenticationEvents()
+        do {
+            _ = try await MediaDownloader.withAuthenticationFallback(authentication: { selection }, event: { limitedEvents.receive($0) }) { auth in
+                try await MediaDownloader.runDownloader(url, format: .automatic, tools: tools, folder: staging,
+                    authentication: auth, event: { limitedEvents.receive($0) })
+            }
+            throw TestFailure.failed("rate-limited process succeeded")
+        } catch DownloadError.cooldown(60) { }
+        try expect(limitedEvents.fallbacks.isEmpty, "a cookie warning cannot override the final HTTP 429 or bypass its cooldown")
+        try confirmCleaned(probe(), "rate limit")
+
         try mode("cancel")
         let cancelledEvents = BrowserAuthenticationEvents()
         let task = Task { try await MediaDownloader.runDownloader(url, format: .automatic, tools: tools, folder: staging,
@@ -382,5 +430,194 @@ extension CoreTests {
         try expect(anonymousProbe.count == 3 && anonymousProbe[0] == NSTemporaryDirectory() && anonymousProbe[2] == "anonymous" &&
                    (try authDirectories()).isEmpty, "anonymous invocation preserves the original TMPDIR and creates no authentication directory")
         print("PASS browser authentication process: mock 0700 TMPDIR, success/failure cleanup, bounded group cancellation and unchanged anonymous environment")
+    }
+}
+
+
+private actor AnonymousFallbackProbe {
+    private(set) var attempts: [Bool] = []
+    func download(authentication: BrowserAuthenticationSelection?, image: URL,
+                  event: @escaping @Sendable (DownloadEvent) -> Void) throws -> SavedDocument {
+        attempts.append(authentication != nil)
+        if let authentication {
+            event(.browserAuthentication(authentication, .reading))
+            event(.browserAuthentication(authentication, .rejected))
+            throw DownloadError.browserAuthentication(.sessionRejected)
+        }
+        // Exercise the production bounded queue stream, not only the helper.
+        for index in 0..<2000 { event(.progress(DownloadProgress(received: Int64(index), total: 2000))) }
+        return SavedDocument(title: "Anonymous fixture", metadata: nil, url: image, alreadyExisted: false, pages: 0)
+    }
+}
+
+extension CoreTests {
+    @MainActor static func anonymousFallbackTests(root: URL, image: URL) async throws {
+        let selection = try BrowserAuthenticationSelection(browser: .chrome, profile: "Private Fixture Profile")
+        let url = URL(string: "https://v.douyin.com/YiTAtQNlyeE/")!
+        let anonymousKey = MediaDownloader.stagingKey(url, directory: root, format: .automatic, authentication: nil)
+        try expect(anonymousKey == PDFStorage.key(url.absoluteString + "|" + MediaFormat.automatic.rawValue + "|" + root.standardizedFileURL.path) &&
+                   anonymousKey != MediaDownloader.stagingKey(url, directory: root, format: .automatic, authentication: selection),
+                   "anonymous fallback retains the old resume key and cannot use authenticated partials")
+        let fresh = MediaDownloader.failure("ERROR: Fresh cookies (not necessarily logged in) are needed", url: url)
+        try expect(fresh.message.id == DiagnosticMessage.ID.browserAuthFreshCookiesRequired.rawValue &&
+                   BrowserAuthenticationIssue.matches(fresh.message), "Douyin's fresh-cookie request is not falsely reported as confirmed login failure")
+        for issue in [BrowserAuthenticationIssue.readFailed, .sessionRejected, .freshCookiesRequired] {
+            var attempts: [Bool] = []
+            let events = BrowserAuthenticationEvents()
+            let value = try await MediaDownloader.withAuthenticationFallback(authentication: { selection }, event: { events.receive($0) }) { auth in
+                attempts.append(auth != nil)
+                if auth != nil { throw DownloadError.browserAuthentication(issue) }
+                return "saved"
+            }
+            try expect(value == "saved" && attempts == [true, false] && events.fallbacks == [.started, .succeeded] && events.states.last == issue.readState,
+                       "each known cookie failure gets one anonymous retry and retains the rejected/read-failed status")
+        }
+        for failure in [DownloadError.cooldown(60), .storage("fixture"), .metadata("fixture"), .unsafeResponse] {
+            var calls = 0
+            let events = BrowserAuthenticationEvents()
+            do {
+                let _: String = try await MediaDownloader.withAuthenticationFallback(authentication: { selection }, event: { events.receive($0) }) { _ in
+                    calls += 1; throw failure
+                }
+                throw TestFailure.failed("non-auth failure succeeded")
+            } catch is TestFailure { throw TestFailure.failed("non-auth failure succeeded") }
+            catch { try expect(calls == 1 && events.fallbacks.isEmpty, "rate limits, disk and other failures do not cause anonymous traffic") }
+        }
+        for auth in [selection, nil] {
+            var calls = 0
+            let events = BrowserAuthenticationEvents()
+            do {
+                let _: String = try await MediaDownloader.withAuthenticationFallback(authentication: { auth }, event: { events.receive($0) }) { _ in
+                    calls += 1; throw DownloadError.browserAuthentication(.freshCookiesRequired)
+                }
+                throw TestFailure.failed("rejected anonymous attempt succeeded")
+            } catch let failure as DownloadError {
+                try expect(calls == (auth == nil ? 1 : 2) && failure.message.id == fresh.message.id &&
+                           events.fallbacks == (auth == nil ? [] : [.started, .failed]), "anonymous rejection retains the final cause and never loops")
+            }
+        }
+        let cancelledEvents = BrowserAuthenticationEvents()
+        let cancelled = Task { () throws -> String in
+            try await MediaDownloader.withAuthenticationFallback(authentication: { selection }, event: { cancelledEvents.receive($0) }) { _ in
+                throw CancellationError()
+            }
+        }
+        do { _ = try await cancelled.value; throw TestFailure.failed("cancelled attempt succeeded") }
+        catch is CancellationError { }
+        try expect(cancelledEvents.fallbacks.isEmpty, "cancellation never starts an anonymous retry")
+        let retryCancelledEvents = BrowserAuthenticationEvents()
+        let retryCancelled = Task { () throws -> String in
+            try await MediaDownloader.withAuthenticationFallback(authentication: { selection }, event: { retryCancelledEvents.receive($0) }) { auth in
+                if auth != nil { throw DownloadError.browserAuthentication(.readFailed) }
+                throw CancellationError()
+            }
+        }
+        do { _ = try await retryCancelled.value; throw TestFailure.failed("cancelled fallback succeeded") }
+        catch is CancellationError { }
+        try expect(retryCancelledEvents.fallbacks == [.started, .cancelled], "cancelling the anonymous attempt has a distinct outcome")
+
+        let suite = "folioak-anonymous-fallback-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let probe = AnonymousFallbackProbe()
+        let engine = DownloadEngine(mediaAuthentication: { selection }, mediaDownload: { _, _, _, _, auth, event in
+            try await probe.download(authentication: auth, image: image, event: event)
+        })
+        let model = DownloadModel(engine: engine, preferences: preferences)
+        model.browserAuthentication.select(.chrome)
+        _ = model.browserAuthentication.setProfile(selection.profile!)
+        model.browserAuthentication.setEnabled(true)
+        model.directory = root
+        model.input = url.absoluteString
+        model.start()
+        try await waitForQueue(model)
+        let attempts = await probe.attempts
+        try expect(attempts == [true, false] && model.items.first?.state == .saved && model.items.first?.errorMessage == nil,
+                   "production queue publishes anonymous success without retaining the intermediate task error")
+        let ids = model.logs.compactMap { $0.diagnostic?.id }
+        for id in [DiagnosticMessage.ID.browserAuthSessionRejected, .browserAuthFallbackStarted, .browserAuthFallbackSucceeded] {
+            try expect(ids.filter { $0 == id.rawValue }.count == 1, "progress bursts preserve one log per authentication/fallback phase")
+        }
+        try expect(ids.lastIndex(of: DiagnosticMessage.ID.browserAuthRejected.rawValue)! < ids.firstIndex(of: DiagnosticMessage.ID.browserAuthFallbackSucceeded.rawValue)!,
+                   "late browser status precedes anonymous success, keeping the final log outcome unambiguous")
+        try expect(model.browserAuthentication.readState == .rejected && model.browserAuthentication.enabled &&
+                   model.browserAuthentication.selection == selection && model.browserAuthentication.lastHost == url.host,
+                   "anonymous success does not claim browser authentication succeeded or change saved preferences")
+        let serialized = try JSONEncoder().encode(model.logs)
+        let restored = try JSONDecoder().decode([ActivityEntry].self, from: serialized)
+        try expect(restored.compactMap { $0.diagnostic?.id } == ids && !String(decoding: serialized, as: UTF8.self).contains(selection.profile!),
+                   "fallback log history round-trips typed phases without profile names or cookie contents")
+        var opens: [(CookieBrowser, URL?)] = []
+        let settings = BrowserAuthenticationSettings(preferences, browserOpener: { browser, url in opens.append((browser, url)); return true })
+        await settings.openBrowser(url: url)
+        await settings.openBrowser(url: URL(string: "https://evil.example/")!)
+        try expect(opens.count == 1 && opens[0].0 == .chrome && opens[0].1 == url && !settings.browserOpenError,
+                   "recovery opens only the supported original link in the selected browser")
+        settings.receive(.empty, for: selection, host: url.host)
+        try expect(settings.recoveryHint.contains("未找到 Cookie"), "empty cookie state provides an actionable recovery hint")
+        settings.select(.firefox)
+        try expect(settings.lastHost == nil && settings.readState == .ready, "new selection cannot show a stale site outcome")
+        let failedOpener = BrowserAuthenticationSettings(preferences, browserOpener: { _, _ in false })
+        await failedOpener.openBrowser(url: url)
+        try expect(failedOpener.browserOpenError && !failedOpener.openingBrowser, "browser launch failures are visible and retryable")
+        print("PASS anonymous fallback: one retry, final cause, no loops, cancellation/rate-limit/storage boundaries, isolated resume keys, burst-safe typed logs, unchanged preferences and selected-browser recovery")
+    }
+}
+
+extension CoreTests {
+    @MainActor static func authenticationInterfaceTests() async throws {
+        let suite = "folioak-authentication-interface-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        let application = NSApplication.shared
+        let appearance = application.appearance
+        defer { preferences.removePersistentDomain(forName: suite); AppLocalization.shared.language = .chinese; application.appearance = appearance }
+        let model = DownloadModel(preferences: preferences)
+        let url = URL(string: "https://v.douyin.com/fixture/")!
+        var item = DownloadItem(original: url.absoluteString, directURL: url, state: .failed, documentTitle: "视频下载 · 认证与匿名重试")
+        item.setError(BrowserAuthenticationIssue.freshCookiesRequired.message)
+        model.history = [item]
+        model.record(.warning, BrowserAuthenticationIssue.readFailed.message, item: item)
+        model.record(.warning, AnonymousFallbackState.started.message, item: item)
+        model.record(.warning, AnonymousFallbackState.failed.message, item: item)
+        model.record(.error, BrowserAuthenticationIssue.freshCookiesRequired.message, item: item)
+        model.record(.info, DiagnosticMessage(.start, "1"))
+        let filtered = DownloaderView(model: model, page: .logs, logItem: item)
+        try expect(filtered.visibleLogs.count == 4 && filtered.visibleLogs.allSatisfy { $0.itemID == item.id },
+                   "task log view and its export contain only the selected task, including both attempts")
+        try expect(DownloaderView(model: model, page: .logs).visibleLogs.count == 5,
+                   "all-log navigation restores unrelated and global activity")
+        guard CommandLine.arguments.contains("--snapshots") else { return }
+        let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/qa/authentication-261")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        func capture<V: View>(_ content: V, width: CGFloat, height: CGFloat, name: String, scheme: ColorScheme) async throws {
+            let view = NSHostingView(rootView: content.environment(\.colorScheme, scheme).environment(\.controlActiveState, .key))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = view
+            window.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+            defer { window.orderOut(nil) }
+            try await Task.sleep(nanoseconds: 120_000_000)
+            view.layoutSubtreeIfNeeded()
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("authentication UI bitmap") }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            guard let data = bitmap.representation(using: .png, properties: [:]) else { throw TestFailure.failed("authentication UI PNG") }
+            try data.write(to: output.appendingPathComponent(name + ".png"))
+        }
+        model.browserAuthentication.select(.chrome)
+        model.browserAuthentication.setEnabled(true)
+        for language in [AppLanguage.chinese, .english] {
+            model.language = language
+            for scheme in [ColorScheme.light, .dark] {
+                application.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+                let suffix = "\(language.rawValue)-\(scheme == .light ? "light" : "dark")"
+                model.settingsTab = "浏览器认证"
+                for state in [BrowserAuthenticationReadState.read, .empty, .failed, .rejected] {
+                    model.browserAuthentication.receive(state, for: model.browserAuthentication.selection!, host: "v.douyin.com")
+                    try await capture(SettingsView(model: model), width: 470, height: 588, name: "settings-\(state)-\(suffix)", scheme: scheme)
+                }
+                try await capture(DownloaderView(model: model, page: .logs, logItem: item), width: 780, height: 540, name: "task-logs-\(suffix)", scheme: scheme)
+                try await capture(DownloaderView(model: model), width: 780, height: 540, name: "recovery-\(suffix)", scheme: scheme)
+            }
+        }
+        print("PASS authentication interface: task-filtered log/export scope, native settings snapshots in Chinese/English and light/dark at minimum sizes")
     }
 }

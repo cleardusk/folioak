@@ -37,7 +37,7 @@ CI 固定 Xcode 26.3 / macOS SDK 26.2，并校验 arm64；最低运行系统仍�
 
 ## 本机更新
 
-应用运行期间默认每天检查一次 GitHub 最新正式 Release，使用 ETag 缓存，失败时退避并遵守限流。只提示具有已上传、非空 arm64 DMG 或 ZIP 的正式版本；后台失败不弹窗，手动检查会反馈错误。更新提示仅打开固定仓库的发布页，不下载、执行或替换应用。跳过版本和自动检查开关保存在偏好中，手动检查不受跳过设置影响。可用 `./test.command --updates-only` 验证离线更新逻辑，`./build/CoreTests --updates-live` 额外验证真实 GitHub 接口。
+应用运行期间默认每天检查一次 GitHub 最新正式 Release，使用 ETag 缓存，失败时退避并遵守限流。只提示具有已上传、非空 arm64 DMG 或 ZIP 的正式版本；后台失败不弹窗，手动检查会反馈错误并可打开固定发布页。GitHub 限流时保留冷却时间，自动检查在服务端给出的时间后恢复；不会将共用网络额度耗尽描述为用户操作过于频繁。更新提示仅打开固定仓库的发布页，不下载、执行或替换应用。跳过版本和自动检查开关保存在偏好中，手动检查不受跳过设置影响。可用 `./test.command --updates-only` 验证离线更新逻辑，`./build/CoreTests --updates-live` 额外验证真实 GitHub 接口。
 
 退出应用，备份旧 `.app`、偏好及已有 `workspace.json`、`library.json`、`media-library.json`。核验已发布 ZIP 的 SHA-256、签名和版本后替换 `/Applications/Folioak.app`，启动确认原草稿、目录和资料库保留。不要把 QA 状态带入用户环境。
 

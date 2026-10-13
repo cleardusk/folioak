@@ -121,7 +121,7 @@ enum BrowserAuthenticationReadState: Equatable, Sendable {
 }
 
 enum BrowserAuthenticationIssue: Sendable {
-    case invalidSelection, readFailed, sessionRejected, loginRequired
+    case invalidSelection, readFailed, sessionRejected, loginRequired, freshCookiesRequired
 
     var message: DiagnosticMessage {
         switch self {
@@ -129,12 +129,20 @@ enum BrowserAuthenticationIssue: Sendable {
         case .readFailed: return DiagnosticMessage(.browserAuthReadFailed)
         case .sessionRejected: return DiagnosticMessage(.browserAuthSessionRejected)
         case .loginRequired: return DiagnosticMessage(.browserAuthLoginRequired)
+        case .freshCookiesRequired: return DiagnosticMessage(.browserAuthFreshCookiesRequired)
+        }
+    }
+
+    var readState: BrowserAuthenticationReadState {
+        switch self {
+        case .invalidSelection, .readFailed: return .failed
+        case .sessionRejected, .loginRequired, .freshCookiesRequired: return .rejected
         }
     }
 
     static func matches(_ message: DiagnosticMessage?) -> Bool {
         guard let id = message?.id else { return false }
-        return [Self.invalidSelection, .readFailed, .sessionRejected, .loginRequired].contains { $0.message.id == id }
+        return [Self.invalidSelection, .readFailed, .sessionRejected, .loginRequired, .freshCookiesRequired].contains { $0.message.id == id }
     }
 
     // yt-dlp currently exposes these failures as text. Classify known diagnostics
@@ -150,5 +158,18 @@ enum BrowserAuthenticationIssue: Sendable {
             return .readFailed
         }
         return nil
+    }
+}
+
+enum AnonymousFallbackState: Sendable {
+    case started, succeeded, failed, cancelled
+
+    var message: DiagnosticMessage {
+        switch self {
+        case .started: return DiagnosticMessage(.browserAuthFallbackStarted)
+        case .succeeded: return DiagnosticMessage(.browserAuthFallbackSucceeded)
+        case .failed: return DiagnosticMessage(.browserAuthFallbackFailed)
+        case .cancelled: return DiagnosticMessage(.browserAuthFallbackCancelled)
+        }
     }
 }

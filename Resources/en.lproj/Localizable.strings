@@ -503,7 +503,7 @@
 
 "browser_auth.invalid_selection" = "Browser authentication settings are invalid. Choose a browser and profile name again.";
 "browser_auth.read_failed" = "Could not read browser authentication. Check that the browser is installed and the selected profile exists, then check macOS Keychain or file access permissions and try again.";
-"browser_auth.session_rejected" = "The site did not accept browser authentication. Sign in and complete verification in the selected browser, then retry; or turn off browser authentication to download anonymously.";
+"browser_auth.session_rejected" = "The site did not accept the browser session. Open the original link in the selected browser, confirm playback and complete site verification, then retry.";
 "browser_auth.login_required" = "This content requires sign-in or site verification. Choose browser authentication in Settings, confirm that the link opens in that browser, then retry.";
 "浏览器认证" = "Browser Authentication";
 
@@ -529,12 +529,12 @@
 
 "媒体进程状态无法确认，请稍后重试。" = "Could not confirm the media process state. Please try again later.";
 
-"browser_auth.status.ready" = "%@ · Enabled";
+"browser_auth.status.ready" = "%@ · Enabled, read on download";
 "browser_auth.status.reading" = "%@ · Reading cookies";
 "browser_auth.status.read" = "%@ · Cookies read";
 "browser_auth.status.empty" = "%@ · No cookies found";
 "browser_auth.status.failed" = "%@ · Could not read cookies";
-"browser_auth.status.rejected" = "%@ · Sign-in or verification needed";
+"browser_auth.status.rejected" = "%@ · Session not accepted by site";
 "先在浏览器登录网站，下载时自动复用。" = "Sign in in your browser; downloads reuse that session.";
 "留空自动选择；多账号可填配置目录名，如 Profile 1。" = "Leave blank for automatic selection, or enter a profile directory such as Profile 1.";
 "认证说明" = "About authentication";
@@ -562,3 +562,24 @@
 "无法连接更新服务，请检查网络后重试。" = "Could not reach the update service. Check your connection and try again.";
 "无法打开下载页" = "Could Not Open Download Page";
 "好" = "OK";
+"browser_auth.fresh_cookies_required" = "The site requires fresh cookies, possibly without sign-in. Open the original link in the selected browser, complete verification, then retry.";
+"browser_auth.fallback.started" = "Authentication failed. Retrying anonymously once.";
+"browser_auth.fallback.succeeded" = "Anonymous retry succeeded. Files were validated and saved.";
+"browser_auth.fallback.failed" = "Anonymous retry also failed. See the final error.";
+"browser_auth.fallback.cancelled" = "Anonymous retry cancelled.";
+"先在浏览器打开视频并确认可播放，再启用认证。" = "Open the video in your browser and confirm playback before enabling authentication.";
+"启用前，请先在浏览器打开视频链接并确认可播放。" = "Before enabling, open the video link in your browser and confirm playback.";
+"下载时读取最新 Cookie；读取结果不代表站点已接受登录。" = "Current cookies are read when downloading. Reading cookies does not confirm site sign-in.";
+"正在读取所选浏览器；macOS 可能请求访问权限。" = "Reading the selected browser; macOS may request access.";
+"未找到 Cookie。请确认浏览器及配置，打开视频链接后再试。" = "No cookies found. Check the browser and profile, open the video link, then retry.";
+"无法读取 Cookie。请检查浏览器配置、钥匙串或文件访问权限。" = "Could not read cookies. Check the browser profile and Keychain or file access.";
+"请在所选浏览器打开原链接，确认可播放并完成站点验证后重试。" = "Open the original link in the selected browser, confirm playback and complete site verification, then retry.";
+"认证失败时自动匿名重试一次；不会更改浏览器选择。" = "If authentication fails, retry anonymously once. Your browser selection is kept.";
+"任务日志" = "Task Logs";
+"全部日志" = "All Logs";
+"查看任务日志" = "View Task Logs";
+"在认证浏览器中打开" = "Open in Authentication Browser";
+"GitHub 更新接口暂时限流，同一网络可能共用请求额度。可在 %@ 后重试，或现在打开发布页查看。" = "GitHub's update API is temporarily rate limited. Devices on the same network may share its quota. Retry after %@, or open the releases page now.";
+"打开发布页" = "Open Releases Page";
+"多账号时，请确认打开的是所选配置。" = "If you use multiple profiles, confirm that the selected profile is open.";
+"无法创建下载临时目录，请检查磁盘空间和目录权限。" = "Could not create the download temporary folder. Check disk space and folder permissions.";

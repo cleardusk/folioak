@@ -74,13 +74,30 @@ extension CoreTests {
             let error = UpdateNotice(result: .failed("fixture error"), manual: true)
             try expect(UpdatePresentation.alert(for: error, currentVersion: checker.currentVersion).messageText == L("无法检查更新"), "failed request never renders the up-to-date prompt")
             opened.removeAll()
-            try expect(UpdatePresentation.respond(to: error, response: .alertFirstButtonReturn, checker: checker, open: model.opener) == nil && opened.isEmpty,
-                       "acknowledging an error never opens a browser")
+            try expect(UpdatePresentation.respond(to: error, response: .alertSecondButtonReturn, checker: checker, open: model.opener) == nil && opened.isEmpty,
+                       "dismissing an error never opens a browser")
+            for index in 0..<2 {
+                opened.removeAll()
+                let alert = UpdatePresentation.alert(for: error, currentVersion: checker.currentVersion)
+                try expect(alert.buttons.map(\.title) == [L("打开发布页"), L("稍后")], "error prompt exposes a release-page recovery action")
+                let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 500), styleMask: [.titled], backing: .buffered, defer: false)
+                var result: NSApplication.ModalResponse?
+                alert.beginSheetModal(for: parent) { selected in
+                    result = selected
+                    _ = UpdatePresentation.respond(to: error, response: selected, checker: checker, open: model.opener)
+                }
+                alert.buttons[index].performClick(nil)
+                for _ in 0..<100 where result == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+                if result == nil { parent.endSheet(alert.window, returnCode: .abort) }
+                parent.orderOut(nil)
+                try expect(result == (index == 0 ? .alertFirstButtonReturn : .alertSecondButtonReturn) &&
+                           opened == (index == 0 ? [UpdateHTTPClient.releasePage] : []), "native error buttons recover to the fixed release page or dismiss")
+            }
         }
         try expect(requests == 2, "each menu command starts exactly one request")
         checker.automaticallyChecks = false
         try expect(!DownloadModel(preferences: preferences).updates.automaticallyChecks, "settings checkbox model persists to a new application model")
-        print("PASS update integration: bilingual native menu dispatch, busy validation, six native sheet button actions, exact browser destination, skip/later persistence and failed-browser recovery without accessibility or desktop input")
+        print("PASS update integration: bilingual native menu dispatch, busy validation, ten native sheet button actions, exact browser destination, skip/later persistence and failed-browser recovery without accessibility or desktop input")
     }
 
     @MainActor static func updateTests() async throws {
@@ -199,10 +216,17 @@ extension CoreTests {
             let count = calls
             await checker().check(manual: true)
             try expect(calls == count, "rate limit is persisted and honored by manual checks")
+            try expect((preferences.object(forKey: "updates.nextCheck") as? Date) == time.addingTimeInterval(300),
+                       "automatic checks resume at the server deadline without a days-long failure backoff")
+            guard case .failed(let limitedMessage) = limited.notice?.result else { throw TestFailure.failed("missing rate-limit message") }
+            try expect(limitedMessage.contains("GitHub") && !limitedMessage.contains("检查过于频繁"), "shared rate limits do not blame the user's clicks")
+            // A user upgrading while 2.6.0 is cooling down may have a full-day backoff.
+            preferences.set(time.addingTimeInterval(UpdateChecker.interval), forKey: "updates.nextCheck")
             time.addTimeInterval(301)
             data = try payload()
             reply = response()
-            await limited.check(manual: true)
+            limited.dismiss()
+            await limited.check()
             try expect(calls == count + 1 && limited.notice?.result == .available(try AppRelease.decode(data)), "rate-limited requests resume after the server delay")
         }
         reset()

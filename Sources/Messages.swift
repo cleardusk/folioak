@@ -60,6 +60,11 @@ struct DiagnosticMessage: Codable, Equatable, Sendable {
         case browserAuthReadFailed = "browser_auth.read_failed"
         case browserAuthSessionRejected = "browser_auth.session_rejected"
         case browserAuthLoginRequired = "browser_auth.login_required"
+        case browserAuthFreshCookiesRequired = "browser_auth.fresh_cookies_required"
+        case browserAuthFallbackStarted = "browser_auth.fallback.started"
+        case browserAuthFallbackSucceeded = "browser_auth.fallback.succeeded"
+        case browserAuthFallbackFailed = "browser_auth.fallback.failed"
+        case browserAuthFallbackCancelled = "browser_auth.fallback.cancelled"
 
         var template: String {
             switch self {
@@ -105,16 +110,21 @@ struct DiagnosticMessage: Codable, Equatable, Sendable {
             case .networkFailure: return "网络连接失败：%@"
             case .temporaryStorage: return "临时文件无法写入，请检查磁盘空间和权限。"
             case .localMissing: return "本地文件不存在"
-            case .browserAuthReady: return "%@ · 已启用"
+            case .browserAuthReady: return "%@ · 已启用，下载时读取"
             case .browserAuthReading: return "%@ · 正在读取 Cookie"
             case .browserAuthRead: return "%@ · Cookie 已读取"
             case .browserAuthEmpty: return "%@ · 未找到 Cookie"
             case .browserAuthReadStatusFailed: return "%@ · Cookie 读取失败"
-            case .browserAuthRejected: return "%@ · 需重新登录或验证"
+            case .browserAuthRejected: return "%@ · 站点未接受此会话"
             case .browserAuthInvalidSelection: return "浏览器认证设置无效，请重新选择浏览器和配置名称。"
             case .browserAuthReadFailed: return "无法读取浏览器认证。请确认浏览器已安装、所选配置存在，并检查 macOS 钥匙串或文件访问权限后重试。"
-            case .browserAuthSessionRejected: return "浏览器认证未被站点接受。请在所选浏览器中登录并完成验证，再重试；也可关闭浏览器认证使用匿名下载。"
+            case .browserAuthSessionRejected: return "站点未接受浏览器会话。请在所选浏览器中打开原链接，确认可播放并完成站点验证，再重试。"
             case .browserAuthLoginRequired: return "此内容需要登录或站点验证。可在设置中选择浏览器认证，先在该浏览器确认链接可访问，再重试。"
+            case .browserAuthFreshCookiesRequired: return "站点要求新的 Cookie，不一定需要登录。请在所选浏览器打开原链接，完成验证后重试。"
+            case .browserAuthFallbackStarted: return "认证失败，正在匿名重试一次。"
+            case .browserAuthFallbackSucceeded: return "匿名重试成功，文件已验证并保存。"
+            case .browserAuthFallbackFailed: return "匿名重试也未完成，请查看最终错误。"
+            case .browserAuthFallbackCancelled: return "匿名重试已取消。"
             }
         }
     }

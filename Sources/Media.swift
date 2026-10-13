@@ -247,7 +247,10 @@ final class MediaOutput: @unchecked Sendable {
     var error = ""
     var text = ""
     var authenticationIssue: BrowserAuthenticationIssue?
+    private(set) var rateLimited = false
     func receive(_ line: String, event: @Sendable (DownloadEvent) -> Void) {
+        if line.hasPrefix("ERROR:") || line.hasPrefix("WARNING:"),
+           case .cooldown = MediaDownloader.failure(line) { rateLimited = true }
         if line.hasPrefix("ERROR:") || line.hasPrefix("WARNING:"),
            let issue = BrowserAuthenticationIssue.readFailure(in: line) {
             authenticationIssue = issue
@@ -484,6 +487,46 @@ enum MediaDownloader {
     }
 
     static let hosts = Set(MediaSite.allCases.flatMap(\.hosts))
+
+    typealias Download = @Sendable (URL, URL, MediaFormat, Bool, BrowserAuthenticationSelection?,
+                                    @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument
+
+    // Retry the entire attempt: authenticated partials, temporary cookie copies
+    // and coordination leases are never reused by the anonymous process.
+    static func withAuthenticationFallback<Result>(
+        authentication: () async throws -> BrowserAuthenticationSelection?,
+        event: @escaping @Sendable (DownloadEvent) -> Void,
+        attempt: (BrowserAuthenticationSelection?) async throws -> Result
+    ) async throws -> Result {
+        try Task.checkCancellation()
+        var selection: BrowserAuthenticationSelection?
+        var issue: BrowserAuthenticationIssue?
+        do { selection = try await authentication() }
+        catch DownloadError.browserAuthentication(let reason) { issue = reason }
+        if issue == nil {
+            do { return try await attempt(selection) }
+            catch DownloadError.browserAuthentication(let reason) where selection != nil { issue = reason }
+        }
+        guard let issue else { preconditionFailure("Missing authentication failure") }
+        try Task.checkCancellation()
+        func report(_ state: AnonymousFallbackState) {
+            if let selection { event(.browserAuthentication(selection, issue.readState)) }
+            event(.anonymousFallback(issue, state))
+        }
+        event(.anonymousFallback(issue, .started))
+        do {
+            try Task.checkCancellation()
+            let result = try await attempt(nil)
+            report(.succeeded)
+            return result
+        } catch {
+            let cancelled = error is CancellationError || Task.isCancelled
+            report(cancelled ? .cancelled : .failed)
+            if cancelled { throw CancellationError() }
+            throw error
+        }
+    }
+
     static func accepts(_ url: URL) -> Bool {
         guard PublicHTTPS.allows(url), let site = MediaSite.site(for: url.host) else { return false }
         return site.accepts(url)
@@ -521,9 +564,7 @@ enum MediaDownloader {
         guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
         let tools = try MediaTools.installed()
         for name in ["yt-dlp", "ffmpeg", "ffprobe", "qjs"] { _ = try tools.executable(name) }
-        let identity = url.absoluteString + "|" + format.rawValue + "|" + directory.standardizedFileURL.path
-        // Preserve anonymous resume keys; isolate opt-in profiles from old partials.
-        let key = PDFStorage.key(identity + (authentication.map { "|browser-auth|" + $0.argument } ?? ""))
+        let key = stagingKey(url, directory: directory, format: format, authentication: authentication)
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(DownloadPreferences.domain).appendingPathComponent("MediaDownloads")
         let coordinator = RequestCoordinator(directory: root)
@@ -547,6 +588,12 @@ enum MediaDownloader {
         // Keep the coordination inode; remove only our completed media files.
         for file in output.files { try? FileManager.default.removeItem(at: file) }
         return result
+    }
+
+    static func stagingKey(_ url: URL, directory: URL, format: MediaFormat, authentication: BrowserAuthenticationSelection?) -> String {
+        let identity = url.absoluteString + "|" + format.rawValue + "|" + directory.standardizedFileURL.path
+        // Preserve anonymous resume keys; isolate opt-in profiles from old partials.
+        return PDFStorage.key(identity + (authentication.map { "|browser-auth|" + $0.argument } ?? ""))
     }
 
     static func runDownloader(_ url: URL, format: MediaFormat, tools: MediaTools, folder: URL,
@@ -574,7 +621,7 @@ enum MediaDownloader {
                                                         attributes: [.posixPermissions: 0o700])
             } catch {
                 output.reportAuthentication(.failed, event: event)
-                throw DownloadError.browserAuthentication(.readFailed)
+                throw DownloadError.storage("无法创建下载临时目录，请检查磁盘空间和目录权限。")
             }
         }
         let process = MediaProcess()
@@ -589,15 +636,10 @@ enum MediaDownloader {
             output.receive($0, event: event)
         }
         guard status == 0, !output.files.isEmpty else {
-            if authentication != nil, let issue = output.authenticationIssue {
-                throw DownloadError.browserAuthentication(issue)
-            }
-            let error = failure(output.error, url: url, authentication: authentication)
+            if output.rateLimited { throw DownloadError.cooldown(60) }
+            let error = failure(output.error, url: url, authentication: authentication, readIssue: output.authenticationIssue)
             if case .browserAuthentication(let issue) = error {
-                switch issue {
-                case .readFailed, .invalidSelection: output.reportAuthentication(.failed, event: event)
-                case .sessionRejected, .loginRequired: output.reportAuthentication(.rejected, event: event)
-                }
+                output.reportAuthentication(issue.readState, event: event)
             }
             throw error
         }
@@ -605,11 +647,9 @@ enum MediaDownloader {
     }
 
     static func failure(_ raw: String, url: URL? = nil,
-                        authentication: BrowserAuthenticationSelection? = nil) -> DownloadError {
+                        authentication: BrowserAuthenticationSelection? = nil,
+                        readIssue: BrowserAuthenticationIssue? = nil) -> DownloadError {
         let lower = raw.lowercased()
-        if authentication != nil, let issue = BrowserAuthenticationIssue.readFailure(in: raw) {
-            return .browserAuthentication(issue)
-        }
         // Match an HTTP status rather than digits in a video ID. yt-dlp does not
         // expose Retry-After here; use the native engine's default one-minute pause.
         if lower.range(of: #"\bhttp(?: error)?(?: status(?: code)?)?[:\s]+429\b"#, options: .regularExpression) != nil ||
@@ -620,6 +660,11 @@ enum MediaDownloader {
         if lower.contains("video is unavailable") || lower.contains("tweet is unavailable") || lower.contains("deleted") {
             return .metadata("此内容当前不可访问，可能已被删除或设为非公开。")
         }
+        if lower.contains("space left") { return .metadata("磁盘空间不足，请释放空间后重试。") }
+        if authentication != nil, let issue = BrowserAuthenticationIssue.readFailure(in: raw) {
+            return .browserAuthentication(issue)
+        }
+        if lower.contains("fresh cookies") { return .browserAuthentication(.freshCookiesRequired) }
         if lower.contains("sign in") || lower.contains("login") || lower.contains("cookies") || lower.contains("403") || lower.contains("authentication") {
             return .browserAuthentication(authentication == nil ? .loginRequired : .sessionRejected)
         }
@@ -629,7 +674,9 @@ enum MediaDownloader {
         if lower.contains("no video") || lower.contains("does not contain") { return .metadata("链接中没有可下载的视频。若是图片，请使用图片文件的直链。") }
         if lower.contains("unsupported url") { return .metadata("该链接暂不支持，请使用单个视频或帖子链接。") }
         if lower.contains("requested format") { return .metadata("当前视频没有可用的下载格式，请稍后重试。") }
-        if lower.contains("space left") { return .metadata("磁盘空间不足，请释放空间后重试。") }
+        // A cookie-reader warning may be followed by a generic extraction error.
+        // Keep that known cause unless a specific terminal failure above wins.
+        if authentication != nil, let readIssue { return .browserAuthentication(readIssue) }
         return .metadata("媒体下载未完成，请检查链接和网络后重试。若站点已变更，请更新应用。")
     }
 }

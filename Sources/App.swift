@@ -442,7 +442,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func exportLogs(_ entries: [ActivityEntry]) {
-        exportData(Data(entries.map(\.line).joined(separator: "\n").utf8), name: "arxiv-log.txt")
+        exportData(Data(entries.map(\.line).joined(separator: "\n").utf8), name: "folioak-log.txt")
     }
 
     func exportLibrary() {
@@ -817,6 +817,14 @@ final class DownloadModel: ObservableObject {
         }
     }
 
+    func openAuthenticationSource(_ item: DownloadItem) {
+        guard case .media(let url)? = item.source else { return }
+        Task {
+            await browserAuthentication.openBrowser(url: url)
+            notice = browserAuthentication.browserOpenError ? "浏览器未安装，或无法打开。请确认安装后重试。" : nil
+        }
+    }
+
     private func update(_ id: UUID, _ transform: (inout DownloadItem) -> Void) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         transform(&items[index])
@@ -826,7 +834,7 @@ final class DownloadModel: ObservableObject {
         guard run == runID else { return }
         guard let before = items.first(where: { $0.id == id }), !before.state.terminal else { return }
         if case .browserAuthentication(let selection, let state) = event {
-            browserAuthentication.receive(state, for: selection)
+            browserAuthentication.receive(state, for: selection, host: before.source?.webURL.host)
             if state != .ready {
                 let level: ActivityLevel = state == .failed || state == .rejected || state == .empty ? .warning : .info
                 let message = state.message(for: selection.browser)
@@ -836,6 +844,21 @@ final class DownloadModel: ObservableObject {
             }
             return
         }
+        if case .anonymousFallback(let reason, let state) = event {
+            // Completion carries the reason as well, preserving a useful log even
+            // when a burst of progress displaced the initial bounded-stream event.
+            let startedAt = before.diagnostics?.startedAt ?? before.createdAt
+            for message in [reason.message, AnonymousFallbackState.started.message, state.message] {
+                if !logs.contains(where: { $0.itemID == id && $0.date >= startedAt && $0.diagnostic == message }) {
+                    record(state == .succeeded && message == state.message ? .success : .warning, message, item: before)
+                }
+            }
+            if state == .started {
+                update(id) { $0.progress = nil; $0.transferSample = nil; $0.bytesPerSecond = nil; $0.state = .metadata }
+            }
+            schedulePersistence()
+            return
+        }
         update(id) { item in
             item.diagnostics?.receive(event)
             switch event {
@@ -843,7 +866,7 @@ final class DownloadModel: ObservableObject {
             case .metadata: item.state = .metadata
             case .resolved(let metadata): item.metadata = metadata; item.state = .downloading
             case .document(let title): item.documentTitle = title
-            case .browserAuthentication: break
+            case .browserAuthentication, .anonymousFallback: break
             case .checkingLocal: item.state = .checkingLocal
             case .progress(let progress):
                 let now = Date()

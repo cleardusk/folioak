@@ -65,6 +65,8 @@ extension CoreTests {
         let image = root.appendingPathComponent("photo.png")
         try bitmap.representation(using: .png, properties: [:])!.write(to: image)
         try await browserAuthenticationProviderTests(root: root, image: image)
+        try await anonymousFallbackTests(root: root, image: image)
+        try await authenticationInterfaceTests()
         try await githubFileTests(root: root, image: image)
         try await directMediaRegressionTests(root: root, image: image)
         let folder = root.appendingPathComponent("media-output")

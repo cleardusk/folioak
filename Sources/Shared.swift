@@ -152,7 +152,7 @@ struct TaskDiagnostics: Codable {
             if lastRetry != attempt { retries += 1; lastRetry = attempt }
             next = .waiting
         case .validating: next = .validation
-        case .document, .browserAuthentication: return
+        case .document, .browserAuthentication, .anonymousFallback: return
         }
         guard next != phase else { return }
         accrue(now); phase = next

@@ -71,6 +71,7 @@ struct DownloaderView: View {
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     @WorkspaceViewState var page: WorkspacePage = .downloads
+    @WorkspaceViewState var logItem: DownloadItem?
     var showSettings: () -> Void = {}
     var endTextEditing: () -> Void = {}
     @WorkspaceViewState private var collapsed = false
@@ -122,8 +123,8 @@ struct DownloaderView: View {
             }
         }
     }
-    private var visibleLogs: [ActivityEntry] {
-        model.logs.filter { (logLevel == nil || $0.level == logLevel) && (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || $0.localizedMessage.localizedCaseInsensitiveContains(query) || ($0.subject?.localizedCaseInsensitiveContains(query) ?? false)) }
+    var visibleLogs: [ActivityEntry] {
+        model.logs.filter { (logItem == nil || $0.itemID == logItem?.id) && (logLevel == nil || $0.level == logLevel) && (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || $0.localizedMessage.localizedCaseInsensitiveContains(query) || ($0.subject?.localizedCaseInsensitiveContains(query) ?? false)) }
     }
 
     var body: some View {
@@ -161,6 +162,7 @@ struct DownloaderView: View {
         }
         .onChange(of: page) { _ in
             query = ""; searchExpanded = false; searchFocused = false; selectedID = nil; listFocus = nil
+            if page != .logs { logItem = nil }
             if page != .downloads { inputFocused = false; endTextEditing() }
             if focusListOnArrival { focusListOnArrival = false; focusList() }
         }
@@ -234,7 +236,7 @@ struct DownloaderView: View {
                 }
             }
             Spacer()
-            Button { page = .logs } label: {
+            Button { logItem = nil; page = .logs } label: {
                 HStack(spacing: WorkspaceMetrics.Space.regular) {
                     Image(systemName: WorkspacePage.logs.icon).font(.system(size: 19)).frame(width: 24)
                     Text(L("日志")).font(.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
@@ -318,7 +320,7 @@ struct DownloaderView: View {
                 Button(L("复制未完成链接"), action: model.copyUnfinished)
             }
             Divider()
-            Button(L("查看日志")) { page = .logs }
+            Button(L("查看日志")) { logItem = nil; page = .logs }
             Divider()
             Button(L("清空下载记录…"), role: .destructive) { confirmingClearDownloads = true }
                 .disabled(!model.canClearDownloadRecords)
@@ -494,7 +496,7 @@ struct DownloaderView: View {
                                     LibraryRow(paper: paper, model: model, selected: selectedID == item.id, selectionActive: listSelectionActive, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                         .id(item.id)
                                 } else {
-                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
+                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selectedID == item.id, selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectedID = item.id; inputFocused = false; listFocus = UUID() })
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectedID = item.id; inputFocused = false; listFocus = UUID() }
                                     .id(item.id)
@@ -552,7 +554,18 @@ struct DownloaderView: View {
     }
 
     private var logContent: some View {
-        LogContent(entries: visibleLogs, hasLogs: !model.logs.isEmpty, query: query, level: $logLevel, palette: palette, dismissEditing: dismissEditing)
+        VStack(alignment: .leading, spacing: 12) {
+            if let logItem {
+                HStack(spacing: 8) {
+                    Text(L("任务日志")).font(.caption.weight(.medium))
+                    Text(logItem.title).font(.caption).lineLimit(1).truncationMode(.middle).foregroundStyle(secondary)
+                    Spacer(minLength: 0)
+                    Button(L("全部日志")) { self.logItem = nil }.controlSize(.small)
+                        .accessibilityIdentifier("clear-task-log-filter")
+                }
+            }
+            LogContent(entries: visibleLogs, hasLogs: !model.logs.isEmpty, query: query, level: $logLevel, palette: palette, dismissEditing: dismissEditing)
+        }
     }
 
     private var footer: some View {
@@ -651,10 +664,12 @@ struct DownloadRow: View {
     let selected: Bool
     let selectionActive: Bool
     let authenticate: () -> Void
+    let showLogs: () -> Void
     let select: () -> Void
 
-    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, selectionActive: Bool = true, authenticate: @escaping () -> Void = {}, select: @escaping () -> Void = {}) {
+    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, selectionActive: Bool = true, authenticate: @escaping () -> Void = {}, showLogs: @escaping () -> Void = {}, select: @escaping () -> Void = {}) {
         self.authenticate = authenticate
+        self.showLogs = showLogs
         self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
         trashFilesWhenClearingRecord = model.trashFilesWhenClearingRecord
         busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
@@ -747,6 +762,11 @@ struct DownloadRow: View {
             Divider()
         }
         Button(L("详情…")) { select(); model.diagnosticItem = item }.help(L("选中文件后按 \(model.shortcuts[.details].label)"))
+        Button(L("查看任务日志"), action: showLogs)
+        if hasAuthenticationIssue && model.browserAuthentication.selection != nil {
+            Button(L("在认证浏览器中打开")) { model.openAuthenticationSource(item) }
+                .help(L("多账号时，请确认打开的是所选配置。"))
+        }
         if item.canRetry && item.savedURL != nil {
             Button(L("重新下载缺失文件"), action: retry).disabled(busy)
         }

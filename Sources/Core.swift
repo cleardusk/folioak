@@ -200,6 +200,7 @@ enum DownloadEvent: Sendable {
     case resolved(PaperMetadata)
     case document(String)
     case browserAuthentication(BrowserAuthenticationSelection, BrowserAuthenticationReadState)
+    case anonymousFallback(BrowserAuthenticationIssue, AnonymousFallbackState)
     case checkingLocal
     case progress(DownloadProgress)
     case retry(Int)
@@ -565,13 +566,16 @@ actor DownloadEngine {
     private let cooldownPreferences: UserDefaults?
     private let coordinator: RequestCoordinator?
     private let mediaAuthentication: @Sendable () async throws -> BrowserAuthenticationSelection?
+    private let mediaDownload: MediaDownloader.Download
     private var lease: RequestLease?
     private var lastRequest: ContinuousClock.Instant?
     private var cooldownUntil: ContinuousClock.Instant?
     private var rateLimitStrikes = 0
     private static let cooldownKey = "requestCooldownUntil"
 
-    init(transport: HTTPTransport = URLSessionTransport(), pdfTransport: HTTPTransport? = nil, requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil, mediaAuthentication: @escaping @Sendable () async throws -> BrowserAuthenticationSelection? = { nil }) {
+    init(transport: HTTPTransport = URLSessionTransport(), pdfTransport: HTTPTransport? = nil, requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil, mediaAuthentication: @escaping @Sendable () async throws -> BrowserAuthenticationSelection? = { nil }, mediaDownload: @escaping MediaDownloader.Download = { url, directory, format, organize, authentication, event in
+        try await MediaDownloader.download(url, to: directory, format: format, organizeByType: organize, authentication: authentication, event: event)
+    }) {
         self.transport = transport
         self.pdfTransport = pdfTransport
         self.requestInterval = requestInterval
@@ -580,6 +584,7 @@ actor DownloadEngine {
         self.cooldownPreferences = cooldownPreferences
         self.coordinator = coordinator
         self.mediaAuthentication = mediaAuthentication
+        self.mediaDownload = mediaDownload
         if let date = cooldownPreferences?.object(forKey: Self.cooldownKey) as? Date {
             let remaining = date.timeIntervalSinceNow
             if remaining.isFinite, remaining > 0, remaining <= ResourceLimits.retryAfterSeconds {
@@ -790,8 +795,11 @@ actor DownloadEngine {
             let paper = try await download(reference, to: destination, naming: naming, event: event)
             return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
         case .media(let url):
+            guard MediaDownloader.accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
             try DownloadFolder.prepareRoot(directory)
-            return try await MediaDownloader.download(url, to: directory, format: mediaFormat, organizeByType: organizeByType, authentication: try await mediaAuthentication(), event: event)
+            return try await MediaDownloader.withAuthenticationFallback(authentication: mediaAuthentication, event: event) { authentication in
+                try await self.mediaDownload(url, directory, mediaFormat, organizeByType, authentication, event)
+            }
         case .pdf(let url), .file(let url):
             guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
             try DownloadFolder.prepareRoot(directory)

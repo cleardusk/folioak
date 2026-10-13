@@ -63,7 +63,7 @@ enum UpdateCheckError: Error {
         case .invalidRelease: return L("发布信息不完整或格式有误，请稍后重试。")
         case .invalidResponse: return L("更新服务返回了无效响应，请稍后重试。")
         case .http(let code): return String(format: L("更新服务暂不可用（HTTP %@），请稍后重试。"), String(code))
-        case .rateLimited(let date): return String(format: L("检查过于频繁，请在 %@ 后重试。"), L10n.date(date))
+        case .rateLimited(let date): return String(format: L("GitHub 更新接口暂时限流，同一网络可能共用请求额度。可在 %@ 后重试，或现在打开发布页查看。"), L10n.date(date))
         }
     }
 }
@@ -71,6 +71,7 @@ enum UpdateCheckError: Error {
 // Only public release metadata is fetched. Never use browser credentials or shared cookies.
 final class UpdateHTTPClient: NSObject, URLSessionTaskDelegate {
     static let endpoint = URL(string: "https://api.github.com/repos/cleardusk/folioak/releases/latest")!
+    static let releasePage = URL(string: "https://github.com/cleardusk/folioak/releases/latest")!
     static let maximumBytes = 512 * 1024
 
     static func fetch(_ request: URLRequest, configuration: URLSessionConfiguration = .ephemeral) async throws -> (Data, HTTPURLResponse) {
@@ -144,14 +145,17 @@ final class UpdateChecker: ObservableObject {
     func check(manual: Bool = false) async {
         if isChecking { manualRequested = manualRequested || manual; return }
         let date = now()
+        let retry = preferences.object(forKey: "updates.retryAfter") as? Date
         if !manual {
             guard automaticallyChecks, notice == nil else { return }
-            if let next = preferences.object(forKey: "updates.nextCheck") as? Date, date < next { return }
+            // A persisted server cooldown also overrides 2.6.0's longer backoff.
+            if retry == nil, let next = preferences.object(forKey: "updates.nextCheck") as? Date, date < next { return }
         }
-        if let retry = preferences.object(forKey: "updates.retryAfter") as? Date, date < retry {
+        if let retry, date < retry {
             if manual { notice = UpdateNotice(result: .failed(UpdateCheckError.rateLimited(retry).message), manual: true) }
             return
         }
+        preferences.removeObject(forKey: "updates.retryAfter")
         isChecking = true
         manualRequested = manual
         notice = nil
@@ -200,10 +204,16 @@ final class UpdateChecker: ObservableObject {
             }
         } catch {
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
-            let failures = min(max(preferences.integer(forKey: "updates.failures"), 0), 3) + 1
-            preferences.set(failures, forKey: "updates.failures")
-            let delay = Self.interval * min(pow(2, Double(failures - 1)), 7)
-            preferences.set(date.addingTimeInterval(delay), forKey: "updates.nextCheck")
+            if case UpdateCheckError.rateLimited(let retry) = error {
+                // A shared-IP limit is not a repeated service failure. Resume at
+                // the server deadline instead of postponing checks for days.
+                preferences.set(retry, forKey: "updates.nextCheck")
+            } else {
+                let failures = min(max(preferences.integer(forKey: "updates.failures"), 0), 3) + 1
+                preferences.set(failures, forKey: "updates.failures")
+                let delay = Self.interval * min(pow(2, Double(failures - 1)), 7)
+                preferences.set(date.addingTimeInterval(delay), forKey: "updates.nextCheck")
+            }
             if manualRequested {
                 let message = (error as? UpdateCheckError)?.message ?? L("无法连接更新服务，请检查网络后重试。")
                 notice = UpdateNotice(result: .failed(message), manual: true)
@@ -237,12 +247,21 @@ final class UpdateChecker: ObservableObject {
 enum UpdatePresentation {
     static func respond(to notice: UpdateNotice, response: NSApplication.ModalResponse,
                         checker: UpdateChecker, open: (URL) -> Bool) -> NSAlert? {
-        guard case .available(let release) = notice.result else { checker.dismiss(); return nil }
-        checker.dismiss(skip: response == .alertThirdButtonReturn ? release.version : nil)
-        guard response == .alertFirstButtonReturn, !open(release.pageURL) else { return nil }
+        let target: URL
+        switch notice.result {
+        case .available(let release):
+            checker.dismiss(skip: response == .alertThirdButtonReturn ? release.version : nil)
+            target = release.pageURL
+        case .failed:
+            checker.dismiss()
+            target = UpdateHTTPClient.releasePage
+        case .current:
+            checker.dismiss(); return nil
+        }
+        guard response == .alertFirstButtonReturn, !open(target) else { return nil }
         let failure = NSAlert()
         failure.messageText = L("无法打开下载页")
-        failure.informativeText = release.pageURL.absoluteString
+        failure.informativeText = target.absoluteString
         failure.addButton(withTitle: L("好"))
         return failure
     }
@@ -265,7 +284,8 @@ enum UpdatePresentation {
             alert.alertStyle = .warning
             alert.messageText = L("无法检查更新")
             alert.informativeText = message
-            alert.addButton(withTitle: L("好"))
+            alert.addButton(withTitle: L("打开发布页"))
+            alert.addButton(withTitle: L("稍后"))
         }
         return alert
     }
