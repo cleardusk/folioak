@@ -222,10 +222,10 @@ struct DownloaderView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 0) {
+            HStack(spacing: collapsed ? 0 : 8) {
                 Button {
                     withAnimation(reduceMotion ? nil : .timingCurve(0.2, 0, 0, 1, duration: 0.25)) { collapsed.toggle() }
-                } label: { Image(systemName: "sidebar.left").font(.system(size: 18)).frame(width: 50, height: 42).contentShape(Rectangle()) }
+                } label: { SidebarToggleGlyph(expanded: !collapsed).frame(width: 50, height: 42).contentShape(Rectangle()) }
                     .buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary)
                     .help(collapsed ? L("展开侧栏") : L("收起侧栏")).accessibilityLabel(collapsed ? L("展开侧栏") : L("收起侧栏"))
                 Text("Folioak").font(.system(size: 14, weight: .semibold))

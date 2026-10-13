@@ -1,5 +1,27 @@
 import SwiftUI
 
+struct SidebarToggleGlyph: View {
+    let expanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        Image(systemName: "sidebar.left").font(.system(size: 18))
+            .modifier(SidebarToggleFeedback(phase: reduceMotion ? 0 : expanded ? 1 : 0))
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: expanded)
+            .accessibilityHidden(true)
+    }
+}
+
+// Both resting states keep the native symbol at its original size. Interpolating
+// the phase adds one quiet pulse in either direction, including rapid reversals.
+private struct SidebarToggleFeedback: AnimatableModifier {
+    var phase: Double
+    var animatableData: Double { get { phase } set { phase = newValue } }
+    func body(content: Content) -> some View {
+        let pulse = sin(.pi * min(1, max(0, phase)))
+        content.scaleEffect(1 - 0.07 * pulse).opacity(1 - 0.08 * pulse)
+    }
+}
+
 // FlClash's two-edge indicator timing, expressed independently for SwiftUI.
 // Using the current geometry as the origin keeps quick reversals continuous.
 struct SelectionIndicatorMotion {
