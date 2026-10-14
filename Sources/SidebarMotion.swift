@@ -4,21 +4,28 @@ struct SidebarToggleGlyph: View {
     let expanded: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        Image(systemName: "sidebar.left").font(.system(size: 18))
-            .modifier(SidebarToggleFeedback(phase: reduceMotion ? 0 : expanded ? 1 : 0))
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: expanded)
+        SidebarToggleOutline(expansion: expanded ? 1 : 0)
+            .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+            .frame(width: 22, height: 20)
+            .animation(reduceMotion ? nil : .timingCurve(0.2, 0, 0, 1, duration: 0.25), value: expanded)
             .accessibilityHidden(true)
     }
 }
 
-// Both resting states keep the native symbol at its original size. Interpolating
-// the phase adds one quiet pulse in either direction, including rapid reversals.
-private struct SidebarToggleFeedback: AnimatableModifier {
-    var phase: Double
-    var animatableData: Double { get { phase } set { phase = newValue } }
-    func body(content: Content) -> some View {
-        let pulse = sin(.pi * min(1, max(0, phase)))
-        content.scaleEffect(1 - 0.07 * pulse).opacity(1 - 0.08 * pulse)
+// Keep the window outline still while the sidebar divider retracts into a short
+// inset line. One interpolated path also keeps interrupted transitions continuous.
+private struct SidebarToggleOutline: Shape {
+    var expansion: CGFloat
+    var animatableData: CGFloat { get { expansion } set { expansion = newValue } }
+    func path(in rect: CGRect) -> Path {
+        let bounds = rect.insetBy(dx: 1, dy: 1)
+        let progress = min(1, max(0, expansion))
+        let x = bounds.minX + bounds.width * (0.23 + 0.10 * progress)
+        let inset = bounds.height * 0.22 * (1 - progress)
+        var path = Path(roundedRect: bounds, cornerRadius: 4.5)
+        path.move(to: CGPoint(x: x, y: bounds.minY + inset))
+        path.addLine(to: CGPoint(x: x, y: bounds.maxY - inset))
+        return path
     }
 }
 
