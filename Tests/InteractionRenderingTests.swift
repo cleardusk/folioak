@@ -118,6 +118,19 @@ extension CoreTests {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
             }
+            func openSearch() async throws -> NSTextView {
+                model.searchRequest = UUID()
+                // Mounting the SwiftUI field and assigning its native editor are
+                // separate updates. Wait for ownership, without forcing focus
+                // or issuing another request, before exercising dismissal.
+                for _ in 0..<20 {
+                    await settle()
+                    if let search = field(view), search.window === window,
+                       let editor = search.currentEditor() as? NSTextView,
+                       window.firstResponder === editor { return editor }
+                }
+                throw TestFailure.failed("\(page): search opens focused (field: \(field(view) as Any), editor: \(field(view)?.currentEditor() as Any), responder: \(window.firstResponder as Any))")
+            }
             func click(_ point: NSPoint, in target: NSView) async {
                 let location = target.convert(point, to: nil)
                 for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -151,21 +164,18 @@ extension CoreTests {
                 try expect(window.firstResponder is LinkTextView, "input shortcut still focuses after changing pages")
                 await blank()
             }
-            model.searchRequest = UUID(); await settle()
-            try expect(field(view)?.currentEditor() === window.firstResponder, "\(page): search opens focused (field: \(field(view) as Any), responder: \(window.firstResponder as Any))")
+            _ = try await openSearch()
             await blank()
             try expect(field(view) == nil, "\(page): empty search collapses on blank canvas")
-            model.searchRequest = UUID(); await settle()
+            _ = try await openSearch()
             await fromTop(90, 500)
             try expect(field(view) == nil, "\(page): sidebar blank collapses empty search")
-            model.searchRequest = UUID(); await settle()
-            guard let editor = field(view)?.currentEditor() as? NSTextView else { throw TestFailure.failed("search reopens") }
+            let editor = try await openSearch()
             editor.insertText("no-matching-result", replacementRange: editor.selectedRange()); await settle()
             await blank()
             try expect(field(view)?.stringValue == "no-matching-result" && field(view)?.currentEditor() == nil,
                        "\(page): blank no-results view ends editing but preserves the filter")
-            model.searchRequest = UUID(); await settle()
-            guard let reopened = field(view)?.currentEditor() as? NSTextView else { throw TestFailure.failed("filtered search refocuses") }
+            let reopened = try await openSearch()
             reopened.selectAll(nil); reopened.insertText("", replacementRange: reopened.selectedRange()); await settle()
             await blank()
             try expect(field(view) == nil, "\(page): cleared search collapses again")
