@@ -109,6 +109,10 @@ struct CoreTests {
         defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--row-clicks-only") {
+                try await fileRowDoubleClickTests()
+                return
+            }
             if CommandLine.arguments.contains("--quick-only") {
                 try await quickDownloadTests()
                 try await quickDownloadUITests()
