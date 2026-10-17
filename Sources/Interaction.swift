@@ -50,7 +50,7 @@ struct FileRowClickRegion: NSViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
             #if TESTING
             let point = convert(event.locationInWindow, from: nil)
-            clickTrace?("attempt type=\(event.type.rawValue) clicks=\(event.clickCount) point=\(point) allowed=\(allowsClick(at: point)) window=\(event.windowNumber == window?.windowNumber)")
+            clickTrace?("attempt type=\(event.type.rawValue) clicks=\(event.clickCount) time=\(event.timestamp) point=\(point) allowed=\(allowsClick(at: point)) window=\(event.windowNumber == window?.windowNumber)")
             #endif
             guard event.windowNumber == window?.windowNumber,
                   event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty else { return false }

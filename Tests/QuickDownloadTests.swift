@@ -279,11 +279,14 @@ extension CoreTests {
                 result.clickTrace = { clickTrace.append($0) }
                 let resultRect = result.convert(result.bounds, to: host)
                 var resultEventNumber = 0
+                var resultEventTimes: [TimeInterval] = []
                 func resultClick(_ point: NSPoint, count: Int = 1, flags: NSEvent.ModifierFlags = []) async throws {
                     for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                         resultEventNumber += 1
+                        let timestamp = ProcessInfo.processInfo.systemUptime
+                        resultEventTimes.append(timestamp)
                         NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: host.convert(point, to: nil), modifierFlags: flags,
-                            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                            timestamp: timestamp, windowNumber: window.windowNumber, context: nil,
                             eventNumber: resultEventNumber, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!)
                         try await Task.sleep(nanoseconds: 15_000_000)
                     }
@@ -295,7 +298,14 @@ extension CoreTests {
                 try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9))
                 try expect(openedFiles.count == openCount, "quick result single click never opens a file")
                 for (index, point) in [titlePoint, pathPoint].enumerated() {
+                    resultEventTimes.removeAll(); clickTrace.removeAll()
                     try await resultClick(point); try await resultClick(point, count: 2)
+                    let offsets = resultEventTimes.map { $0 - resultEventTimes[0] }
+                    let downInterval = resultEventTimes[2] - resultEventTimes[0]
+                    print("QUICK RESULT TIMING", language.rawValue, scheme, index,
+                        "offsets", offsets, "downInterval", downInterval, "limit", NSEvent.doubleClickInterval)
+                    try expect(downInterval < NSEvent.doubleClickInterval,
+                        "quick result injected double click stays within the system double-click interval")
                     let expected = openCount + index + 1
                     // AppKit dispatches recognizer actions asynchronously. Wait
                     // for this one gesture, then let duplicate callbacks settle.

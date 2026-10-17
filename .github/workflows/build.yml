@@ -66,6 +66,15 @@ jobs:
         run: python3 Tools/prepare-media.py
       - name: Run offline regression and resource tests
         run: ./test.command --stress
+      - name: Check native interaction stability
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pass in 1 2 3; do
+            log="$RUNNER_TEMP/folioak-native-$pass.log"
+            ./build/CoreTests --quick-only | tee "$log"
+            grep -Fxq 'PASS core test suite completed' "$log"
+          done
       - name: Package app
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
