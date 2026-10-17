@@ -55,6 +55,10 @@ private final class QuickTestWindow: NSPanel {
                 if queued.type == event.type && queued.windowNumber == event.windowNumber &&
                    queued.eventNumber == event.eventNumber && abs(queued.timestamp - event.timestamp) < 0.000001 {
                     try expect(dispatchedMouseEvents[event.eventNumber] == queued.timestamp, "queued mouse event completes native dispatch")
+                    // Enter AppKit's next-event boundary after dispatch, including
+                    // when this is the last event before an async assertion wait.
+                    // Peeking leaves any unrelated queued input untouched.
+                    _ = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp], until: Date(), inMode: .default, dequeue: false)
                     return
                 }
                 // Other windows' queued events are dispatched once, never discarded.
@@ -724,16 +728,33 @@ extension CoreTests {
             defer { window.close() }
             try await Task.sleep(nanoseconds: 100_000_000)
             var eventNumber = 0
+            var eventTimes: [TimeInterval] = [], rowTrace: [String] = []
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            for region in descendants(host).compactMap({ $0 as? FileRowClickRegion.Region }) where !region.isControls {
+                region.clickTrace = { rowTrace.append($0) }
+            }
             func click(_ x: CGFloat, _ y: CGFloat, count: Int = 1, modifiers: NSEvent.ModifierFlags = []) async throws {
                 let location = host.convert(NSPoint(x: x, y: host.isFlipped ? y : host.bounds.height - y), to: nil)
                 for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                     eventNumber += 1
+                    let timestamp = ProcessInfo.processInfo.systemUptime
+                    eventTimes.append(timestamp)
                     let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
-                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        timestamp: timestamp, windowNumber: window.windowNumber,
                         context: nil, eventNumber: eventNumber, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!
                     try await window.dispatchQueuedMouseEvent(event)
-                    try await Task.sleep(nanoseconds: 15_000_000)
                 }
+            }
+            func doubleClick(_ x: CGFloat, _ y: CGFloat, modifiers: NSEvent.ModifierFlags = []) async throws {
+                // Separate user gestures, but do not suspend between their four
+                // native events: scheduler latency must not invalidate the input.
+                try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9))
+                eventTimes.removeAll(); rowTrace.removeAll()
+                try await click(x, y, modifiers: modifiers)
+                try await click(x, y, count: 2, modifiers: modifiers)
+                let interval = eventTimes[2] - eventTimes[0]
+                print("ROW DOUBLE TIMING", page.rawValue, x, y, "interval", interval, "limit", NSEvent.doubleClickInterval)
+                try expect(interval < NSEvent.doubleClickInterval, "row double click input stays within the system interval")
             }
             try await click(130, 24)
             try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9))
@@ -742,7 +763,7 @@ extension CoreTests {
                     "hit", String(describing: host.hitTest(NSPoint(x: 130, y: host.isFlipped ? 24 : host.bounds.height - 24))))
             }
             try expect(opened == 0 && selected > 0, "single click selects without opening on \(page.rawValue)")
-            try await click(130, 24); try await click(130, 24, count: 2)
+            try await doubleClick(130, 24)
             for _ in 0..<20 {
                 if opened > 0 { break }
                 try await Task.sleep(nanoseconds: 25_000_000)
@@ -751,13 +772,13 @@ extension CoreTests {
             if opened != 1 {
                 func children(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(children) }
                 print("DOUBLE DIAGNOSTIC", page.rawValue, opened, host.gestureRecognizers.map { String(describing: type(of: $0)) + ":" + String($0.state.rawValue) },
-                    children(host).compactMap { $0 as? FileRowClickRegion.Region }.map { "\($0.isControls) bounds=\($0.bounds) visible=\($0.visibleRect) frame=\($0.convert($0.bounds, to: host))" })
+                    children(host).compactMap { $0 as? FileRowClickRegion.Region }.map { "\($0.isControls) bounds=\($0.bounds) visible=\($0.visibleRect) frame=\($0.convert($0.bounds, to: host))" }, "trace", rowTrace)
             }
             try expect(opened == 1, "native double click opens exactly once on \(page.rawValue)")
-            try await click(300, 3); try await click(300, 3, count: 2)
+            try await doubleClick(300, 3)
             try await Task.sleep(nanoseconds: 50_000_000)
             try expect(opened == 2, "row padding also supports double click on \(page.rawValue)")
-            try await click(130, 24, modifiers: .command); try await click(130, 24, count: 2, modifiers: .command)
+            try await doubleClick(130, 24, modifiers: .command)
             try await Task.sleep(nanoseconds: 50_000_000)
             try expect(opened == 2, "modified selection never opens files on \(page.rawValue)")
             let recognizers = host.gestureRecognizers.compactMap { $0 as? NSClickGestureRecognizer }.filter { $0.numberOfClicksRequired == 2 }
@@ -765,20 +786,20 @@ extension CoreTests {
             try expect(!recognizers[0].delaysPrimaryMouseButtonEvents, "double-click recognizer does not delay single-click events")
             recognizers.forEach { $0.isEnabled = false }
             let beforeBaseline = opened
-            try await click(530, 25); try await click(530, 25, count: 2)
+            try await doubleClick(530, 25)
             try await Task.sleep(nanoseconds: 50_000_000)
             let baseline = opened - beforeBaseline
             try expect(baseline > 0, "button baseline hits the open action")
             recognizers.forEach { $0.isEnabled = true }
             let beforeButton = opened
-            try await click(530, 25); try await click(530, 25, count: 2)
+            try await doubleClick(530, 25)
             try await Task.sleep(nanoseconds: 50_000_000)
             try expect(opened - beforeButton == baseline, "action buttons behave identically with row double-click enabled on \(page.rawValue)")
             let beforeRemoval = opened
             if page == .library { _ = (await model.setLibraryRemoved([model.papers[0].id], in: .documents, removed: true)) }
             else if page == .media { _ = (await model.setLibraryRemoved([item.id], in: .media, removed: true)) }
             else { model.clearDownloadRecord(item.id) }
-            try await click(130, 24); try await click(130, 24, count: 2)
+            try await doubleClick(130, 24)
             try await Task.sleep(nanoseconds: 50_000_000)
             try expect(opened == beforeRemoval, "stale fading rows cannot open removed records")
             window.contentView = nil
