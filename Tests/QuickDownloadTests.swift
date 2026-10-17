@@ -32,8 +32,7 @@ private final class QuickTestHost<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-private final class QuickTestWindow: NSWindow {
-    override var isKeyWindow: Bool { true }
+private final class QuickTestWindow: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
@@ -204,14 +203,25 @@ extension CoreTests {
                 let host = QuickTestHost(rootView: QuickDownloadView(state: state, model: model,
                     openWindow: {}, openSettings: {}, quit: {}, close: { closes += 1 }).environment(\.colorScheme, scheme))
                 let size = host.fittingSize
-                let window = QuickTestWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
-                window.isReleasedWhenClosed = false; window.contentView = host; window.makeKeyAndOrderFront(nil)
+                let window = QuickTestWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false; window.hidesOnDeactivate = false
+                window.contentView = host; window.makeKeyAndOrderFront(nil)
                 state.focusRequest = UUID()
-                try await Task.sleep(nanoseconds: 100_000_000)
-                host.layoutSubtreeIfNeeded()
                 func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-                guard let editor = descendants(host).compactMap({ $0 as? QuickLinkEditor.Editor }).first else { throw TestFailure.failed("quick editor mounted") }
-                try expect(window.firstResponder === editor, "quick editor receives focus in bilingual light/dark windows")
+                var focusedEditor: QuickLinkEditor.Editor?
+                for _ in 0..<40 {
+                    try await Task.sleep(nanoseconds: 25_000_000)
+                    host.layoutSubtreeIfNeeded()
+                    if NSApp.keyWindow === window,
+                       let mounted = descendants(host).compactMap({ $0 as? QuickLinkEditor.Editor }).first,
+                       window.firstResponder === mounted {
+                        focusedEditor = mounted
+                        break
+                    }
+                }
+                guard let editor = focusedEditor else {
+                    throw TestFailure.failed("quick editor receives focus: language=\(language.rawValue), scheme=\(scheme), realKey=\(NSApp.keyWindow === window), responder=\(String(describing: window.firstResponder))")
+                }
                 editor.insertText("invalid-link", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
                 try expect(editor.undoManager?.canUndo == true, "native typing creates a real undo action before submission")
                 try await Task.sleep(nanoseconds: 30_000_000)
@@ -612,7 +622,7 @@ extension CoreTests {
                     .onTapGesture { selected += 1 })
             }
             let host = QuickTestHost(rootView: row.frame(width: 600).background(Color.white))
-            let window = QuickTestWindow(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
+            let window = QuickTestWindow(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = host; window.makeKeyAndOrderFront(nil)
             defer { window.close() }
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -707,7 +717,7 @@ extension CoreTests {
             model.history = records; model.mediaLibrary = records
             let host = QuickTestHost(rootView: DownloaderView(model: model, page: page)
                 .environment(\.colorScheme, .light))
-            let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+            let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 600), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
             defer { window.close() }
             try await Task.sleep(nanoseconds: 150_000_000)
