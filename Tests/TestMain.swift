@@ -109,6 +109,11 @@ struct CoreTests {
         defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--quick-only") {
+                try await quickDownloadTests()
+                try await quickDownloadUITests()
+                return
+            }
             if CommandLine.arguments.contains("--library-management-only") {
                 let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-library-management-" + UUID().uuidString)
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -188,6 +193,8 @@ struct CoreTests {
             try await completedInputTests(root: root, pdf: pdf)
             try await restoreVersionTests(root: root, pdf: pdf)
             try await workspaceTests(root: root, pdf: pdf)
+            try await quickDownloadTests()
+            try await quickDownloadUITests()
             try await backgroundPersistenceTests(root: root, pdf: pdf)
             try await messagePersistenceTests(root: root, pdf: pdf)
             try await clearDownloadRecordsTests(root: root, pdf: pdf)

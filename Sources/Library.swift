@@ -271,6 +271,7 @@ struct LibraryRow: View {
     let selected: Bool
     var selectionActive = true
     let select: () -> Void
+    @StateObject private var clickTarget = FileRowClickTarget()
     @Environment(\.colorScheme) private var scheme
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.displayScale) private var displayScale
@@ -306,6 +307,7 @@ struct LibraryRow: View {
                 }.font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
                 if !paper.tags.isEmpty { Text(paper.tags.joined(separator: " · ")).font(.system(size: 11)).lineLimit(1).foregroundStyle(ThemePalette.color(palette.secondary)) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
+               .contentShape(Rectangle())
             HStack(spacing: WorkspaceMetrics.Space.small) {
                 if paper.removed { Button(L("恢复")) { _ = model.setLibraryRemoved([paper.id], in: .documents, removed: false) }
                     .buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.documents)) }
@@ -313,7 +315,7 @@ struct LibraryRow: View {
                 else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(RowActionStyle(palette: palette)) }
                 Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("\(paper.title)的更多操作"))
-            }.padding(.top, 1)
+            }.padding(.top, 1).background(FileRowClickRegion(target: clickTarget, controls: true))
         }.padding(.horizontal, 10).padding(.vertical, WorkspaceMetrics.Space.regular)
             .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
@@ -321,7 +323,13 @@ struct LibraryRow: View {
                 Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
                     .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10)
             }
-            .contentShape(Rectangle()).onTapGesture(perform: select).contextMenu { actions }
+            .contentShape(Rectangle())
+            .background(FileRowClickRegion(target: clickTarget) {
+                if let current = model.papers.first(where: { $0.id == paper.id }), !current.removed { model.openPaper(current) }
+            })
+            .onAppear { clickTarget.setActive(true) }
+            .onDisappear { clickTarget.setActive(false) }
+            .onTapGesture(perform: select).contextMenu { actions }
             .accessibilityElement(children: .contain).accessibilityAddTraits(selected ? .isSelected : [])
     }
     @ViewBuilder private var actions: some View {

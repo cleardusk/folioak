@@ -17,7 +17,7 @@ mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 \
   -framework AppKit -framework SwiftUI -framework PDFKit -framework QuickLookThumbnailing \
-  Sources/Messages.swift Sources/BrowserAuthentication.swift Sources/DownloadError.swift Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Douyin.swift Sources/Shared.swift Sources/Localization.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspacePersistence.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/MediaThumbnail.swift Sources/SidebarMotion.swift Sources/BrowserAuthenticationSettings.swift Sources/Updates.swift Sources/App.swift \
+  Sources/Messages.swift Sources/BrowserAuthentication.swift Sources/DownloadError.swift Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Douyin.swift Sources/Shared.swift Sources/Localization.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspacePersistence.swift Sources/Library.swift Sources/Shortcuts.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/MediaThumbnail.swift Sources/SidebarMotion.swift Sources/BrowserAuthenticationSettings.swift Sources/Updates.swift Sources/QuickDownload.swift Sources/App.swift \
   -o "$staged_app/Contents/MacOS/FolioakApp"
 strip "$staged_app/Contents/MacOS/FolioakApp"
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"

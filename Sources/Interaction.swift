@@ -1,6 +1,71 @@
 import AppKit
 import SwiftUI
 
+// Observe double clicks without delaying single-click selection. The native
+// recognizer shares the hosting view with SwiftUI and excludes actual action
+// bounds, so buttons and menus keep their own event handling.
+@MainActor final class FileRowClickTarget: ObservableObject {
+    weak var controls: NSView?
+    weak var row: FileRowClickRegion.Region?
+    private(set) var active = false
+    func setActive(_ value: Bool) { active = value; row?.configure() }
+}
+
+struct FileRowClickRegion: NSViewRepresentable {
+    let target: FileRowClickTarget
+    var controls = false
+    var open: () -> Void = {}
+    func makeNSView(context: Context) -> Region { Region() }
+    func updateNSView(_ view: Region, context: Context) {
+        view.target = target; view.open = open
+        view.isControls = controls
+        if controls { target.controls = view }
+        else { target.row = view }
+        view.configure()
+    }
+    final class Region: NSView, NSGestureRecognizerDelegate {
+        weak var target: FileRowClickTarget?
+        var open: () -> Void = {}
+        var isControls = false
+        private var click: NSClickGestureRecognizer?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); configure() }
+        func configure() {
+            if isControls || window == nil || target?.active != true {
+                if let click { click.view?.removeGestureRecognizer(click); self.click = nil }
+                return
+            }
+            guard let host = window?.contentView else { return }
+            if click?.view === host { return }
+            if let click { click.view?.removeGestureRecognizer(click) }
+            let recognizer = NSClickGestureRecognizer(target: self, action: #selector(openFile))
+            recognizer.numberOfClicksRequired = 2
+            recognizer.delaysPrimaryMouseButtonEvents = false
+            recognizer.delegate = self
+            host.addGestureRecognizer(recognizer); click = recognizer
+        }
+        func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+            guard event.windowNumber == window?.windowNumber,
+                  event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty else { return false }
+            return allowsClick(at: convert(event.locationInWindow, from: nil))
+        }
+        private func allowsClick(at point: NSPoint) -> Bool {
+            // The recognizer is on the hosting root. Cached offscreen rows must
+            // not respond to clicks in the header or outside the scroll clip.
+            guard target?.active == true, !isHiddenOrHasHiddenAncestor,
+                  bounds.intersection(visibleRect).contains(point) else { return false }
+            if let controls = target?.controls, controls.window === window,
+               controls.bounds.intersection(controls.visibleRect).contains(controls.convert(point, from: self)) { return false }
+            return true
+        }
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
+            allowsClick(at: gestureRecognizer.location(in: self))
+        }
+        func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool { true }
+        @objc private func openFile() { open() }
+    }
+}
+
 // Core Animation keeps running while NSMenu owns the event-tracking run loop.
 struct MenuChevron: NSViewRepresentable {
     let menuTitle: String

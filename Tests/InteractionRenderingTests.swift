@@ -937,20 +937,20 @@ extension CoreTests {
         try expect(image.isTemplate && first.button?.accessibilityLabel() == "Folioak", "menu bar symbol follows system appearance and has an accessible name")
         model.showsMenuBarIcon = true
         try expect(controller?.item === first, "unchanged preference does not create duplicate items")
-        for entry in first.menu!.items where !entry.isSeparatorItem {
+        for entry in controller!.actionMenu.items where !entry.isSeparatorItem {
             try expect(NSApp.sendAction(entry.action!, to: entry.target, from: entry), "menu action reaches its controller")
         }
         try expect(opened == 1 && settings == 1 && quit == 1, "menu routes show, settings and explicit quit independently")
         model.language = .english
         try await Task.sleep(nanoseconds: 50_000_000)
-        try expect(controller?.item?.menu?.items.map(\.title).contains("Show Folioak") == true, "visible menu immediately follows language changes")
+        try expect(controller?.actionMenu.items.map(\.title).contains("Show Folioak") == true, "visible menu immediately follows language changes")
         model.showsMenuBarIcon = false
         try expect(controller?.item == nil && disabled == 1 && !DownloadModel(preferences: preferences).showsMenuBarIcon, "disabling removes the item, restores access and persists across relaunch")
         model.language = .chinese
         try await Task.sleep(nanoseconds: 50_000_000)
         try expect(controller?.item == nil, "language changes do not recreate a disabled menu item")
         model.showsMenuBarIcon = true
-        try expect(controller?.item?.menu?.items.first?.title == "显示 Folioak", "re-enabling creates one menu in the current language")
+        try expect(controller?.actionMenu.items.first?.title == "显示 Folioak", "re-enabling creates one menu in the current language")
         controller = nil
         try expect(released == nil && preferences.string(forKey: "unrelatedPreference") == "keep draft", "menu controller releases observers and preserves other settings")
         print("PASS About/menu bar: original repo link, author, default on, runtime off/on, persisted preference, localized actions and released controller")

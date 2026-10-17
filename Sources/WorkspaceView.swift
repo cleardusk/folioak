@@ -116,6 +116,9 @@ struct DownloaderView: View {
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
+    private var recordTransition: AnyTransition {
+        reduceMotion ? .identity : .asymmetric(insertion: .opacity, removal: .opacity.animation(.easeOut(duration: 0.10)))
+    }
     private var listSelectionActive: Bool { listFocused && !inputFocused && !searchFocused }
     private var selectedID: UUID? { selection.primary }
     private var libraryCollection: LibraryCollection? { page == .library ? .documents : page == .media ? .media : nil }
@@ -158,7 +161,9 @@ struct DownloaderView: View {
                 header
                 VStack(alignment: .leading, spacing: 16) {
                     if page == .downloads { composer }
-                    if page == .logs { logContent } else { papers }
+                    if page == .logs { logContent } else {
+                        papers.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.recordAnimation)
+                    }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 footer.padding(.top, 12).padding(.bottom, 16)
             }.padding(.horizontal, 24)
@@ -589,7 +594,7 @@ struct DownloaderView: View {
             }.frame(height: 36)
             }
             if rows.isEmpty {
-                empty(icon: query.isEmpty && filter == .all ? "tray" : "magnifyingglass", text: emptyMessage)
+                empty(icon: query.isEmpty && filter == .all ? "tray" : "magnifyingglass", text: emptyMessage).transition(recordTransition)
                     .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
             } else {
                 ScrollViewReader { scroll in
@@ -599,12 +604,12 @@ struct DownloaderView: View {
                             ForEach(rows) { item in
                                 if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
                                     LibraryRow(paper: paper, model: model, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, select: { selectItem(item.id) })
-                                        .id(item.id)
+                                        .id(item.id).transition(recordTransition)
                                 } else {
                                 DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectItem(item.id) })
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectItem(item.id) }
-                                    .id(item.id)
+                                    .id(item.id).transition(recordTransition)
                                 }
                             }
                         }.padding(1).padding(.trailing, 16)
@@ -639,7 +644,7 @@ struct DownloaderView: View {
                         }
                     })
                     }
-                }.id(page).frame(maxWidth: .infinity, maxHeight: .infinity)
+                }.id(page).transition(recordTransition).frame(maxWidth: .infinity, maxHeight: .infinity)
 
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -798,6 +803,7 @@ struct DownloadRow: View {
         self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
         busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
     }
+    @StateObject private var clickTarget = FileRowClickTarget()
     @Environment(\.colorScheme) private var scheme
     @Environment(\.displayScale) private var displayScale
     @Environment(\.colorSchemeContrast) private var contrast
@@ -846,6 +852,7 @@ struct DownloadRow: View {
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
+                .contentShape(Rectangle())
             VStack(alignment: .trailing, spacing: WorkspaceMetrics.Space.small) {
                 HStack(spacing: WorkspaceMetrics.Space.small) {
                     if inMediaLibrary && item.isLibraryRemoved {
@@ -869,7 +876,7 @@ struct DownloadRow: View {
                         .buttonStyle(RowActionStyle(palette: palette))
                         .accessibilityIdentifier("browser-authentication-action")
                 }
-            }.padding(.top, 1)
+            }.padding(.top, 1).background(FileRowClickRegion(target: clickTarget, controls: true))
         }.padding(.horizontal, 10).padding(.vertical, WorkspaceMetrics.Space.regular)
             .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
@@ -877,6 +884,14 @@ struct DownloadRow: View {
                 Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
                     .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10)
             }
+            .contentShape(Rectangle())
+            .background(FileRowClickRegion(target: clickTarget) {
+                let current = (inMediaLibrary ? model.mediaLibrary : model.downloads).first { $0.id == item.id }
+                guard let current, !current.isLibraryRemoved, current.savedURL != nil else { return }
+                model.openFile(current)
+            })
+            .onAppear { clickTarget.setActive(true) }
+            .onDisappear { clickTarget.setActive(false) }
             .contextMenu { actions }
             .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityElement(children: .contain)

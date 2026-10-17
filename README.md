@@ -22,7 +22,7 @@ Folioak checks for stable updates once a day while running. Use **Folioak → Ch
 
 ## Use
 
-Paste or drop links, then click the download button or press `⌘ Return`. Click again to stop. Batch downloads, retries, and Quick Look previews are supported.
+Paste or drop links, then click the download button or press `⌘ Return`. Click again to stop. Batch downloads, retries, and Quick Look previews are supported; double-click an item to open its file. You can also paste links in the menu bar panel and add more while downloading.
 
 Choose System, 简体中文, or English in Settings → General → Language. Changes take effect immediately.
 

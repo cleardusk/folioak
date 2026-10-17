@@ -1,0 +1,440 @@
+import Foundation
+import AppKit
+import SwiftUI
+import Combine
+
+private actor QuickTransport: HTTPTransport {
+    let pdf: URL
+    private var blocked = Set<String>()
+    private(set) var paths: [String] = []
+    init(pdf: URL) { self.pdf = pdf }
+    func block(_ path: String) { blocked.insert(path) }
+    func release(_ path: String) { blocked.remove(path) }
+    func waitFor(_ path: String) async throws {
+        paths.append(path)
+        while blocked.contains(path) { try await Task.sleep(nanoseconds: 5_000_000) }
+        try Task.checkCancellation()
+    }
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) { throw URLError(.unsupportedURL) }
+    func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
+        let path = request.url!.path
+        paths.append(path)
+        while blocked.contains(path) { try await Task.sleep(nanoseconds: 5_000_000) }
+        try Task.checkCancellation()
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        try FileManager.default.copyItem(at: pdf, to: temporary)
+        return (temporary, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/pdf"])!)
+    }
+}
+
+private final class QuickTestHost<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private final class QuickTestWindow: NSWindow {
+    override var isKeyWindow: Bool { true }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+extension CoreTests {
+    @MainActor static func quickDownloadTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-quick-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "folioak-quick-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let pdf = root.appendingPathComponent("sample.pdf")
+        try createPDF(at: pdf)
+        let gate = QuickTransport(pdf: pdf)
+        await gate.block("/first.pdf"); await gate.block("/second.pdf"); await gate.block("/third.pdf")
+        let engine = DownloadEngine(transport: gate, pdfTransport: gate, requestInterval: 0, retryDelay: 0)
+        let url = root.appendingPathComponent("state/workspace.json")
+        let model = DownloadModel(engine: engine, preferences: preferences, stateURL: url)
+        model.directory = root.appendingPathComponent("downloads")
+        let draft = "  https://example.com/first.pdf\n\n未提交的草稿，保留空白  "
+        model.input = draft
+        let pageRequest = model.batchID, editRequest = model.editRequest
+        let state = QuickDownloadState(model: model)
+        state.draft = "https://example.com/first.pdf"
+        state.submit()
+        try expect(!state.failed && state.draft.isEmpty && model.busy, "quick submission starts without needing a main window")
+        try expect(model.input == draft && model.batchID == pageRequest && model.editRequest == editRequest,
+            "quick submit preserves main draft, page and focus")
+        try expect(try WorkspaceStore.read(url)?.items.count == 1, "accepted task is durable before the worker begins")
+        for _ in 0..<400 {
+            if await gate.paths.count == 1 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        state.draft = "https://example.com/second.pdf"
+        state.submit()
+        try expect(!state.failed && model.items.count == 2 && model.items[1].state == .queued, "busy worker accepts a second batch without interrupting the first")
+        try expect(await gate.paths == ["/first.pdf"], "appended batch waits behind the active batch")
+        let restored = DownloadModel(preferences: preferences, stateURL: url)
+        try expect(restored.items.count == 2 && restored.items.allSatisfy { $0.state == .cancelled && $0.canRetry && $0.preservesInput == true },
+            "restart retains both active and appended tasks for explicit recovery without auto-downloading")
+        state.draft = "https://example.com/second.pdf"
+        state.submit()
+        try expect(state.failed && !state.draft.isEmpty && model.items.count == 2, "duplicate active source is rejected with draft retained")
+        state.draft = "https://example.com/new.pdf\ninvalid-link"
+        state.submit()
+        try expect(state.failed && model.items.count == 2, "mixed invalid quick input is rejected atomically")
+        let tooMany = (0..<200).map { "https://example.com/capacity-\($0).pdf" }.joined(separator: "\n")
+        try rejects({ _ = try model.submitQuickDownload(tooMany) }, "aggregate queue capacity is enforced")
+        try expect(model.items.count == 2, "rejected capacity does not replace running tasks")
+        await gate.release("/first.pdf")
+        for _ in 0..<400 {
+            if await gate.paths.count == 2 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(await gate.paths == ["/first.pdf", "/second.pdf"], "worker drains the appended batch automatically")
+        try expect(model.input == draft, "completed quick task leaves even identical main draft links and whitespace unchanged")
+        _ = try model.submitQuickDownload("https://example.com/third.pdf")
+        _ = try model.submitQuickDownload("https://example.com/fourth.pdf")
+        await model.cancelAndWait()
+        let pathsAfterStop = await gate.paths
+        try expect(!model.busy && !model.cancelling && pathsAfterStop == ["/first.pdf", "/second.pdf"],
+            "stop cancels active task and never begins appended tasks")
+        try expect(model.downloads.filter { $0.state == .cancelled }.count == 3 && model.input == draft,
+            "cancelled queued tasks remain visible, retryable and preserve drafts")
+        try expect(model.logs.last(where: { $0.diagnostic?.id == DiagnosticMessage.ID.finished.rawValue })?.diagnostic?.arguments == ["1", "0"],
+            "completion counts include the first success retired from items during append")
+        let afterStop = DownloadModel(preferences: preferences, stateURL: url)
+        try expect(afterStop.downloads.count == 4 && afterStop.input == draft, "stop flush preserves all records across restart")
+        await gate.release("/second.pdf"); await gate.release("/third.pdf")
+        model.retry()
+        for _ in 0..<600 {
+            if !model.busy { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(!model.busy && model.downloads.allSatisfy { $0.state == .saved || $0.state == .existing }, "explicit retry resumes cancelled queue")
+        try expect(model.logs.last(where: { $0.diagnostic?.id == DiagnosticMessage.ID.finished.rawValue })?.diagnostic?.arguments == ["3", "0"], "completion count covers every task in the retried run")
+        try expect(model.input == draft && model.papers.count == 4, "all quick completions preserve draft and populate the document library")
+
+        // Schedule the append from the final state publication. The worker
+        // next yields in its async flush; the earlier main-queue callback then
+        // exercises append + stop inside that completion window.
+        let flushGate = QuickTransport(pdf: pdf)
+        let flushModel = DownloadModel(engine: DownloadEngine(transport: flushGate, pdfTransport: flushGate, requestInterval: 0),
+            preferences: preferences, stateURL: root.appendingPathComponent("flush/workspace.json"))
+        flushModel.directory = root.appendingPathComponent("flush-downloads")
+        var scheduled = false, appendedAtFlush = false
+        var submissionError: Error?
+        let observation = flushModel.$items.sink { published in
+            if !scheduled && published.contains(where: { $0.state == .saved || $0.state == .existing }) {
+                scheduled = true
+                DispatchQueue.main.async {
+                    do {
+                        appendedAtFlush = flushModel.busy
+                        _ = try flushModel.submitQuickDownload("https://example.com/flush-b.pdf")
+                        flushModel.cancel()
+                    } catch { submissionError = error }
+                }
+            }
+        }
+        _ = try flushModel.submitQuickDownload("https://example.com/flush-a.pdf")
+        for _ in 0..<600 {
+            if scheduled && !flushModel.busy { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        withExtendedLifetime(observation) {}
+        try expect(appendedAtFlush && submissionError == nil && !flushModel.busy, "append and stop execute during final flush")
+        let flushCalls = await flushGate.paths.count
+        try expect(flushModel.items.last?.state == .cancelled && flushCalls == 1,
+            "stop in the final flush cancels appended task without requesting it")
+        let flushSaved = try WorkspaceStore.read(root.appendingPathComponent("flush/workspace.json"))
+        try expect(flushSaved?.items.last?.state == .cancelled && flushSaved?.logs.map(\.id) == flushModel.logs.map(\.id),
+            "final-flush cancellation and completion log are durable before idle")
+
+        let cooldownGate = QuickTransport(pdf: pdf)
+        await cooldownGate.block("media")
+        let cooldownEngine = DownloadEngine(mediaDownload: { _, _, _, _, _, _ in
+            try await cooldownGate.waitFor("media")
+            throw DownloadError.cooldown(60)
+        })
+        let cooldownModel = DownloadModel(engine: cooldownEngine, preferences: preferences)
+        cooldownModel.directory = root.appendingPathComponent("cooldown")
+        _ = try cooldownModel.submitQuickDownload("https://www.youtube.com/watch?v=aaaaaaaaaaa")
+        for _ in 0..<400 {
+            if await cooldownGate.paths.count == 1 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        _ = try cooldownModel.submitQuickDownload("https://www.youtube.com/watch?v=bbbbbbbbbbb")
+        await cooldownGate.release("media")
+        for _ in 0..<400 {
+            if !cooldownModel.busy { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let cooldownCalls = await cooldownGate.paths.count
+        try expect(!cooldownModel.busy && cooldownModel.items.allSatisfy { $0.state == .paused } && cooldownCalls == 1,
+            "appended batches honor source cooldown without retrying the throttled site")
+        let blocker = root.appendingPathComponent("not-a-directory")
+        try Data("block".utf8).write(to: blocker)
+        let blocked = DownloadModel(engine: engine, preferences: preferences, stateURL: blocker.appendingPathComponent("workspace.json"))
+        let failedState = QuickDownloadState(model: blocked)
+        failedState.draft = "https://example.com/never.pdf"
+        failedState.submit()
+        try expect(failedState.failed && !failedState.draft.isEmpty && blocked.items.isEmpty && !blocked.busy,
+            "failed durable acceptance preserves draft and never launches a download")
+        try expect(!(await gate.paths).contains("/never.pdf"), "failed persistence produces no network request")
+        print("PASS quick download: durable busy append, duplicates, invalid input, capacity, automatic drain, cancellation, restart/retry, independent drafts and failed commits")
+    }
+
+    @MainActor static func quickDownloadUITests() async throws {
+        _ = NSApplication.shared
+        let originalLanguage = AppLocalization.shared.language, originalAppearance = NSApp.appearance
+        defer { AppLocalization.shared.language = originalLanguage; NSApp.appearance = originalAppearance }
+        let root = URL(fileURLWithPath: "build/qa/quick-download", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let suite = "folioak-quick-ui-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        model.directory = URL(fileURLWithPath: "/Users/Fixture/Downloads/A deliberately long saved folder for papers and media/Folioak")
+        let state = QuickDownloadState(model: model)
+        for language in [AppLanguage.chinese, .english] {
+            AppLocalization.shared.language = language
+            for scheme in [ColorScheme.light, .dark] {
+                NSApp.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+                var closes = 0
+                let host = QuickTestHost(rootView: QuickDownloadView(state: state, model: model,
+                    openWindow: {}, openSettings: {}, quit: {}, close: { closes += 1 }).environment(\.colorScheme, scheme))
+                let size = host.fittingSize
+                let window = QuickTestWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false; window.contentView = host; window.makeKeyAndOrderFront(nil)
+                state.focusRequest = UUID()
+                try await Task.sleep(nanoseconds: 100_000_000)
+                host.layoutSubtreeIfNeeded()
+                func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+                guard let editor = descendants(host).compactMap({ $0 as? QuickLinkEditor.Editor }).first else { throw TestFailure.failed("quick editor mounted") }
+                try expect(window.firstResponder === editor, "quick editor receives focus in bilingual light/dark windows")
+                editor.insertText("invalid-link", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+                try expect(editor.undoManager?.canUndo == true, "native typing creates a real undo action before submission")
+                try await Task.sleep(nanoseconds: 30_000_000)
+                let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+                try expect(window.performKeyEquivalent(with: event), "window responder chain consumes Command Return before the main menu")
+                try expect(state.failed && state.draft == "invalid-link", "Command Return invokes panel submission and retains invalid input")
+                state.draft = ""
+                try await Task.sleep(nanoseconds: 30_000_000)
+                try expect(!editor.undoManager!.canUndo, "external clear discards stale native text undo actions")
+                state.submit()
+                try await Task.sleep(nanoseconds: 30_000_000)
+                host.layoutSubtreeIfNeeded()
+                let target = root.appendingPathComponent("\(language.rawValue)-\(scheme == .light ? "light" : "dark").png")
+                if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: target)
+                }
+                try expect(host.bounds.width == 380 && host.fittingSize.height < 430, "panel has bounded readable dimensions with long path and error")
+                model.busy = true
+                model.items = [DownloadItem(original: "https://example.com/queued.pdf", directURL: URL(string: "https://example.com/queued.pdf"), state: .queued)]
+                state.draft = "https://example.com/new.pdf"
+                try await Task.sleep(nanoseconds: 50_000_000)
+                host.layoutSubtreeIfNeeded()
+                if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent("\(language.rawValue)-\(scheme == .light ? "light" : "dark")-busy.png"))
+                }
+                model.busy = false; model.items = []
+                state.draft = ""
+                editor.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!)
+                try expect(closes == 1, "Escape closes quick entry through its native responder")
+                window.close()
+            }
+        }
+        try await fileRowDoubleClickTests()
+        try await removalAnimationUITests()
+        let controller = MenuBarController(model: model, openWindow: {}, openSettings: {}, quit: {})
+        try await Task.sleep(nanoseconds: 150_000_000)
+        controller.state.draft = "keep popover draft"
+        controller.togglePopover()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if !controller.popover.isShown || !(controller.popover.contentViewController?.view.window?.firstResponder is QuickLinkEditor.Editor) {
+            print("POPOVER DIAGNOSTIC", controller.popover.isShown, String(describing: controller.item?.button?.window),
+                String(describing: controller.item?.button?.bounds), String(describing: controller.popover.contentViewController?.view.window),
+                String(describing: controller.popover.contentViewController?.view.window?.firstResponder))
+        }
+        try expect(controller.popover.isShown && controller.popover.contentViewController?.view.window?.firstResponder is QuickLinkEditor.Editor,
+            "real menu bar popover opens with native input focus")
+        let initialSize = controller.popover.contentSize
+        controller.state.submit()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if let content = controller.popover.contentViewController?.view {
+            content.layoutSubtreeIfNeeded()
+            try expect(controller.popover.contentSize.width == 380 && controller.popover.contentSize.height + 1 >= content.fittingSize.height,
+                "real popover expands to fit multiline error feedback")
+            try expect(controller.popover.contentSize.height >= initialSize.height, "error feedback does not shrink the panel")
+        }
+        controller.togglePopover()
+        for _ in 0..<20 {
+            if !controller.popover.isShown { break }
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        try expect(!controller.popover.isShown && controller.state.draft == "keep popover draft", "popover dismissal retains unsubmitted draft")
+        controller.togglePopover()
+        model.showsMenuBarIcon = false
+        for _ in 0..<20 {
+            if !controller.popover.isShown { break }
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        try expect(!controller.popover.isShown && controller.item == nil, "disabling menu bar closes its active popover")
+        print("PASS quick download UI: bilingual light/dark focus, long paths, native Command Return, Escape, feedback and undo reset")
+    }
+}
+
+extension CoreTests {
+    @MainActor static func fileRowDoubleClickTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-double-click-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("sample.pdf")
+        try createPDF(at: file)
+        for page in WorkspacePage.navigation {
+            let suite = "folioak-double-click-" + UUID().uuidString
+            let preferences = UserDefaults(suiteName: suite)!
+            defer { preferences.removePersistentDomain(forName: suite) }
+            var opened = 0, selected = 0
+            let model = DownloadModel(preferences: preferences, opener: { _ in opened += 1; return true })
+            let item = DownloadItem(original: "https://example.com/sample.pdf", directURL: URL(string: "https://example.com/sample.pdf"),
+                state: .saved, savedURL: file, documentTitle: "Double click fixture")
+            model.items = [item]; model.mediaLibrary = [item]; model.upsertPaper(item)
+            let row: AnyView
+            if page == .library {
+                row = AnyView(LibraryRow(paper: model.papers[0], model: model, selected: false, select: { selected += 1 }))
+            } else {
+                row = AnyView(DownloadRow(item: item, model: model, inMediaLibrary: page == .media)
+                    .onTapGesture { selected += 1 })
+            }
+            let host = QuickTestHost(rootView: row.frame(width: 600).background(Color.white))
+            let window = QuickTestWindow(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.contentView = host; window.makeKeyAndOrderFront(nil)
+            defer { window.close() }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            func click(_ x: CGFloat, _ y: CGFloat, count: Int = 1, modifiers: NSEvent.ModifierFlags = []) {
+                let location = host.convert(NSPoint(x: x, y: host.isFlipped ? y : host.bounds.height - y), to: nil)
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: count, clickCount: count, pressure: 1)!)
+                }
+            }
+            click(130, 24)
+            try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9))
+            if opened != 0 || selected == 0 {
+                print("ROW DIAGNOSTIC", page.rawValue, "opened", opened, "selected", selected, "bounds", host.bounds,
+                    "hit", String(describing: host.hitTest(NSPoint(x: 130, y: host.isFlipped ? 24 : host.bounds.height - 24))))
+            }
+            try expect(opened == 0 && selected > 0, "single click selects without opening on \(page.rawValue)")
+            click(130, 24); click(130, 24, count: 2)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            if opened != 1 {
+                func children(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(children) }
+                print("DOUBLE DIAGNOSTIC", page.rawValue, opened, host.gestureRecognizers.map { String(describing: type(of: $0)) + ":" + String($0.state.rawValue) },
+                    children(host).compactMap { $0 as? FileRowClickRegion.Region }.map { "\($0.isControls) bounds=\($0.bounds) visible=\($0.visibleRect) frame=\($0.convert($0.bounds, to: host))" })
+            }
+            try expect(opened == 1, "native double click opens exactly once on \(page.rawValue)")
+            click(300, 3); click(300, 3, count: 2)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try expect(opened == 2, "row padding also supports double click on \(page.rawValue)")
+            click(130, 24, modifiers: .command); click(130, 24, count: 2, modifiers: .command)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try expect(opened == 2, "modified selection never opens files on \(page.rawValue)")
+            let recognizers = host.gestureRecognizers.compactMap { $0 as? NSClickGestureRecognizer }.filter { $0.numberOfClicksRequired == 2 }
+            try expect(recognizers.count == 1, "one native double-click recognizer per row")
+            try expect(!recognizers[0].delaysPrimaryMouseButtonEvents, "double-click recognizer does not delay single-click events")
+            recognizers.forEach { $0.isEnabled = false }
+            let beforeBaseline = opened
+            click(530, 25); click(530, 25, count: 2)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            let baseline = opened - beforeBaseline
+            try expect(baseline > 0, "button baseline hits the open action")
+            recognizers.forEach { $0.isEnabled = true }
+            let beforeButton = opened
+            click(530, 25); click(530, 25, count: 2)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try expect(opened - beforeButton == baseline, "action buttons behave identically with row double-click enabled on \(page.rawValue)")
+            let beforeRemoval = opened
+            if page == .library { _ = model.setLibraryRemoved([model.papers[0].id], in: .documents, removed: true) }
+            else if page == .media { _ = model.setLibraryRemoved([item.id], in: .media, removed: true) }
+            else { model.clearDownloadRecord(item.id) }
+            click(130, 24); click(130, 24, count: 2)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try expect(opened == beforeRemoval, "stale fading rows cannot open removed records")
+            window.contentView = nil
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try expect(!host.gestureRecognizers.contains { $0 is NSClickGestureRecognizer }, "row recognizer is removed when its native view leaves the window")
+            print("PASS native row double click: \(page.rawValue), selection, padding, modifiers and action isolation")
+        }
+    }
+}
+
+extension CoreTests {
+    @MainActor static func removalAnimationUITests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-removal-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let output = URL(fileURLWithPath: "build/qa/record-removal", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        for page in WorkspacePage.navigation {
+            let suite = "folioak-removal-" + UUID().uuidString
+            let preferences = UserDefaults(suiteName: suite)!
+            defer { preferences.removePersistentDomain(forName: suite) }
+            let model = DownloadModel(preferences: preferences)
+            var records: [DownloadItem] = []
+            for index in 0..<3 {
+                let file = root.appendingPathComponent("file-\(page.rawValue)-\(index).pdf")
+                try createPDF(at: file, shade: CGFloat(index + 1) / 4)
+                let source = URL(string: "https://example.com/removal-\(index).pdf")!
+                records.append(DownloadItem(original: source.absoluteString, directURL: source, state: .saved,
+                    savedURL: file, documentTitle: "Record \(index + 1) · deletion animation", finishedAt: Date().addingTimeInterval(Double(-index))))
+                model.upsertPaper(records.last!)
+            }
+            model.history = records; model.mediaLibrary = records
+            let host = QuickTestHost(rootView: DownloaderView(model: model, page: page)
+                .environment(\.colorScheme, .light))
+            let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+            defer { window.close() }
+            try await Task.sleep(nanoseconds: 150_000_000)
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            func regions() -> [FileRowClickRegion.Region] { descendants(host).compactMap { $0 as? FileRowClickRegion.Region }.filter { !$0.isControls && $0.target?.active == true && !$0.isHiddenOrHasHiddenAncestor } }
+            func snapshot(_ suffix: String) throws {
+                host.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+                if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent("\(page.rawValue)-\(suffix).png"))
+                }
+            }
+            try expect(regions().count == 3, "three actual rows mounted before deletion")
+            try snapshot("0-before")
+            let firstID = page == .library ? model.papers.sorted { $0.addedAt > $1.addedAt }.first!.id : records[0].id
+            if page == .downloads { model.clearDownloadRecord(firstID) }
+            else { _ = model.setLibraryRemoved([firstID], in: page == .library ? .documents : .media, removed: true) }
+            try await Task.sleep(nanoseconds: 60_000_000); try snapshot("1-fading")
+            try await Task.sleep(nanoseconds: 100_000_000); try snapshot("2-closing")
+            try await Task.sleep(nanoseconds: 180_000_000); try snapshot("3-after")
+            for _ in 0..<20 {
+                if regions().count == 2 { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+                host.layoutSubtreeIfNeeded()
+            }
+            if regions().count != 2 { print("REMOVAL DIAGNOSTIC", page.rawValue, regions().map { "bounds=\($0.bounds), hidden=\($0.isHiddenOrHasHiddenAncestor), alpha=\($0.alphaValue)" }) }
+            try expect(regions().count == 2 && host.gestureRecognizers.compactMap { $0 as? NSClickGestureRecognizer }.count == 2,
+                "deleted row has no active native recognizer after fade and reflow")
+            if page == .downloads { model.clearDownloadRecords() }
+            else { _ = model.setLibraryRemoved(Set(page == .library ? model.papers.map(\.id) : records.map(\.id)), in: page == .library ? .documents : .media, removed: true) }
+            try await Task.sleep(nanoseconds: 330_000_000); try snapshot("4-empty")
+            for _ in 0..<20 {
+                if regions().isEmpty { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+                host.layoutSubtreeIfNeeded()
+            }
+            try expect(regions().isEmpty && !host.gestureRecognizers.contains { $0 is NSClickGestureRecognizer }, "last-row transition cleans up every native recognizer")
+        }
+        print("PASS row removal UI: three lists, fade/reflow intermediate frames, batch removal, empty state and native recognizer cleanup")
+    }
+}

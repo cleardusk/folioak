@@ -97,6 +97,7 @@ struct DownloadItem: Identifiable, Codable {
     var incompleteFileList: Bool? = nil
     // Optional so records written before library removal remain decodable.
     var libraryRemovedAt: Date? = nil
+    var preservesInput: Bool? = nil
     var isLibraryRemoved: Bool { libraryRemovedAt != nil }
     var localURLs: [URL] { (savedURL.map { [$0] } ?? []) + (additionalURLs ?? []) }
     var source: DownloadSource? {
@@ -190,6 +191,7 @@ final class DownloadModel: ObservableObject {
         didSet { preferences.set(showsMenuBarIcon, forKey: "showsMenuBarIcon") }
     }
     @Published private(set) var libraryUndo: LibraryRemovalUndo?
+    @Published private(set) var recordAnimation = UUID()
     @Published var pendingFileTrash: FileTrashRequest?
     @Published var items: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
     @Published var mediaFormat: MediaFormat = .automatic
@@ -228,6 +230,9 @@ final class DownloadModel: ObservableObject {
     private let recycleFile: (URL) throws -> Void
     private var worker: Task<Void, Never>?
     private var runID = UUID()
+    private var sourceCooldowns: [String: Date] = [:]
+    private var runSuccesses = 0
+    private var runFailures = 0
     private let persistence: WorkspacePersistence?
     private var stateURL: URL? { persistence?.stateURL }
     private var saveWork: DispatchWorkItem?
@@ -284,13 +289,15 @@ final class DownloadModel: ObservableObject {
 
     func clearDownloadRecords() {
         guard canClearDownloadRecords, replaceDownloadRecords(items: [], history: []) else { return }
+        recordAnimation = UUID()
         duplicateCount = 0; batchID = UUID()
     }
 
     func clearDownloadRecord(_ id: UUID) {
         guard !busy, downloads.contains(where: { $0.id == id }) else { return }
-        if replaceDownloadRecords(items: items.filter { $0.id != id }, history: history.filter { $0.id != id }), diagnosticItem?.id == id {
-            diagnosticItem = nil
+        if replaceDownloadRecords(items: items.filter { $0.id != id }, history: history.filter { $0.id != id }) {
+            recordAnimation = UUID()
+            if diagnosticItem?.id == id { diagnosticItem = nil }
         }
     }
 
@@ -344,6 +351,7 @@ final class DownloadModel: ObservableObject {
                 try persistence?.writeMediaLibrary(updated)
                 mediaLibrary = updated; mediaLibraryDirty = false; mediaLibraryNotice = nil
             }
+            recordAnimation = UUID()
             if registerUndo { libraryUndo = LibraryRemovalUndo(collection: collection, ids: changed, removed: removed) }
             notice = nil
             return true
@@ -630,15 +638,18 @@ final class DownloadModel: ObservableObject {
         if logs.count > WorkspaceStore.logLimit { logs.removeFirst(logs.count - WorkspaceStore.logLimit) }
     }
 
-    private func archiveResults() {
+    private func archiveResults() { history = historyByArchivingResults() }
+
+    private func historyByArchivingResults() -> [DownloadItem] {
+        var archived = history
         for item in items where item.state.terminal {
-            history.removeAll { old in
+            archived.removeAll { old in
                 old.id == item.id || (item.savedURL != nil && old.savedURL == item.savedURL && old.source == item.source)
                     || (old.state == .missing && item.savedURL != nil && old.metadata?.reference == item.metadata?.reference && old.source == item.source)
             }
-            history.insert(item, at: 0)
+            archived.insert(item, at: 0)
         }
-        history = Array(history.prefix(WorkspaceStore.historyLimit))
+        return Array(archived.prefix(WorkspaceStore.historyLimit))
     }
 
     private func schedulePersistence() {
@@ -817,20 +828,56 @@ final class DownloadModel: ObservableObject {
 
     func start() {
         guard !busy else { return }
-        let batch: BatchInput
-        do { batch = try BatchInput(input) }
-        catch { notice = error.localizedDescription; return }
-        archiveResults()
-        duplicateCount = batch.duplicates
-        batchID = UUID()
-        items = batch.entries.map { entry in
-            DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL, state: entry.source == nil ? .failed : .queued, error: entry.error, errorMessage: entry.diagnostic, mediaFormat: entry.source?.isMedia == true ? mediaFormat : nil)
+        do { _ = try submitDownload(input, quick: false) }
+        catch { notice = error.localizedDescription }
+    }
+
+    // Both entry points commit before execution. Quick entry never edits the
+    // main-window draft or changes its page/focus, including while it is hidden.
+    @discardableResult
+    func submitQuickDownload(_ text: String) throws -> Int {
+        try submitDownload(text, quick: true)
+    }
+
+    private func submitDownload(_ text: String, quick: Bool) throws -> Int {
+        guard !cancelling, quick || !busy else { throw DownloadError.limit("正在停止，请稍后添加任务。") }
+        let batch = try BatchInput(text)
+        if quick, let invalid = batch.entries.first(where: { $0.source == nil }) {
+            throw DownloadError.invalidLink(invalid.original)
         }
-        guard !items.isEmpty else { notice = "请先粘贴至少一个链接。"; return }
-        record(.info, duplicateCount > 0 ? DiagnosticMessage(.startDeduplicated, String(items.count), String(duplicateCount)) : DiagnosticMessage(.start, String(items.count)))
-        for item in items where item.source == nil { record(.error, item.errorMessage ?? DiagnosticMessage(.invalidInput), item: item) }
+        let active = Set(items.filter { !$0.state.terminal }.compactMap(\.source))
+        let entries = batch.entries.filter { !quick || $0.source.map { !active.contains($0) } ?? true }
+        guard !entries.isEmpty else { throw DownloadError.limit("这些链接已在下载队列中。") }
+        let retainedItems = busy ? items.filter { !$0.state.terminal } : []
+        guard retainedItems.count + entries.count <= ResourceLimits.batchCount else {
+            throw DownloadError.limit("队列最多保留 200 项，请等待部分任务完成。")
+        }
+        let added = entries.map { entry in
+            DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL,
+                state: entry.source == nil ? .failed : .queued, error: entry.error, errorMessage: entry.diagnostic,
+                mediaFormat: entry.source?.isMedia == true ? mediaFormat : nil, preservesInput: quick ? true : nil)
+        }
+        let updatedItems = retainedItems + added
+        var updatedHistory = historyByArchivingResults()
+        // Drain older writes and publish only a durable submission. A failed
+        // commit leaves both the active worker and the user's drafts unchanged.
+        if let persistence {
+            let saved = try persistence.replaceWorkspace(WorkspaceSnapshot(input: input, items: updatedItems,
+                history: updatedHistory, logs: logs))
+            updatedHistory = saved.history
+            persistenceSequence += 1; appliedPersistenceSequence = persistenceSequence
+        }
+        items = updatedItems; history = updatedHistory
+        duplicateCount = batch.duplicates + batch.entries.count - entries.count
+        notice = nil; persistenceNotice = nil
+        if !quick { batchID = UUID() }
+        record(.info, duplicateCount > 0
+            ? DiagnosticMessage(.startDeduplicated, String(added.count), String(duplicateCount))
+            : DiagnosticMessage(.start, String(added.count)))
+        for item in added where item.source == nil { record(.error, item.errorMessage ?? DiagnosticMessage(.invalidInput), item: item) }
         saveWorkspace()
-        execute(items.filter { $0.source != nil }.map(\.id))
+        if !busy { execute(added.filter { $0.source != nil }.map(\.id)) }
+        return added.count
     }
 
     func retry(_ single: UUID? = nil) {
@@ -1026,12 +1073,11 @@ final class DownloadModel: ObservableObject {
     }
 
     private func executeSource(_ ids: [UUID], target: URL, namingStyle: NamingStyle, run: UUID) async {
-        var pausedSources: [String: Date] = [:]
         for id in ids {
             if Task.isCancelled { break }
             guard let item = items.first(where: { $0.id == id }),
                   let source = item.restoreReference.map(DownloadSource.arxiv) ?? item.source else { continue }
-            if let until = pausedSources[source.rateLimitKey] {
+            if let until = sourceCooldowns[source.rateLimitKey], until > Date() {
                 update(id) { $0.state = .paused; $0.setError(DiagnosticMessage(.siteCooldown, until.formatted(date: .abbreviated, time: .standard))) }
                 if let paused = items.first(where: { $0.id == id }) { record(.warning, paused.errorMessage ?? DiagnosticMessage(.metadata, paused.error ?? "站点限流"), item: paused) }
                 saveWorkspace()
@@ -1060,10 +1106,13 @@ final class DownloadModel: ObservableObject {
                     $0.progress = nil
                     $0.finishedAt = Date(); $0.diagnostics?.finish()
                 }
+                runSuccesses += 1
                 if let result = items.first(where: { $0.id == id }) { record(.success, result.state.message, item: result); upsertPaper(result); upsertMedia(result) }
-                input = DownloadSource.tokens(in: input)
-                    .filter { (try? DownloadSource.parse($0)) != source }
-                    .joined(separator: "\n")
+                if item.preservesInput != true {
+                    input = DownloadSource.tokens(in: input)
+                        .filter { (try? DownloadSource.parse($0)) != source }
+                        .joined(separator: "\n")
+                }
             } catch is CancellationError {
                 sink.finish()
                 await listener.value
@@ -1085,8 +1134,9 @@ final class DownloadModel: ObservableObject {
                         $0.setError(DiagnosticMessage(.siteCooldown, cooldown.formatted(date: .abbreviated, time: .standard)))
                     } else { $0.setError(DiagnosticMessage.downloadFailure(error)) }
                 }
+                if cooldown == nil { runFailures += 1 }
                 if let failed = items.first(where: { $0.id == id }) { record(cooldown == nil ? .error : .warning, failed.errorMessage ?? DiagnosticMessage(.failed), item: failed) }
-                if let cooldown { pausedSources[source.rateLimitKey] = cooldown }
+                if let cooldown { sourceCooldowns[source.rateLimitKey] = cooldown }
             }
             archiveResults()
             saveWorkspace()
@@ -1103,19 +1153,41 @@ final class DownloadModel: ObservableObject {
         let namingStyle = naming
         let run = UUID()
         runID = run
+        sourceCooldowns = [:]; runSuccesses = 0; runFailures = items.filter { $0.source == nil }.count
         worker = Task { [self] in
-            let groups = SourceScheduler.groups(ids) { id in
-                items.first(where: { $0.id == id })?.source?.rateLimitKey ?? "invalid"
+            var pending = ids
+            repeat {
+                if !Task.isCancelled {
+                    let groups = SourceScheduler.groups(pending) { id in
+                        items.first(where: { $0.id == id })?.source?.rateLimitKey ?? "invalid"
+                    }
+                    _ = await SourceScheduler.run(groups) { [self] group in
+                        await executeSource(group, target: target, namingStyle: namingStyle, run: run)
+                    }
+                }
+                if Task.isCancelled {
+                    for id in items.filter({ !$0.state.terminal }).map(\.id) {
+                        update(id) { $0.state = .cancelled; $0.progress = nil; $0.finishedAt = Date(); $0.diagnostics?.finish() }
+                    }
+                }
+                archiveResults()
+                await persistWorkspaceAndWait()
+                // Recheck after the flush as well: submissions may arrive while
+                // it suspends. No suspension separates the final check/idle state.
+                pending = items.filter { $0.state == .queued && $0.source != nil }.map(\.id)
+            } while !pending.isEmpty && !Task.isCancelled
+            // Cancellation may arrive during the flush after an appended task
+            // was accepted. Close every nonterminal task before publishing idle.
+            if Task.isCancelled {
+                for id in items.filter({ !$0.state.terminal }).map(\.id) {
+                    update(id) { $0.state = .cancelled; $0.progress = nil; $0.finishedAt = Date(); $0.diagnostics?.finish() }
+                }
+                archiveResults()
             }
-            _ = await SourceScheduler.run(groups) { [self] group in
-                await executeSource(group, target: target, namingStyle: namingStyle, run: run)
-            }
-            for id in ids {
-                update(id) { if !$0.state.terminal { $0.state = .cancelled; $0.progress = nil; $0.finishedAt = Date(); $0.diagnostics?.finish() } }
-            }
-            archiveResults()
-            record(.info, DiagnosticMessage(.finished, String(successes), String(failures)))
-            await persistWorkspaceAndWait()
+            record(.info, DiagnosticMessage(.finished, String(runSuccesses), String(runFailures)))
+            // This short final commit has no suspension/acceptance gap and makes
+            // the completion log durable for immediate quit or relaunch.
+            persistWorkspace()
             busy = false
             cancelling = false
             worker = nil
@@ -1787,57 +1859,6 @@ final class AboutWindowController: NSWindowController {
     @objc private func openLink(_ sender: NSButton) {
         if let url = links[sender] { NSWorkspace.shared.open(url) }
     }
-}
-
-@MainActor
-final class MenuBarController: NSObject {
-    private(set) var item: NSStatusItem?
-    private var visibilityObservation: AnyCancellable?
-    private var languageObservation: AnyCancellable?
-    private let openWindow: () -> Void
-    private let openSettings: () -> Void
-    private let quit: () -> Void
-    private let disabled: () -> Void
-    init(model: DownloadModel, openWindow: @escaping () -> Void, openSettings: @escaping () -> Void,
-         quit: @escaping () -> Void, disabled: @escaping () -> Void = {}) {
-        self.openWindow = openWindow; self.openSettings = openSettings; self.quit = quit; self.disabled = disabled
-        super.init()
-        visibilityObservation = model.$showsMenuBarIcon.removeDuplicates().sink { [weak self] in self?.update(visible: $0) }
-        languageObservation = model.$language.dropFirst().sink { [weak self] _ in
-            DispatchQueue.main.async { self?.updateMenu() }
-        }
-    }
-    deinit { if let item { NSStatusBar.system.removeStatusItem(item) } }
-    private func update(visible: Bool) {
-        if visible {
-            if item == nil {
-                let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-                let image = NSImage(systemSymbolName: "leaf", accessibilityDescription: "Folioak")
-                image?.isTemplate = true
-                status.button?.image = image
-                status.button?.toolTip = "Folioak"
-                status.button?.setAccessibilityLabel("Folioak")
-                item = status
-            }
-            updateMenu()
-        } else if let item {
-            NSStatusBar.system.removeStatusItem(item); self.item = nil
-            disabled()
-        }
-    }
-    private func updateMenu() {
-        guard let item else { return }
-        let menu = NSMenu(); menu.autoenablesItems = false
-        for (title, action) in [(L("显示 Folioak"), #selector(showWindow)), (L("设置…"), #selector(showSettings)), (L("退出 Folioak"), #selector(terminate))] {
-            if action == #selector(terminate) { menu.addItem(.separator()) }
-            let entry = NSMenuItem(title: title, action: action, keyEquivalent: ""); entry.target = self
-            menu.addItem(entry)
-        }
-        item.menu = menu
-    }
-    @objc private func showWindow() { openWindow() }
-    @objc private func showSettings() { openSettings() }
-    @objc private func terminate() { quit() }
 }
 
 @MainActor

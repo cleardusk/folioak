@@ -633,3 +633,17 @@
 "恢复到媒体库" = "Restore to Media Library";
 "将文件移到废纸篓…" = "Move Files to Trash…";
 "文件列表，方向键选择，Shift 方向键连续选择，Command A 全选，空格预览，Return 打开，Command I 查看详情" = "File list. Arrow keys select, Shift-arrow extends selection, Command A selects all results, Space previews, Return opens, Command I shows details.";
+
+"粘贴链接，每行一条" = "Paste links, one per line";
+"下载链接" = "Download links";
+"加入队列" = "Add to Queue";
+"已加入 %@ 项" = "Added %@ items";
+"打开 Folioak" = "Open Folioak";
+"⌘ Return 下载" = "⌘ Return to download";
+"就绪" = "Ready";
+"正在停止，请稍后添加任务。" = "Stopping. Please add tasks shortly.";
+"这些链接已在下载队列中。" = "These links are already in the download queue.";
+"队列最多保留 200 项，请等待部分任务完成。" = "The queue holds up to 200 items. Please wait for some tasks to finish.";
+
+"停止" = "Stop";
+"已加入 1 项" = "Added 1 item";
