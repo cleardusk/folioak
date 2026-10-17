@@ -149,14 +149,12 @@ struct QuickDownloadView: View {
     }
 }
 
-// Keep the native double-click behavior consistent with library rows while
-// leaving the adjacent Finder/retry buttons outside the click region.
+// The compact file label has no single-click selection. Give it its own native
+// click surface, independent of the hosting window's gesture recognizer state.
 private struct QuickDownloadFileLabel: View {
     let item: DownloadItem
     let state: QuickDownloadState
     let palette: ThemePalette
-    @StateObject private var clickTarget = FileRowClickTarget()
-
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: item.state.symbol).foregroundStyle(item.state.color(palette))
@@ -171,15 +169,59 @@ private struct QuickDownloadFileLabel: View {
         }
         .contentShape(Rectangle())
         .help(item.localizedError ?? item.localURLs.map(\.path).joined(separator: "\n"))
-        .background(FileRowClickRegion(target: clickTarget) { state.open(item) })
-        .onAppear { clickTarget.setActive(!item.localURLs.isEmpty) }
-        .onChange(of: item.localURLs) { clickTarget.setActive(!$0.isEmpty) }
-        .onDisappear { clickTarget.setActive(false) }
+        .overlay(QuickDownloadFileInteraction(active: !item.localURLs.isEmpty) { state.open(item) }
+            .accessibilityHidden(true))
         .accessibilityElement(children: .combine)
         .accessibilityActions {
             if !item.localURLs.isEmpty { Button(L("打开文件")) { state.open(item) } }
         }
         .accessibilityIdentifier("quick-file-" + item.id.uuidString)
+    }
+}
+
+struct QuickDownloadFileInteraction: NSViewRepresentable {
+    let active: Bool
+    let open: () -> Void
+    func makeNSView(context: Context) -> Region { Region() }
+    func updateNSView(_ view: Region, context: Context) {
+        view.isActive = active; view.open = open
+    }
+    final class Region: NSView {
+        var isActive = false { didSet { if !isActive { armed = false } } }
+        var open: () -> Void = {}
+        private var armed = false
+        #if TESTING
+        var clickTrace: ((String) -> Void)?
+        #endif
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard isActive, !isHiddenOrHasHiddenAncestor else { return nil }
+            return super.hitTest(point)
+        }
+        private func allows(_ event: NSEvent) -> Bool {
+            isActive && window?.isVisible == true && event.windowNumber == window?.windowNumber &&
+                !isHiddenOrHasHiddenAncestor &&
+                event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty &&
+                bounds.intersection(visibleRect).contains(convert(event.locationInWindow, from: nil))
+        }
+        override func mouseDown(with event: NSEvent) {
+            armed = event.clickCount == 2 && allows(event)
+            #if TESTING
+            clickTrace?("down count=\(event.clickCount) armed=\(armed)")
+            #endif
+        }
+        override func mouseDragged(with event: NSEvent) { armed = false }
+        override func mouseUp(with event: NSEvent) {
+            let shouldOpen = armed && event.clickCount == 2 && allows(event)
+            armed = false
+            #if TESTING
+            clickTrace?("up count=\(event.clickCount) open=\(shouldOpen)")
+            #endif
+            if shouldOpen { open() }
+        }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow(); armed = false
+        }
     }
 }
 

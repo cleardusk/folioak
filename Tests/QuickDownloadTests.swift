@@ -210,8 +210,47 @@ extension CoreTests {
         print("PASS quick download: durable busy append, duplicates, invalid input, capacity, automatic drain, cancellation, restart/retry, independent drafts and failed commits")
     }
 
+    @MainActor static func quickFileInteractionCancellationTests() throws {
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.hidesOnDeactivate = false
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        let region = QuickDownloadFileInteraction.Region(frame: container.bounds)
+        var opened = 0
+        region.isActive = true; region.open = { opened += 1 }
+        container.addSubview(region); window.contentView = container; window.orderFront(nil)
+        defer { window.close() }
+        func event(_ type: NSEvent.EventType, inside: Bool = true, flags: NSEvent.ModifierFlags = [], count: Int = 2) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: inside ? NSPoint(x: 50, y: 50) : NSPoint(x: 250, y: 50),
+                modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!
+        }
+        for boundary in ["drag", "outside", "inactive", "hidden window", "detached", "modifier"] {
+            region.mouseDown(with: event(.leftMouseDown))
+            switch boundary {
+            case "drag": region.mouseDragged(with: event(.leftMouseDragged))
+            case "inactive": region.isActive = false
+            case "hidden window": window.orderOut(nil)
+            case "detached": region.removeFromSuperview()
+            default: break
+            }
+            region.mouseUp(with: event(.leftMouseUp, inside: boundary != "outside", flags: boundary == "modifier" ? .command : []))
+            try expect(opened == 0, "quick file double click cancels after \(boundary)")
+            region.isActive = true
+            if region.superview == nil { container.addSubview(region) }
+            window.orderFront(nil)
+            region.mouseUp(with: event(.leftMouseUp))
+            try expect(opened == 0, "cancelled quick file click cannot reopen after restoring \(boundary)")
+        }
+        region.mouseDown(with: event(.leftMouseDown)); region.mouseUp(with: event(.leftMouseUp))
+        region.mouseUp(with: event(.leftMouseUp))
+        try expect(opened == 1, "valid quick file click opens once and consumes its armed state")
+        print("PASS quick file cancellation: drag, bounds, inactive, hidden window, detach, modifiers and duplicate release")
+    }
+
     @MainActor static func quickDownloadUITests() async throws {
         _ = NSApplication.shared
+        try quickFileInteractionCancellationTests()
         let originalLanguage = AppLocalization.shared.language, originalAppearance = NSApp.appearance
         defer { AppLocalization.shared.language = originalLanguage; NSApp.appearance = originalAppearance }
         let root = URL(fileURLWithPath: "build/qa/quick-download", isDirectory: true)
@@ -247,7 +286,7 @@ extension CoreTests {
                         break
                     }
                 }
-                try expect(mountedEditor != nil, "quick editor mounts in the real key window")
+                try expect(mountedEditor != nil, "quick editor mounts in the real key window: language=\(language.rawValue), scheme=\(scheme), realKey=\(NSApp.keyWindow === window), visible=\(window.isVisible), policy=\(NSApp.activationPolicy().rawValue), editorCount=\(descendants(host).compactMap { $0 as? QuickLinkEditor.Editor }.count)")
                 // Match the focus request after popover.show and native attachment.
                 state.focusRequest = UUID()
                 var focusedEditor: QuickLinkEditor.Editor?
@@ -292,11 +331,10 @@ extension CoreTests {
                     host.cacheDisplay(in: host.bounds, to: bitmap)
                     try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent("\(language.rawValue)-\(scheme == .light ? "light" : "dark")-busy.png"))
                 }
-                guard let pendingResult = descendants(host).compactMap({ $0 as? FileRowClickRegion.Region }).first else {
+                guard let pendingResult = descendants(host).compactMap({ $0 as? QuickDownloadFileInteraction.Region }).first else {
                     throw TestFailure.failed("queued quick result is visible before completion")
                 }
-                try expect(!host.gestureRecognizers.contains { ($0 as? NSClickGestureRecognizer)?.numberOfClicksRequired == 2 },
-                    "queued result without a local file has no open gesture")
+                try expect(!pendingResult.isActive, "queued result without a local file has no open interaction")
                 model.busy = false
                 let resultFile = root.appendingPathComponent("A long downloaded filename for menu bar verification.pdf")
                 try createPDF(at: resultFile)
@@ -313,10 +351,10 @@ extension CoreTests {
                     host.cacheDisplay(in: host.bounds, to: bitmap)
                     try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent("\(language.rawValue)-\(scheme == .light ? "light" : "dark")-completed.png"))
                 }
-                guard let result = descendants(host).compactMap({ $0 as? FileRowClickRegion.Region }).first else {
+                guard let result = descendants(host).compactMap({ $0 as? QuickDownloadFileInteraction.Region }).first else {
                     throw TestFailure.failed("quick result native double-click region")
                 }
-                try expect(result === pendingResult, "download completion enables the existing row without remounting")
+                try expect(result === pendingResult && result.isActive, "download completion enables the existing row without remounting")
                 var clickTrace: [String] = []
                 result.clickTrace = { clickTrace.append($0) }
                 let resultRect = result.convert(result.bounds, to: host)
@@ -353,8 +391,8 @@ extension CoreTests {
                     try expect(downInterval < NSEvent.doubleClickInterval,
                         "quick result injected double click stays within the system double-click interval")
                     let expected = openCount + index + 1
-                    // AppKit dispatches recognizer actions asynchronously. Wait
-                    // for this one gesture, then let duplicate callbacks settle.
+                    // Wait for this native gesture, then allow any duplicate
+                    // callbacks to settle before checking the exact open count.
                     for _ in 0..<20 {
                         if openedFiles.count >= expected { break }
                         try await Task.sleep(nanoseconds: 25_000_000)
@@ -383,8 +421,7 @@ extension CoreTests {
                 try expect(openedFiles.count == openCount + 2, "Finder double clicks never trigger the file-open region")
                 model.items = []
                 try await Task.sleep(nanoseconds: 50_000_000)
-                try expect(!host.gestureRecognizers.contains { ($0 as? NSClickGestureRecognizer)?.numberOfClicksRequired == 2 },
-                    "removed quick results detach their double-click recognizer")
+                try expect(result.window == nil || !result.isActive, "removed quick results detach their native click surface")
                 state.draft = ""
                 editor.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                     windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!)
