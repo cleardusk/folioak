@@ -135,7 +135,7 @@ extension CoreTests {
                                        savedURL: root.appendingPathComponent("gone.png"), documentTitle: "Group", additionalURLs: [first.url])
         restored.items = [missingGroup]
         restored.preview(missingGroup)
-        try expect(restored.previewURL == first.url && restored.items[0].savedURL == first.url && restored.items[0].canRetry,
+        try expect(restored.previewURL == first.url && restored.items[0].savedURL == missingGroup.savedURL && restored.items[0].canRetry,
                    "missing first file retains preview and retry access to remaining group files")
         let retryModel = DownloadModel(engine: engine, preferences: preferences, stateURL: root.appendingPathComponent("audio-retry.json"))
         retryModel.directory = folder
@@ -203,6 +203,11 @@ extension CoreTests {
         try expect(code == 0 && audio.pathExtension == "m4a" && audio.deletingLastPathComponent().path == destination.path && streams.allSatisfy { $0.codec_type == "audio" }, "CLI --audio on MP4 direct link saves only audio in the exact output directory")
         let again = try await engine.download(DownloadSource.parse("https://example.org/flower.mp4"), to: destination, mediaFormat: .audio)
         try expect(again.alreadyExisted && again.url == audio, "repeated audio extraction reuses content without publishing a video")
+        for (path, file, ext) in [("/mislabel/video.txt", movie, "mp4"), ("/mislabel/audio.txt", fixtures.appendingPathComponent("tone.m4a"), "m4a")] {
+            FixtureProtocol.install(.init(headers: ["Content-Type": "text/plain"], body: try Data(contentsOf: file)), path: path)
+            let result = try await engine.download(DownloadSource.parse("https://example.org" + path), to: root.appendingPathComponent("mislabel-media"))
+            try expect(result.url.pathExtension == ext, "media signature overrides generic filename and text MIME")
+        }
         FixtureProtocol.install(.init(headers: ["Content-Type": "video/mp4"], body: try Data(contentsOf: movie)), path: "/video/download")
         let organized = try await engine.download(DownloadSource.parse("https://example.org/video/download"), to: model.directory, mediaFormat: .audio, organizeByType: true)
         try expect(organized.url.pathExtension == "m4a" && organized.url.deletingLastPathComponent().lastPathComponent == "Audio", "extensionless video in audio mode uses Audio folder")
@@ -231,6 +236,24 @@ extension CoreTests {
         } catch let e as TestFailure { throw e }
         catch { try expect(error.localizedDescription.contains("音轨"), "silent video explains missing audio without saving video") }
         try expect(try FileManager.default.contentsOfDirectory(atPath: destination.path) == [audio.lastPathComponent], "audio mode publishes no source video or partial output")
+        // Exercise the GUI model, not only the engine/CLI audio argument.
+        FixtureProtocol.install(.init(headers: ["Content-Type": "application/pdf"], body: try Data(contentsOf: pdf)), path: "/document.pdf")
+        model.mediaFormat = .audio
+        model.input = "https://example.org/flower.mp4\nhttps://example.org/video/download\nhttps://example.org/image/png\nhttps://example.org/document.pdf"
+        try expect(model.hasMediaInput, "direct and extensionless video expose the audio option")
+        model.start(); try await waitForQueue(model)
+        try expect(model.items.allSatisfy { $0.state == .saved || $0.state == .existing } &&
+            model.items[0].savedURL?.pathExtension == "m4a" && model.items[1].savedURL?.pathExtension == "m4a" &&
+            model.items[2].savedURL?.pathExtension == "png" && model.items[3].savedURL?.pathExtension == "pdf",
+            "model mixed batch extracts direct video audio while retaining image and document formats")
+        await model.persistWorkspaceAndWait()
+        let audioRestored = DownloadModel(preferences: prefs, stateURL: state)
+        try expect(audioRestored.items.prefix(2).allSatisfy { $0.mediaFormat == .audio }, "audio intent survives persistence and restart")
+        model.input = "https://example.org/silent.mp4"; model.start(); try await waitForQueue(model)
+        try expect(model.items[0].state == .failed && model.items[0].savedURL == nil && model.items[0].mediaFormat == .audio,
+            "GUI silent-video audio request fails without publishing video")
+        model.retry(); try await waitForQueue(model)
+        try expect(model.items[0].state == .failed && model.items[0].mediaFormat == .audio, "retry retains direct-video audio intent")
         print("PASS direct media regressions: extensionless content, retained library, audio-only MP4 extraction, exact/category destinations, reuse and missing-track failure")
     }
 

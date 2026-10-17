@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import PDFKit
+import UniformTypeIdentifiers
 private typealias LibraryViewState<Value> = SwiftUI.State<Value>
 
 struct LibraryPaper: Identifiable, Codable, Sendable {
@@ -22,6 +23,7 @@ struct LibraryPaper: Identifiable, Codable, Sendable {
     var latest: ArxivReference?
     var checkedAt: Date?
     var taskID: UUID?
+    var namingSnapshot: AssetNamingSnapshot?
 
     init(_ item: DownloadItem) {
         id = item.id; title = PaperMetadata.cleanTitle(item.title)
@@ -29,9 +31,13 @@ struct LibraryPaper: Identifiable, Codable, Sendable {
         original = item.original; metadata = item.metadata
         reference = item.metadata?.reference ?? item.reference; directURL = item.directURL
         file = item.savedURL; pages = item.pages; addedAt = item.finishedAt ?? item.createdAt
-        missing = item.state == .missing; taskID = item.id
+        missing = item.state == .missing; taskID = item.id; namingSnapshot = item.namingSnapshot
     }
-    var source: DownloadSource? { reference.map(DownloadSource.arxiv) ?? directURL.map(DownloadSource.pdf) }
+    var source: DownloadSource? {
+        if let reference { return .arxiv(reference) }
+        guard let directURL else { return nil }
+        return GenericFileStorage.extensions.contains(file?.pathExtension.lowercased() ?? directURL.pathExtension.lowercased()) ? .file(directURL) : .pdf(directURL)
+    }
     var identity: String { source?.webURL.absoluteString ?? file?.standardizedFileURL.path ?? id.uuidString }
     var hasUpdate: Bool {
         guard let reference, let version = reference.version, let latest, latest.baseID == reference.baseID else { return false }
@@ -39,12 +45,12 @@ struct LibraryPaper: Identifiable, Codable, Sendable {
     }
     var downloadItem: DownloadItem {
         DownloadItem(id: id, original: original, reference: reference, directURL: directURL, metadata: metadata,
-                     state: missing ? .missing : .saved, savedURL: missing ? nil : file, pages: pages,
-                     documentTitle: title, createdAt: addedAt, finishedAt: addedAt)
+                     state: missing ? .missing : .saved, savedURL: file, pages: pages,
+                     documentTitle: title, createdAt: addedAt, finishedAt: addedAt, namingSnapshot: namingSnapshot)
     }
     func matches(_ query: String) -> Bool {
         if query.isEmpty { return true }
-        let fields = [title, authors, original, reference?.identifier ?? "", directURL?.host ?? "", tags.joined(separator: " ")]
+        let fields = [title, authors, original, reference?.identifier ?? "", directURL?.host ?? "", tags.joined(separator: " "), file?.lastPathComponent ?? ""]
         return query.split(whereSeparator: \.isWhitespace).allSatisfy { term in
             fields.contains { $0.localizedCaseInsensitiveContains(term) }
         }
@@ -83,16 +89,16 @@ enum LibraryStore {
         return snapshot.papers
     }
     static func valid(_ paper: LibraryPaper) -> Bool {
-        paper.title.count <= ResourceLimits.titleCharacters && paper.authors.count <= 16_384 && paper.original.utf8.count <= ResourceLimits.inputBytes &&
+        (paper.namingSnapshot?.valid ?? true) && paper.title.count <= ResourceLimits.titleCharacters && paper.authors.count <= 16_384 && paper.original.utf8.count <= ResourceLimits.inputBytes &&
         paper.tags.count <= 20 && paper.tags.allSatisfy { $0.count <= 40 } &&
         [paper.reference, paper.latest, paper.metadata?.reference].compactMap { $0 }.allSatisfy { (try? ArxivReference.parse($0.identifier)) == $0 } &&
-        (paper.file.map { $0.isFileURL && $0.pathExtension.lowercased() == "pdf" } ?? true) &&
+        (paper.file.map { $0.isFileURL && ($0.pathExtension.lowercased() == "pdf" || GenericFileStorage.extensions.contains($0.pathExtension.lowercased())) } ?? true) &&
         (paper.directURL.map { (try? DownloadSource.parse($0.absoluteString))?.directURL == $0 } ?? true) &&
         !(paper.reference != nil && paper.directURL != nil) &&
         (paper.latest.map { $0.baseID == paper.reference?.baseID } ?? true)
     }
     static func write(_ papers: [LibraryPaper], to url: URL) throws {
-        guard papers.count <= countLimit else { throw DownloadError.limit("文档库最多保存 20,000 篇，已有文档不会被自动移除。") }
+        guard papers.count <= countLimit else { throw DownloadError.limit("文档库最多保存 20,000 项，已有文档不会被自动移除。") }
         guard Set(papers.map(\.id)).count == papers.count, papers.allSatisfy(valid) else { throw DownloadError.storage("文档库格式无效，已有文件保持不变。") }
         let data = try JSONEncoder().encode(Snapshot(papers: papers))
         guard data.count <= byteLimit else { throw DownloadError.limit("文档库超过 32 MB，已有文件保持不变。") }
@@ -118,7 +124,7 @@ extension DownloadModel {
         return libraryWritable
     }
     func upsertPaper(_ item: DownloadItem) {
-        guard item.source?.isPaper != false, item.savedURL.map({ $0.pathExtension.lowercased() == "pdf" }) ?? true else { return }
+        guard item.savedURL.map({ $0.pathExtension.lowercased() == "pdf" || GenericFileStorage.extensions.contains($0.pathExtension.lowercased()) }) ?? (item.source?.isPaper != false) else { return }
         guard item.savedURL != nil || item.state == .missing else { return }
         guard canChangeLibrary() else { return }
         let incoming = LibraryPaper(item)
@@ -175,18 +181,43 @@ extension DownloadModel {
     }
     func relinkPaper(_ id: UUID) {
         guard canChangeLibrary() else { return }
-        let panel = NSOpenPanel(); panel.title = L("重新关联 PDF"); panel.allowedContentTypes = [.pdf]
+        guard let paper = papers.first(where: { $0.id == id }) else { return }
+        let ext = paper.file?.pathExtension.lowercased() ?? "pdf"
+        let panel = NSOpenPanel(); panel.title = L("重新关联文件")
+        panel.allowedContentTypes = [UTType(filenameExtension: ext) ?? .data]
         present(panel) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
             Task {
                 do {
-                    let imported = try await Task.detached(priority: .userInitiated) { try LibraryStore.imported(url) }.value
-                    self.changePaper(id) { $0.file = imported.file; $0.pages = imported.pages; $0.missing = false }
-                    self.notice = nil
-                    self.saveWorkspace()
+                    try await self.relinkPaper(id, to: url)
                 } catch { self.notice = error.localizedDescription }
             }
         }
+    }
+    func relinkPaper(_ id: UUID, to url: URL) async throws {
+        guard canChangeLibrary(), let paper = papers.first(where: { $0.id == id }) else { return }
+        let ext = paper.file?.pathExtension.lowercased() ?? "pdf"
+        let imported = try await Task.detached(priority: .userInitiated) { () -> LibraryPaper in
+            if ext == "pdf" { return try LibraryStore.imported(url) }
+            guard url.pathExtension.lowercased() == ext else { throw DownloadError.metadata("请选择相同格式的文件。") }
+            try await GenericFileStorage.validate(url, extension: ext)
+            return LibraryPaper(DownloadItem(original: url.lastPathComponent, state: .saved, savedURL: url.standardizedFileURL))
+        }.value
+        changePaper(id) { $0.file = imported.file; $0.pages = imported.pages; $0.missing = false }
+        let related = Set([paper.id, paper.taskID].compactMap { $0 })
+        func relinked(_ item: DownloadItem) -> DownloadItem {
+            guard related.contains(item.id), item.state.terminal else { return item }
+            var updated = item
+            updated.savedURL = imported.file; updated.pages = imported.pages
+            updated.state = .saved; updated.incompleteFileList = false
+            updated.error = nil; updated.errorMessage = nil
+            return updated
+        }
+        items = items.map(relinked); history = history.map(relinked)
+        if let previous = paper.file, previewURL == previous { previewURL = imported.file }
+        if let current = papers.first(where: { $0.id == id }) { _ = localFile(current.downloadItem) }
+        notice = nil
+        saveWorkspace()
     }
     func checkPaperVersions(_ ids: [UUID]) {
         guard versionWorker == nil, canChangeLibrary() else { return }
@@ -229,11 +260,11 @@ extension DownloadModel {
         diagnosticItem = paper.downloadItem
     }
     func openPaper(_ paper: LibraryPaper, preview: Bool = false) {
-        guard let file = paper.file, FileManager.default.isReadableFile(atPath: file.path) else {
-            changePaper(paper.id) { $0.missing = true }; notice = "PDF 已移动或不可读，请重新关联。"; return
+        guard let file = localFile(paper.downloadItem), FileManager.default.isReadableFile(atPath: file.path) else {
+            changePaper(paper.id) { $0.missing = true }; notice = "文件已移动或不可读，请重新关联。"; return
         }
         if preview { previewURL = file }
-        else if !opener(file) { notice = "无法打开 PDF，请检查默认阅读器。"; return }
+        else if !opener(file) { notice = "无法打开文件，请检查默认应用。"; return }
         if let current = papers.first(where: { $0.id == paper.id }), !current.read || current.missing {
             changePaper(paper.id) { $0.read = true; $0.missing = false }
         }
@@ -270,6 +301,7 @@ struct LibraryRow: View {
     @ObservedObject var model: DownloadModel
     let selected: Bool
     var selectionActive = true
+    var grid = false
     let select: () -> Void
     @StateObject private var clickTarget = FileRowClickTarget()
     @Environment(\.colorScheme) private var scheme
@@ -277,8 +309,33 @@ struct LibraryRow: View {
     @Environment(\.displayScale) private var displayScale
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     var body: some View {
+        Group {
+            if grid {
+                AssetGridCard(title: paper.title, subtitle: paper.missing ? L("文件缺失") : paper.reference?.identifier ?? paper.directURL?.host ?? L("本地文件"),
+                    file: paper.missing ? nil : paper.file, symbol: paper.downloadItem.symbol,
+                    badge: paper.file?.pathExtension.uppercased() ?? "PDF",
+                    palette: palette, revision: "\(model.fileRefreshRevision)", subtitleIsError: paper.missing, favorite: paper.favorite, unread: !paper.read) { controls }
+            } else { rowContent }
+        }.padding(.horizontal, grid ? 6 : 10).padding(.vertical, grid ? 6 : WorkspaceMetrics.Space.regular)
+            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
+            .overlay(alignment: .bottom) {
+                if !grid { Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
+                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10) }
+            }
+            .overlay { if grid && selected && selectionActive { RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control).stroke(ThemePalette.color(palette.accent).opacity(0.6), lineWidth: 1) } }
+            .contentShape(Rectangle())
+            .background(FileRowClickRegion(target: clickTarget) {
+                if let current = model.papers.first(where: { $0.id == paper.id }), !current.removed { model.openPaper(current) }
+            })
+            .onAppear { clickTarget.setActive(true) }
+            .onDisappear { clickTarget.setActive(false) }
+            .onTapGesture(perform: select).contextMenu { actions }
+            .accessibilityElement(children: .contain).accessibilityAddTraits(selected ? .isSelected : [])
+    }
+    private var rowContent: some View {
         HStack(alignment: .top, spacing: WorkspaceMetrics.Space.regular) {
-            FileThumbnail(url: paper.missing ? nil : paper.file, fallbackSymbol: "doc.text", palette: palette)
+            FileThumbnail(url: paper.missing ? nil : paper.file, fallbackSymbol: paper.downloadItem.symbol, palette: palette, revision: "\(model.fileRefreshRevision)")
                 .accessibilityHidden(false)
                 .accessibilityLabel(L("文档"))
                 .overlay(alignment: .topTrailing) {
@@ -300,7 +357,8 @@ struct LibraryRow: View {
                 Text(paper.title).font(WorkspaceMetrics.TypeScale.rowTitle).lineLimit(2).lineSpacing(3).help(paper.title)
                 HStack(spacing: 10) {
                     if let ref = paper.reference { Text(ref.identifier).font(.system(size: 11, design: .monospaced)) }
-                    else { Text(paper.directURL?.host ?? L("本地 PDF")).lineLimit(1) }
+                    else { Text(paper.directURL?.host ?? L("本地文件")).lineLimit(1) }
+                    if let ext = paper.file?.pathExtension.lowercased(), GenericFileStorage.extensions.contains(ext) { Text(ext.uppercased()) }
                     if let pages = paper.pages { Text(L("\(pages) 页")) }
                     if paper.hasUpdate { Text(L("有 v\(paper.latest!.version!)")).foregroundStyle(ThemePalette.color(palette.accent)) }
                     if paper.missing { Text(L("文件缺失")).foregroundStyle(UIColors.error) }
@@ -308,29 +366,18 @@ struct LibraryRow: View {
                 if !paper.tags.isEmpty { Text(paper.tags.joined(separator: " · ")).font(.system(size: 11)).lineLimit(1).foregroundStyle(ThemePalette.color(palette.secondary)) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
                .contentShape(Rectangle())
+            controls
+        }
+    }
+    private var controls: some View {
             HStack(spacing: WorkspaceMetrics.Space.small) {
-                if paper.removed { Button(L("恢复")) { _ = model.setLibraryRemoved([paper.id], in: .documents, removed: false) }
+                if paper.removed { Button(L("恢复")) { Task { _ = await model.setLibraryRemoved([paper.id], in: .documents, removed: false) } }
                     .buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.documents)) }
                 else if paper.missing { Button(L("关联")) { model.relinkPaper(paper.id) }.buttonStyle(QuietButtonStyle(palette: palette)) }
                 else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(RowActionStyle(palette: palette)) }
                 Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("\(paper.title)的更多操作"))
             }.padding(.top, 1).background(FileRowClickRegion(target: clickTarget, controls: true))
-        }.padding(.horizontal, 10).padding(.vertical, WorkspaceMetrics.Space.regular)
-            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
-                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10)
-            }
-            .contentShape(Rectangle())
-            .background(FileRowClickRegion(target: clickTarget) {
-                if let current = model.papers.first(where: { $0.id == paper.id }), !current.removed { model.openPaper(current) }
-            })
-            .onAppear { clickTarget.setActive(true) }
-            .onDisappear { clickTarget.setActive(false) }
-            .onTapGesture(perform: select).contextMenu { actions }
-            .accessibilityElement(children: .contain).accessibilityAddTraits(selected ? .isSelected : [])
     }
     @ViewBuilder private var actions: some View {
         if !paper.removed {
@@ -350,17 +397,82 @@ struct LibraryRow: View {
                 if paper.missing { Button(L("重新下载")) { model.retryFromLibrary(paper.downloadItem) }.disabled(model.busy) }
             }
             if let file = paper.file { Button(L("在 Finder 中显示")) { NSWorkspace.shared.activateFileViewerSelecting([file]) } }
-            Button(L("重新关联 PDF…")) { model.relinkPaper(paper.id) }
+            Button(L("重新关联文件…")) { model.relinkPaper(paper.id) }
             Button(L("详情…")) { select(); model.showPaperDetails(paper) }
             Divider()
-            Button(L("移出文档库")) { _ = model.setLibraryRemoved([paper.id], in: .documents, removed: true) }
-                .help(L("保留 PDF，可从已移除的文档中恢复")).disabled(!model.canManageLibrary(.documents))
+            Button(L("移出文档库")) { Task { _ = await model.setLibraryRemoved([paper.id], in: .documents, removed: true) } }
+                .help(L("保留文件，可从已移除的文档中恢复")).disabled(!model.canManageLibrary(.documents))
         } else {
-            Button(L("恢复到文档库")) { _ = model.setLibraryRemoved([paper.id], in: .documents, removed: false) }
+            Button(L("恢复到文档库")) { Task { _ = await model.setLibraryRemoved([paper.id], in: .documents, removed: false) } }
                 .disabled(!model.canManageLibrary(.documents))
         }
         Divider()
         Button(L("将文件移到废纸篓…"), role: .destructive) { model.requestFileTrash([paper.id], in: .documents) }
             .disabled(!model.canTrashFiles([paper.id], in: .documents))
+    }
+}
+
+// Derived library data is independent of queue progress. Keep one query result
+// and a bounded set of sort orders per revision, instead of redoing a 20k-row
+// filter/sort for the header, selection and every body evaluation.
+@MainActor final class LibraryQueryCache {
+    struct Documents {
+        let papers: [LibraryPaper]
+        let items: [DownloadItem]
+        let ids: [UUID]
+    }
+    private struct Query: Equatable {
+        let revision: Int, text: String, filter: LibraryFilter, sort: LibrarySort, tag: String?
+    }
+    private var revision = -1
+    private var query: Query?
+    private var result = Documents(papers: [], items: [], ids: [])
+    private var ordered: [LibrarySort: [LibraryPaper]] = [:]
+    private(set) var papersByID: [UUID: LibraryPaper] = [:]
+    private(set) var tags: [String] = []
+    private(set) var documentBuilds = 0
+    private var mediaRevision = -1
+    private var mediaQuery = ""
+    private var mediaRemoved = false
+    private var mediaResult: [DownloadItem] = []
+    private(set) var mediaBuilds = 0
+
+    func documents(_ papers: [LibraryPaper], revision: Int, query text: String, filter: LibraryFilter,
+                   sort: LibrarySort, tag: String?) -> Documents {
+        let key = Query(revision: revision, text: text, filter: filter, sort: sort, tag: tag)
+        if query == key { return result }
+        if self.revision != revision {
+            self.revision = revision
+            ordered.removeAll(keepingCapacity: true)
+            papersByID = Dictionary(papers.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            tags = Array(Set(papers.filter { !$0.removed }.flatMap(\.tags))).sorted()
+        }
+        if ordered[sort] == nil {
+            ordered[sort] = papers.sorted { left, right in
+                switch sort {
+                case .newest: return left.addedAt > right.addedAt
+                case .title: return left.title.localizedStandardCompare(right.title) == .orderedAscending
+                case .year: return (left.metadata?.year ?? 0) == (right.metadata?.year ?? 0)
+                    ? left.addedAt > right.addedAt : (left.metadata?.year ?? 0) > (right.metadata?.year ?? 0)
+                }
+            }
+        }
+        let filtered = ordered[sort]!.filter { paper in
+            paper.removed == (filter == .removed) && (filter != .favorites || paper.favorite) &&
+            (filter != .unread || !paper.read) && (tag == nil || paper.tags.contains(tag!)) && paper.matches(text)
+        }
+        result = Documents(papers: filtered, items: filtered.map(\.downloadItem), ids: filtered.map(\.id))
+        query = key; documentBuilds += 1
+        return result
+    }
+
+    func media(_ items: [DownloadItem], revision: Int, query: String, removed: Bool) -> [DownloadItem] {
+        if mediaRevision == revision && mediaQuery == query && mediaRemoved == removed { return mediaResult }
+        mediaResult = items.filter { item in
+            item.isLibraryRemoved == removed && (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) ||
+                item.original.localizedCaseInsensitiveContains(query) || item.localURLs.contains { $0.lastPathComponent.localizedCaseInsensitiveContains(query) })
+        }.sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) }
+        mediaRevision = revision; mediaQuery = query; mediaRemoved = removed; mediaBuilds += 1
+        return mediaResult
     }
 }

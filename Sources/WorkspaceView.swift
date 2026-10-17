@@ -121,34 +121,29 @@ struct DownloaderView: View {
     }
     private var listSelectionActive: Bool { listFocused && !inputFocused && !searchFocused }
     private var selectedID: UUID? { selection.primary }
+    private var displayMode: LibraryDisplayMode { page == .library ? model.documentDisplayMode : page == .media ? model.mediaDisplayMode : .list }
+    private var displayBinding: Binding<LibraryDisplayMode> {
+        Binding(get: { displayMode }, set: { if page == .library { model.documentDisplayMode = $0 } else { model.mediaDisplayMode = $0 } })
+    }
     private var libraryCollection: LibraryCollection? { page == .library ? .documents : page == .media ? .media : nil }
     private var showingRemoved: Bool { page == .library ? libraryFilter == .removed : mediaRemoved }
     private var selectedLibraryIDs: Set<UUID> { selection.ids.intersection(visibleItems.map(\.id)) }
+    private var libraryResult: LibraryQueryCache.Documents {
+        model.libraryQueries.documents(model.papers, revision: model.libraryRevision, query: query,
+            filter: libraryFilter, sort: librarySort, tag: libraryTag)
+    }
     private var visibleItems: [DownloadItem] {
-        if page == .library { return libraryPapers.map(\.downloadItem) }
+        if page == .library { return libraryResult.items }
         if page == .media {
-            return model.mediaLibrary.filter { $0.isLibraryRemoved == mediaRemoved && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || $0.original.localizedCaseInsensitiveContains(query)) }
-                .sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) }
+            return model.libraryQueries.media(model.mediaLibrary, revision: model.mediaLibraryRevision, query: query, removed: mediaRemoved)
         }
         return model.downloads.filter { item in
             filter.includes(item) &&
             (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) || item.original.localizedCaseInsensitiveContains(query))
         }
     }
-    private var libraryTags: [String] { Array(Set(model.papers.filter { !$0.removed }.flatMap(\.tags))).sorted() }
-    private var libraryPapers: [LibraryPaper] {
-        model.papers.filter { paper in
-            paper.removed == (libraryFilter == .removed) &&
-            (libraryFilter != .favorites || paper.favorite) && (libraryFilter != .unread || !paper.read) &&
-            (libraryTag == nil || paper.tags.contains(libraryTag!)) && paper.matches(query)
-        }.sorted { left, right in
-            switch librarySort {
-            case .newest: return left.addedAt > right.addedAt
-            case .title: return left.title.localizedStandardCompare(right.title) == .orderedAscending
-            case .year: return (left.metadata?.year ?? 0) == (right.metadata?.year ?? 0) ? left.addedAt > right.addedAt : (left.metadata?.year ?? 0) > (right.metadata?.year ?? 0)
-            }
-        }
-    }
+    private var libraryTags: [String] { _ = libraryResult; return model.libraryQueries.tags }
+    private var libraryPapers: [LibraryPaper] { libraryResult.papers }
     var visibleLogs: [ActivityEntry] {
         model.logs.filter { (logItem == nil || $0.itemID == logItem?.id) && (logLevel == nil || $0.level == logLevel) && (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || $0.localizedMessage.localizedCaseInsensitiveContains(query) || ($0.subject?.localizedCaseInsensitiveContains(query) ?? false)) }
     }
@@ -194,7 +189,7 @@ struct DownloaderView: View {
             if page != .downloads { inputFocused = false; endTextEditing() }
             if focusListOnArrival { focusListOnArrival = false; focusList() }
         }
-        .onChange(of: visibleItems.map(\.id)) { selection.retainVisible($0) }
+        .onChange(of: page == .library ? libraryResult.ids : visibleItems.map(\.id)) { selection.retainVisible($0) }
         .onChange(of: libraryFilter) { _ in selection.clear(); listFocus = nil }
         .onChange(of: mediaRemoved) { _ in selection.clear(); listFocus = nil }
         .quickLookPreview($model.previewURL)
@@ -209,7 +204,7 @@ struct DownloaderView: View {
             Button(L("取消"), role: .cancel) { confirmingLibraryRemoval = nil }
             Button(L("移出"), role: .destructive) {
                 if let request = confirmingLibraryRemoval {
-                    _ = model.setLibraryRemoved(request.ids, in: request.collection, removed: true)
+                    Task { _ = await model.setLibraryRemoved(request.ids, in: request.collection, removed: true) }
                 }
                 confirmingLibraryRemoval = nil
             }.disabled(model.busy)
@@ -348,7 +343,7 @@ struct DownloaderView: View {
             Spacer()
             if page == .library {
                 if !model.papers.isEmpty {
-                    Text(selectedLibraryIDs.isEmpty ? L("\(libraryPapers.count) 篇") : L("已选 \(selectedLibraryIDs.count) 项"))
+                    Text(selectedLibraryIDs.isEmpty ? L("\(libraryPapers.count) 项") : L("已选 \(selectedLibraryIDs.count) 项"))
                         .font(.callout).monospacedDigit().foregroundStyle(secondary)
                     searchField
                 }
@@ -406,11 +401,11 @@ struct DownloaderView: View {
             Button(L("取消选择")) { selection.clear() }.disabled(selection.ids.isEmpty)
             Divider()
             Button(L(showingRemoved ? "恢复所选 \(selectedLibraryIDs.count) 项" : "移出所选 \(selectedLibraryIDs.count) 项")) {
-                _ = model.setLibraryRemoved(selectedLibraryIDs, in: collection, removed: !showingRemoved)
+                Task { _ = await model.setLibraryRemoved(selectedLibraryIDs, in: collection, removed: !showingRemoved) }
             }.disabled(selectedLibraryIDs.isEmpty || !model.canManageLibrary(collection))
             Button(L(showingRemoved ? "恢复当前结果 \(visibleItems.count) 项" : "移出当前结果 \(visibleItems.count) 项…")) {
                 let ids = Set(visibleItems.map(\.id))
-                if showingRemoved { _ = model.setLibraryRemoved(ids, in: collection, removed: false) }
+                if showingRemoved { Task { _ = await model.setLibraryRemoved(ids, in: collection, removed: false) } }
                 else { confirmingLibraryRemoval = LibraryRemovalUndo(collection: collection, ids: ids, removed: true) }
             }.disabled(visibleItems.isEmpty || !model.canManageLibrary(collection))
             Divider()
@@ -554,7 +549,7 @@ struct DownloaderView: View {
         let listPage = page
         let rows = visibleItems
         return VStack(spacing: 14) {
-            if page == .library || (page == .media && mediaRemoved) || (page == .downloads && !model.downloads.isEmpty) {
+            if page == .library || page == .media || (page == .downloads && !model.downloads.isEmpty) {
             HStack(spacing: 4) {
                 if page == .downloads {
                     Menu {
@@ -582,14 +577,15 @@ struct DownloaderView: View {
                         Button(action: toggleRemoved) { Label(L("已移除"), systemImage: "chevron.left").font(.system(size: 13)) }
                             .buttonStyle(.plain).foregroundStyle(secondary).help(page == .library ? L("返回文档库") : L("返回媒体库"))
                     }
-                    else { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { L($0.rawValue) }, palette: palette) }
+                    else if page == .library { FilterTabs(options: [LibraryFilter.all, .favorites, .unread], selection: $libraryFilter, title: { L($0.rawValue) }, palette: palette) }
                     Spacer()
-                    if let tag = libraryTag {
+                    if page == .library, let tag = libraryTag {
                         Button { libraryTag = nil } label: {
                             HStack(spacing: 6) { Text(tag).lineLimit(1); Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }
                         }.buttonStyle(QuietButtonStyle(palette: palette)).help(L("清除标签筛选"))
                             .accessibilityLabel(L("清除标签筛选：\(tag)"))
                     }
+                    LibraryDisplayPicker(selection: displayBinding, palette: palette)
                 }
             }.frame(height: 36)
             }
@@ -600,17 +596,13 @@ struct DownloaderView: View {
                 ScrollViewReader { scroll in
                     GeometryReader { viewport in
                     ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(rows) { item in
-                                if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
-                                    LibraryRow(paper: paper, model: model, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, select: { selectItem(item.id) })
-                                        .id(item.id).transition(recordTransition)
-                                } else {
-                                DownloadRow(item: item, model: model, inMediaLibrary: page == .media, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectItem(item.id) })
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { selectItem(item.id) }
-                                    .id(item.id).transition(recordTransition)
+                        Group {
+                            if displayMode == .grid {
+                                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: LibraryGridLayout.spacing), count: LibraryGridLayout.columns(width: viewport.size.width)), spacing: LibraryGridLayout.spacing) {
+                                    libraryRows(rows)
                                 }
+                            } else {
+                                LazyVStack(spacing: 0) { libraryRows(rows) }
                             }
                         }.padding(1).padding(.trailing, 16)
                             .frame(minHeight: viewport.size.height, alignment: .top)
@@ -619,19 +611,26 @@ struct DownloaderView: View {
                                 dismissEditing()
                             })
                     }
-                    .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], allowsMultipleSelection: libraryCollection != nil, focusChanged: { if page == listPage { listFocused = $0 } }, didFocus: { request in
+                    .onChange(of: displayMode) { _ in
+                        if let id = selectedID { scroll.scrollTo(id, anchor: .center) }
+                    }
+                    .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], allowsHorizontalNavigation: displayMode == .grid, allowsMultipleSelection: libraryCollection != nil, focusChanged: { if page == listPage { listFocused = $0 } }, didFocus: { request in
                         if listFocus == request { listFocus = nil }
                     }) { action in
                         guard !rows.isEmpty else { return }
                         if action == .selectAll {
                             selection.selectAll(rows.map(\.id))
-                        } else if [.up, .down, .extendUp, .extendDown].contains(action) {
-                            let down = action == .down || action == .extendDown
-                            if let id = selection.move(down ? 1 : -1, visible: rows.map(\.id), extend: action == .extendUp || action == .extendDown) {
+                        } else if let offset = LibraryGridLayout.offset(action, columns: displayMode == .grid ? LibraryGridLayout.columns(width: viewport.size.width) : 1) {
+                            let visible = rows.map(\.id)
+                            let index = selectedID.flatMap { visible.firstIndex(of: $0) }
+                            let movement = displayMode == .grid && index != nil
+                                ? LibraryGridLayout.destination(index: index!, count: rows.count, columns: LibraryGridLayout.columns(width: viewport.size.width), action: action) - index! : offset
+                            if movement == 0 { return }
+                            if let id = selection.move(movement, visible: visible, extend: action.extendsSelection) {
                                 scroll.scrollTo(id)
                             }
                         } else if let item = rows.first(where: { $0.id == selectedID }) {
-                            if page == .library, let paper = model.papers.first(where: { $0.id == item.id }) {
+                            if page == .library, let paper = model.libraryQueries.papersByID[item.id] {
                                 if action == .diagnostics { model.showPaperDetails(paper) }
                                 else if !paper.removed { model.openPaper(paper, preview: action == .preview) }
                             }
@@ -648,6 +647,22 @@ struct DownloaderView: View {
 
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder private func libraryRows(_ rows: [DownloadItem]) -> some View {
+
+        ForEach(rows) { item in
+            if page == .library, let paper = model.libraryQueries.papersByID[item.id] {
+                LibraryRow(paper: paper, model: model, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, grid: displayMode == .grid, select: { selectItem(item.id) })
+                    .id(item.id).transition(recordTransition)
+            } else {
+            DownloadRow(item: item, model: model, inMediaLibrary: page == .media, grid: displayMode == .grid, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectItem(item.id) })
+                .contentShape(Rectangle())
+                .onTapGesture { selectItem(item.id) }
+                .id(item.id).transition(recordTransition)
+            }
+        }
+
     }
 
     private var emptyMessage: String {
@@ -704,7 +719,7 @@ struct DownloaderView: View {
                 if let collection = libraryCollection, let undo = model.libraryUndo, undo.collection == collection {
                     Text(L(undo.removed ? "已移出 \(undo.ids.count) 项" : "已恢复 \(undo.ids.count) 项")).lineLimit(1)
                     Spacer()
-                    Button(L(undo.removed ? "撤销移出" : "撤销恢复")) { _ = model.undoLibraryRemoval() }
+                    Button(L(undo.removed ? "撤销移出" : "撤销恢复")) { Task { _ = await model.undoLibraryRemoval() } }
                         .buttonStyle(.plain).foregroundStyle(accent).disabled(!model.canManageLibrary(collection))
                 } else if page == .downloads {
                     if model.busy { ProgressView().controlSize(.mini).frame(width: 12) }
@@ -791,16 +806,17 @@ struct DownloadRow: View {
     let busy: Bool
     let theme: AppTheme
     let inMediaLibrary: Bool
+    let grid: Bool
     let selected: Bool
     let selectionActive: Bool
     let authenticate: () -> Void
     let showLogs: () -> Void
     let select: () -> Void
 
-    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, selected: Bool = false, selectionActive: Bool = true, authenticate: @escaping () -> Void = {}, showLogs: @escaping () -> Void = {}, select: @escaping () -> Void = {}) {
+    init(item: DownloadItem, model: DownloadModel, inMediaLibrary: Bool = false, grid: Bool = false, selected: Bool = false, selectionActive: Bool = true, authenticate: @escaping () -> Void = {}, showLogs: @escaping () -> Void = {}, select: @escaping () -> Void = {}) {
         self.authenticate = authenticate
         self.showLogs = showLogs
-        self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
+        self.grid = grid; self.item = item; self.model = model; self.inMediaLibrary = inMediaLibrary
         busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
     }
     @StateObject private var clickTarget = FileRowClickTarget()
@@ -815,10 +831,40 @@ struct DownloadRow: View {
     }
 
     var body: some View {
+        Group {
+            if grid {
+                AssetGridCard(title: item.title, subtitle: item.state == .missing ? L("文件缺失") : item.directURL?.host ?? L("本地文件"),
+                    file: item.state == .missing ? nil : item.savedURL, symbol: item.symbol,
+                    badge: (item.additionalURLs?.isEmpty == false ? L("\(item.localURLs.count) 个文件") : item.savedURL?.pathExtension.uppercased() ?? ""),
+                    palette: palette, revision: "\(model.fileRefreshRevision)|\(item.state)", preview: .media, subtitleIsError: item.state == .missing) { controls }
+            } else { rowContent }
+        }.padding(.horizontal, grid ? 6 : 10).padding(.vertical, grid ? 6 : WorkspaceMetrics.Space.regular)
+            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
+            .overlay(alignment: .bottom) {
+                if !grid { Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
+                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10) }
+            }
+            .overlay { if grid && selected && selectionActive { RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control).stroke(ThemePalette.color(palette.accent).opacity(0.6), lineWidth: 1) } }
+            .contentShape(Rectangle())
+            .background(FileRowClickRegion(target: clickTarget) {
+                let current = (inMediaLibrary ? model.mediaLibrary : model.downloads).first { $0.id == item.id }
+                guard let current, !current.isLibraryRemoved, current.savedURL != nil else { return }
+                model.openFile(current)
+            })
+            .onAppear { clickTarget.setActive(true) }
+            .onDisappear { clickTarget.setActive(false) }
+            .contextMenu { actions }
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .accessibilityElement(children: .contain)
+            .accessibilityValue(L10n.text(item.state.message))
+    }
+
+    private var rowContent: some View {
         HStack(alignment: .top, spacing: 12) {
             Group {
                 if inMediaLibrary || item.savedURL != nil {
-                    FileThumbnail(url: item.savedURL, fallbackSymbol: item.symbol, palette: palette)
+                    FileThumbnail(url: item.savedURL, fallbackSymbol: item.symbol, palette: palette, revision: "\(model.fileRefreshRevision)|\(item.finishedAt?.timeIntervalSinceReferenceDate ?? 0)|\(item.state)")
                 } else {
                     Image(systemName: item.symbol)
                         .font(.system(size: 22, weight: .light)).foregroundStyle(secondary)
@@ -840,11 +886,13 @@ struct DownloadRow: View {
                     }
                     if let files = item.additionalURLs, !files.isEmpty { Text(L("\(files.count + 1) 个文件")) }
                 }.font(.system(size: 11)).foregroundStyle(secondary)
-                if let progress = item.progress, item.state == .downloading {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let fraction = progress.fraction { ProgressView(value: fraction).tint(ThemePalette.color(palette.accent)).progressViewStyle(.linear) }
-                        Text(L(progressText(progress))).font(.system(size: 11)).monospacedDigit().foregroundStyle(secondary)
-                    }.frame(maxWidth: 320)
+                if item.state == .downloading {
+                    DownloadTransferProgress(progress: item.progress, bytesPerSecond: item.bytesPerSecond, palette: palette)
+                        .frame(maxWidth: 320, alignment: .leading)
+                }
+                if case .waiting = item.state, item.reference != nil {
+                    Text(L("遵守 arXiv 请求间隔，稍后自动继续。"))
+                        .font(.system(size: 11)).foregroundStyle(secondary)
                 }
                 if let error = item.localizedError {
                     Text(error).font(.system(size: 11)).lineSpacing(3)
@@ -853,10 +901,14 @@ struct DownloadRow: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
                 .contentShape(Rectangle())
+            controls
+        }
+    }
+    private var controls: some View {
             VStack(alignment: .trailing, spacing: WorkspaceMetrics.Space.small) {
                 HStack(spacing: WorkspaceMetrics.Space.small) {
                     if inMediaLibrary && item.isLibraryRemoved {
-                        Button(L("恢复")) { _ = model.setLibraryRemoved([item.id], in: .media, removed: false) }
+                        Button(L("恢复")) { Task { _ = await model.setLibraryRemoved([item.id], in: .media, removed: false) } }
                             .buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.media))
                     } else if let url = item.savedURL, !inMediaLibrary || item.state != .missing || item.localURLs.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
                         Button(L("打开")) { model.openFile(item) }.buttonStyle(RowActionStyle(palette: palette)).help(url.path)
@@ -877,30 +929,10 @@ struct DownloadRow: View {
                         .accessibilityIdentifier("browser-authentication-action")
                 }
             }.padding(.top, 1).background(FileRowClickRegion(target: clickTarget, controls: true))
-        }.padding(.horizontal, 10).padding(.vertical, WorkspaceMetrics.Space.regular)
-            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
-                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10)
-            }
-            .contentShape(Rectangle())
-            .background(FileRowClickRegion(target: clickTarget) {
-                let current = (inMediaLibrary ? model.mediaLibrary : model.downloads).first { $0.id == item.id }
-                guard let current, !current.isLibraryRemoved, current.savedURL != nil else { return }
-                model.openFile(current)
-            })
-            .onAppear { clickTarget.setActive(true) }
-            .onDisappear { clickTarget.setActive(false) }
-            .contextMenu { actions }
-            .accessibilityAddTraits(selected ? .isSelected : [])
-            .accessibilityElement(children: .contain)
-            .accessibilityValue(L10n.text(item.state.message))
     }
-
     @ViewBuilder private var actions: some View {
         if inMediaLibrary && item.isLibraryRemoved {
-            Button(L("恢复到媒体库")) { _ = model.setLibraryRemoved([item.id], in: .media, removed: false) }
+            Button(L("恢复到媒体库")) { Task { _ = await model.setLibraryRemoved([item.id], in: .media, removed: false) } }
                 .disabled(!model.canManageLibrary(.media))
             Divider()
             Button(L("将文件移到废纸篓…"), role: .destructive) { model.requestFileTrash([item.id], in: .media) }
@@ -932,7 +964,7 @@ struct DownloadRow: View {
         Divider()
         if inMediaLibrary {
             Button(L(item.isLibraryRemoved ? "恢复到媒体库" : "移出媒体库")) {
-                _ = model.setLibraryRemoved([item.id], in: .media, removed: !item.isLibraryRemoved)
+                Task { _ = await model.setLibraryRemoved([item.id], in: .media, removed: !item.isLibraryRemoved) }
             }.disabled(!model.canManageLibrary(.media))
         }
         Button(L("将文件移到废纸篓…"), role: .destructive) {
@@ -951,13 +983,33 @@ struct DownloadRow: View {
         if inMediaLibrary { model.retryFromLibrary(item) } else { model.retry(item.id) }
     }
 
-    private func progressText(_ progress: DownloadProgress) -> String {
+
+}
+
+struct DownloadTransferProgress: View {
+    let progress: DownloadProgress?
+    let bytesPerSecond: Double?
+    let palette: ThemePalette
+    var status: String {
+        guard let progress, progress.received > 0 else { return L("连接下载…") }
         let received = ByteCountFormatter.string(fromByteCount: progress.received, countStyle: .file)
         var parts = [progress.fraction.map { "\(Int($0 * 100))% · \(received)" } ?? received]
-        if let speed = item.bytesPerSecond, speed >= 1, speed.isFinite, speed < Double(Int64.max) {
+        if let speed = bytesPerSecond, speed >= 1, speed.isFinite, speed < Double(Int64.max) {
             parts.append(ByteCountFormatter.string(fromByteCount: Int64(speed), countStyle: .file) + "/s")
         }
         return parts.joined(separator: " · ")
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let fraction = progress?.fraction {
+                ProgressView(value: fraction).progressViewStyle(.linear).tint(ThemePalette.color(palette.accent))
+                    .accessibilityLabel(L("下载进度"))
+            }
+            HStack(spacing: 6) {
+                if progress?.fraction == nil { ProgressView().controlSize(.mini).accessibilityLabel(L("正在下载")) }
+                Text(status).font(.system(size: 11)).monospacedDigit().foregroundStyle(ThemePalette.color(palette.secondary))
+            }
+        }.accessibilityElement(children: .combine).accessibilityValue(status)
     }
 }
 
@@ -1073,7 +1125,7 @@ struct DirectoryMenu: View {
     var body: some View {
         Menu {
             Text(model.directoryLabel)
-            Text(L("自动归入 Papers、Videos、Audio、Images"))
+            Text(L("按文件类型自动归档"))
             if !model.directoryExists { Text(L("首次下载时创建文件夹")) }
             Divider()
             Button(L("更改保存位置…"), action: model.chooseDirectory).disabled(model.busy)
@@ -1085,7 +1137,7 @@ struct DirectoryMenu: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 300, alignment: .leading)
             .padding(.leading, -12)
-            .help(L("\(model.directoryLabel)\n自动归入 Papers、Videos、Audio、Images"))
+            .help(L("\(model.directoryLabel)\n按文件类型自动归档"))
             .accessibilityLabel(L("保存位置：\(model.directoryLabel)，自动按类型归档"))
     }
 }

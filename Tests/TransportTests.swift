@@ -18,6 +18,7 @@ final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         var sendHeaders = true
         var finish = true
         var finalURL: URL?
+        var redirect: URL?
     }
     private static let lock = NSLock()
     private static var replies: [String: [Reply]] = [:]
@@ -52,6 +53,11 @@ final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         Self.fullRequests.append(request)
         Self.lock.unlock()
         guard let reply else { client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL)); return }
+        if let target = reply.redirect {
+            let response = HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": target.absoluteString])!
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: target), redirectResponse: response)
+            return
+        }
         if reply.sendHeaders {
             let response = HTTPURLResponse(url: reply.finalURL ?? request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -130,7 +136,7 @@ extension CoreTests {
 
         let ref = try ArxivReference.parse("2501.12345v2")
         let pdfPath = ref.pdfURL.path
-        let folder = root.appendingPathComponent("urlsession", isDirectory: true)
+        let folder = root.appendingPathComponent("urlsession-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         for mode in ["disconnected", "503", "corrupt", "429"] {
             FixtureProtocol.install(.init(body: atom()), path: "/api/query")

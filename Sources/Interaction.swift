@@ -203,9 +203,13 @@ struct FileListSelection {
 
 struct PaperListKeyboard: NSViewRepresentable {
     @ObservedObject private var localization = AppLocalization.shared
-    enum Action { case up, down, extendUp, extendDown, selectAll, preview, open, diagnostics }
+    enum Action {
+        case up, down, left, right, extendUp, extendDown, extendLeft, extendRight, selectAll, preview, open, diagnostics
+        var extendsSelection: Bool { [.extendUp, .extendDown, .extendLeft, .extendRight].contains(self) }
+    }
     let request: UUID?
     var detailsShortcut = AppShortcut(key: "i")
+    var allowsHorizontalNavigation = false
     var allowsMultipleSelection = false
     var focusChanged: (Bool) -> Void = { _ in }
     let didFocus: (UUID) -> Void
@@ -213,6 +217,7 @@ struct PaperListKeyboard: NSViewRepresentable {
     func makeNSView(context: Context) -> KeyView {
         let view = KeyView(request: request, didFocus: didFocus, action: action)
         view.focusChanged = focusChanged
+        view.allowsHorizontalNavigation = allowsHorizontalNavigation
         view.allowsMultipleSelection = allowsMultipleSelection
         return view
     }
@@ -222,6 +227,7 @@ struct PaperListKeyboard: NSViewRepresentable {
             "文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情"))
         view.action = action
         view.detailsShortcut = detailsShortcut
+        view.allowsHorizontalNavigation = allowsHorizontalNavigation
         view.allowsMultipleSelection = allowsMultipleSelection
         view.didFocus = didFocus
         view.focusChanged = focusChanged
@@ -232,7 +238,8 @@ struct PaperListKeyboard: NSViewRepresentable {
     final class KeyView: NSView {
         var request: UUID?
         var detailsShortcut = AppShortcut(key: "i")
-        var allowsMultipleSelection = false
+        var allowsHorizontalNavigation = false
+    var allowsMultipleSelection = false
         private var fulfilledRequest: UUID?
         var didFocus: (UUID) -> Void
         var action: (Action) -> Void
@@ -292,12 +299,17 @@ struct PaperListKeyboard: NSViewRepresentable {
                 if modifiers == .command && event.charactersIgnoringModifiers?.lowercased() == "a" {
                     action(.selectAll); return
                 }
+                if allowsHorizontalNavigation && modifiers == .shift && (event.keyCode == 123 || event.keyCode == 124) {
+                    action(event.keyCode == 123 ? .extendLeft : .extendRight); return
+                }
                 if modifiers == .shift && (event.keyCode == 126 || event.keyCode == 125) {
                     action(event.keyCode == 126 ? .extendUp : .extendDown); return
                 }
             }
             guard modifiers.isEmpty else { super.keyDown(with: event); return }
             switch event.keyCode {
+            case 123 where allowsHorizontalNavigation: action(.left)
+            case 124 where allowsHorizontalNavigation: action(.right)
             case 126: action(.up)
             case 125: action(.down)
             case 49: action(.preview)

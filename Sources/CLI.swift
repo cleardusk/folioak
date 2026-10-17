@@ -126,10 +126,10 @@ struct CLIOptions {
           \(accent("--version"))            显示版本
 
         支持论文、YouTube / Bilibili / X / 今日头条 / 小红书 / 抖音 / TikTok / Instagram / Vimeo 视频，
-        以及 HTTPS 图片、音频、视频直链。站点登录或验证限制可能影响下载。
+        以及 HTTPS PDF、Office、EPUB、文本、压缩包、图片、音频、视频直链。站点登录或验证限制可能影响下载。
         最多 200 条，自动去重；最多同时下载三个来源，同一来源串行。
         无链接参数时自动读取管道；支持 Markdown 与混合文本。
-        默认沿用 UI 的保存位置，自动归入 Papers/Videos/Audio/Images。
+        默认沿用 UI 的保存位置，自动归入 Papers/Documents/Archives/Videos/Audio/Images。
         -o 直接保存到指定目录，仅影响本次运行。
         重定向输出文件路径；NO_COLOR=1 关闭颜色。
         """ + "\n"
@@ -318,6 +318,9 @@ enum CLIRunner {
             let defaults = DownloadPreferences(preferences)
             let override = options.output.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL }
             let naming = options.naming ?? defaults.naming
+            var rules = defaults.namingRules
+            if options.naming != nil { rules[.papers] = "" }
+            let namingSnapshot = AssetNamingSnapshot(rules: rules, paperStyle: naming)
             if options.verbose && options.inputFiles.contains("-") { stderr("读取标准输入\n") }
             let batch = try BatchInput(try await options.resolvedInput())
             if let override, batch.entries.contains(where: { $0.source != nil }), !FileManager.default.fileExists(atPath: override.path) {
@@ -339,7 +342,7 @@ enum CLIRunner {
                     do {
                         let directory = override ?? defaults.directory
                         if override != nil { try DownloadFolder.prepareRoot(directory) }
-                        let paper = try await engine.download(source, to: directory, naming: naming, mediaFormat: options.mediaFormat, organizeByType: override == nil) { event in
+                        let paper = try await engine.download(source, to: directory, naming: naming, namingSnapshot: namingSnapshot, mediaFormat: options.mediaFormat, organizeByType: override == nil) { event in
                             console.receive(event)
                         }
                         result.identifier = paper.metadata?.reference.identifier

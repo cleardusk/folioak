@@ -237,8 +237,53 @@ import SwiftUI
     }
 }
 
+@MainActor private final class ThumbnailRevisionFixture: ObservableObject {
+    @Published var revision = 0
+    @Published var progress = 0
+}
+
+private struct ThumbnailRevisionView: View {
+    @ObservedObject var fixture: ThumbnailRevisionFixture
+    let url: URL
+    let load: (URL, CGFloat) async -> NSImage?
+    var body: some View {
+        FileThumbnail(url: url, fallbackSymbol: "photo", palette: AppTheme.graphite.palette(dark: false),
+            revision: String(fixture.revision), loadImage: load)
+            .accessibilityValue(String(fixture.progress))
+    }
+}
+
 extension CoreTests {
     @MainActor static func thumbnailTests() async throws {
+        let fixture = ThumbnailRevisionFixture()
+        var loads = 0
+        let host = NSHostingView(rootView: ThumbnailRevisionView(fixture: fixture,
+            url: URL(fileURLWithPath: "/tmp/folioak-thumbnail-lifecycle.png"), load: { _, _ in loads += 1; return nil }))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 44, height: 44), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        for _ in 0..<40 where loads == 0 { try await Task.sleep(nanoseconds: 5_000_000) }
+        try expect(loads == 1, "mounted thumbnail starts one asynchronous request")
+        fixture.progress += 1
+        try await Task.sleep(nanoseconds: 30_000_000)
+        try expect(loads == 1, "unrelated progress does not repeat thumbnail filesystem work")
+        fixture.revision += 1
+        for _ in 0..<40 where loads < 2 { try await Task.sleep(nanoseconds: 5_000_000) }
+        try expect(loads == 2, "same-path file restoration reruns the mounted thumbnail task")
+        var gridLoads = 0
+        let gridHost = NSHostingView(rootView: FileThumbnail(url: URL(fileURLWithPath: "/tmp/folioak-grid-lifecycle.pdf"),
+            fallbackSymbol: "doc.text", palette: AppTheme.lagoon.palette(dark: true),
+            size: AssetGridPreview.document.requestSize, flexible: true, contentInset: 14,
+            loadImage: { _, _ in gridLoads += 1; return nil }))
+        let gridWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 196, height: 196), styleMask: [.borderless], backing: .buffered, defer: false)
+        gridWindow.isReleasedWhenClosed = false; gridWindow.contentView = gridHost; gridWindow.orderFront(nil)
+        defer { gridWindow.close() }
+        for _ in 0..<40 where gridLoads == 0 { try await Task.sleep(nanoseconds: 5_000_000) }
+        for size: CGFloat in [240, 208, 280, 196] {
+            gridWindow.setContentSize(NSSize(width: size, height: size)); gridHost.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        try expect(gridLoads == 1, "resizing flexible grid covers reuses the thumbnail instead of restarting Quick Look")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-thumbnail-tests-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         _ = try await ThumbnailTestMatrix.run(in: root)

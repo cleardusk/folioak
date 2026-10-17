@@ -19,7 +19,7 @@ extension CoreTests {
         }
         for input in ["https://github.com.evil.example/openai/math/blob/main/overview.pdf",
                       "https://example.com/openai/math/blob/main/overview.pdf", "https://github.com/openai/math/tree/main/overview.pdf",
-                      "https://github.com/openai/math/blob/main/README.md", "https://github.com/openai/math/blob/overview.pdf",
+                      "https://github.com/openai/math/blob/overview.pdf",
                       "https://github.com/openai/math/blob//overview.pdf", "https://github.com/openai/math/blob/main/overview.pdf/", "https://github.com/openai/math/blob/main/overview.pdf.exe"] {
             try expect(try DownloadSource.parse(input).directURL?.absoluteString == input, "unrelated or malformed preview routes stay unchanged")
         }
@@ -190,6 +190,14 @@ extension CoreTests {
         FixtureProtocol.install([.init(status: 304, finalURL: URL(string: "https://cdn.example.com/other.pdf")), .init(body: body)], path: "/report.pdf")
         let mismatched = try await engine.download(ref, to: folder)
         try expect(try Data(contentsOf: mismatched.url) == body && FixtureProtocol.lastRequest("/report.pdf")?.value(forHTTPHeaderField: "If-None-Match") == nil, "mismatched 304 falls back to unconditional download")
+
+        let redirectConditional = try DownloadSource.parse("https://example.com/conditional-redirect.pdf")
+        FixtureProtocol.install(.init(headers: ["ETag": "redirect-v1"], body: body), path: "/conditional-redirect.pdf")
+        _ = try await engine.download(redirectConditional, to: folder)
+        FixtureProtocol.install([.init(redirect: URL(string: "https://cdn.example.com/redirected-304.pdf")), .init(body: body)], path: "/conditional-redirect.pdf")
+        FixtureProtocol.install(.init(status: 304), path: "/redirected-304.pdf")
+        let redirectedRecovery = try await engine.download(redirectConditional, to: folder)
+        try expect(try Data(contentsOf: redirectedRecovery.url) == body && FixtureProtocol.lastRequest("/conditional-redirect.pdf")?.value(forHTTPHeaderField: "If-None-Match") == nil, "actual redirect 304 clears cached validator before unconditional retry")
 
         let invalidFolder = root.appendingPathComponent("generic-invalid"); try FileManager.default.createDirectory(at: invalidFolder, withIntermediateDirectories: true)
         for (path, reply) in [("/partial.pdf", FixtureProtocol.Reply(status: 206, body: body)), ("/web.pdf", .init(body: Data("<html>not a pdf</html>".utf8))), ("/unsolicited.pdf", .init(status: 304))] {

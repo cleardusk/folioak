@@ -6,6 +6,7 @@ enum DownloadError: LocalizedError {
     case http(Int, retryAfter: Double?)
     case cooldown(Double)
     case invalidPDF
+    case invalidFile, invalidFileDirectory, webPage
     case storage(String)
     case limit(String)
     case unsafeResponse
@@ -32,6 +33,9 @@ enum DownloadError: LocalizedError {
             }
             return DiagnosticMessage(.cooldown, String(format: "%.0f", max(1, ceil(seconds / 60))))
         case .invalidPDF: return DiagnosticMessage(.invalidPDF)
+        case .invalidFile: return DiagnosticMessage(.invalidFile)
+        case .invalidFileDirectory: return DiagnosticMessage(.invalidFileDirectory)
+        case .webPage: return DiagnosticMessage(.webPage)
         case .storage(let detail): return DiagnosticMessage(.storage, detail)
         case .unsafeResponse: return DiagnosticMessage(.unsafeResponse)
         }

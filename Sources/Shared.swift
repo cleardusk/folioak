@@ -29,7 +29,7 @@ enum SourceScheduler {
 }
 
 enum DownloadFolder: String, Sendable {
-    case papers = "Papers", videos = "Videos", audio = "Audio", images = "Images"
+    case papers = "Papers", videos = "Videos", audio = "Audio", images = "Images", documents = "Documents", archives = "Archives"
 
     static func media(extension ext: String) -> Self {
         if FileStorage.imageExtensions.contains(ext.lowercased()) { return .images }
@@ -68,6 +68,7 @@ struct DownloadPreferences {
     }
     let directory: URL
     let naming: NamingStyle
+    let namingRules: AssetNamingRules
     init(_ preferences: UserDefaults, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         let oldDefault = ["Leafpick", "Leafpeak"].map { home.appendingPathComponent("Downloads/\($0)", isDirectory: true) }.first {
             var isDirectory: ObjCBool = false
@@ -77,6 +78,7 @@ struct DownloadPreferences {
         // meanings differ from the new root and cannot be safely inferred.
         directory = preferences.string(forKey: "downloadRootDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? oldDefault ?? home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
+        namingRules = AssetNamingRules.read(preferences)
         naming = NamingStyle(rawValue: preferences.string(forKey: "namingStyle") ?? "") ?? .dateTitle
     }
 }

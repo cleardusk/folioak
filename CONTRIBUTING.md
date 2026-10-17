@@ -19,9 +19,9 @@ The first build or test run needs internet access to fetch pinned media dependen
 
 | Area | Files | Responsibility |
 | --- | --- | --- |
-| Download engine | `Core.swift`, `DownloadError.swift`, `Messages.swift`, `BrowserAuthentication.swift`, `PDF.swift`, `Media.swift`, `Douyin.swift`, `Shared.swift` | Parse links, schedule requests, validate files, run media tools and coordinate concurrent processes |
+| Download engine | `Core.swift`, `DownloadError.swift`, `Messages.swift`, `BrowserAuthentication.swift`, `PDF.swift`, `Media.swift`, `Files.swift`, `Douyin.swift`, `Shared.swift`, `AssetNaming.swift` | Parse links, schedule requests, validate files, run media tools and coordinate concurrent processes |
 | Application state | `App.swift`, `Workspace.swift`, `WorkspacePersistence.swift`, `Library.swift` | Queue lifecycle, preferences, saved history and libraries; a dedicated component serializes disk access |
-| Interface | `WorkspaceView.swift`, `Interaction.swift`, `SidebarMotion.swift`, `Theme.swift`, `Shortcuts.swift` | Views, native controls, keyboard interaction and appearance |
+| Interface | `WorkspaceView.swift`, `LibraryPresentation.swift`, `AssetNamingSettings.swift`, `Interaction.swift`, `SidebarMotion.swift`, `Theme.swift`, `Shortcuts.swift` | Views, native controls, keyboard interaction and appearance |
 | Command line | `CLI.swift` | Arguments, progress, structured output and exit codes |
 | Packaging | `Tools/`, `build.command`, `package.command` | Pinned dependencies, signing and verified release artifacts |
 
@@ -40,3 +40,7 @@ Swift sources live in `Sources/`; tests live in `Tests/`. `App.swift` also conta
 Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Release and dependency changes follow [Build & release](RELEASING.md); bundled components have [separate licenses](Resources/MediaComponents.md).
 
 Project source is licensed under [MIT](LICENSE). Keep its copyright notice when redistributing source or binaries; third-party component licenses still apply.
+
+Run `FOLIOAK_TEST_OPTIMIZE=1 ./test.command --large-library-only` to measure queries, asynchronous persistence, and main-actor responsiveness with 20,000 records under release optimization. Use `FOLIOAK_TEST_OPTIMIZE=1 ./test.command --stress --snapshots` for full stress and visual checks; `./test.command --files-only` exercises common-file download and library recovery fixtures.
+
+Naming regressions use `--naming-only`; `--grid-only` covers native list/grid selection and focus, bilingual light/dark snapshots and actual 20,000-item viewport mounting. `--progress-only` checks real URLSession delegate callbacks, known/unknown totals, cancellation and arXiv pacing with offline fixtures. Public-link reproduction stays separate from the offline suite.

@@ -113,7 +113,7 @@ extension CoreTests {
         for validSelection in [true, false] {
             for scenario in ["success", "rejected", "limited", "cancelled"] {
                 let probe = DouyinEngineProbe(), events = DouyinEvents()
-                let engine = DownloadEngine(mediaAuthentication: { try await probe.authentication(valid: validSelection) }, mediaDownload: { _, _, _, _, auth, _ in
+                let engine = DownloadEngine(mediaAuthentication: { try await probe.authentication(valid: validSelection) }, mediaDownload: { _, _, _, _, auth, _, _ in
                     await probe.attempt(auth)
                     switch scenario {
                     case "rejected": throw MediaDownloader.failure("ERROR: HTTP Error 403: Forbidden", url: url)

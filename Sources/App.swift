@@ -98,6 +98,7 @@ struct DownloadItem: Identifiable, Codable {
     // Optional so records written before library removal remain decodable.
     var libraryRemovedAt: Date? = nil
     var preservesInput: Bool? = nil
+    var namingSnapshot: AssetNamingSnapshot? = nil
     var isLibraryRemoved: Bool { libraryRemovedAt != nil }
     var localURLs: [URL] { (savedURL.map { [$0] } ?? []) + (additionalURLs ?? []) }
     var source: DownloadSource? {
@@ -106,7 +107,7 @@ struct DownloadItem: Identifiable, Codable {
         let parsed = try? DownloadSource.parse(directURL.absoluteString)
         if parsed?.isMedia != true, let savedURL {
             if savedURL.pathExtension.lowercased() == "pdf" { return .pdf(directURL) }
-            if FileStorage.extensions.contains(savedURL.pathExtension.lowercased()) { return .file(directURL) }
+            if FileStorage.extensions.union(GenericFileStorage.extensions).contains(savedURL.pathExtension.lowercased()) { return .file(directURL) }
         }
         return parsed
     }
@@ -114,12 +115,13 @@ struct DownloadItem: Identifiable, Codable {
         if let savedURL {
             let ext = savedURL.pathExtension.lowercased()
             if ext == "pdf" { return "doc.text" }
+            if GenericFileStorage.extensions.contains(ext) { return GenericFileStorage.symbol(ext) }
             if FileStorage.imageExtensions.contains(ext) { return "photo" }
             return FileStorage.videoExtensions.contains(ext) ? "play.rectangle" : "waveform"
         }
         return mediaFormat == .audio && source?.isMedia == true ? "waveform" : source?.symbol ?? "doc"
     }
-    var title: String { metadata?.title ?? documentTitle ?? source?.label ?? original }
+    var title: String { documentTitle ?? metadata?.title ?? source?.label ?? original }
     var canRetry: Bool { source != nil && (state == .failed || state == .cancelled || state == .missing || state == .paused) }
     var localizedError: String? { errorMessage.map(L10n.text) ?? error.map(L) }
     mutating func setError(_ message: DiagnosticMessage) {
@@ -175,6 +177,15 @@ final class DownloadModel: ObservableObject {
         }
     }
 
+    @Published var documentDisplayMode: LibraryDisplayMode {
+        didSet { preferences.set(documentDisplayMode.rawValue, forKey: "documentDisplayMode") }
+    }
+    @Published var mediaDisplayMode: LibraryDisplayMode {
+        didSet { preferences.set(mediaDisplayMode.rawValue, forKey: "mediaDisplayMode") }
+    }
+    @Published var namingRules: AssetNamingRules {
+        didSet { if namingRules.valid, let data = try? JSONEncoder().encode(namingRules) { preferences.set(data, forKey: AssetNamingRules.preferenceKey) } }
+    }
     @Published var naming: NamingStyle {
         didSet { preferences.set(naming.rawValue, forKey: "namingStyle") }
     }
@@ -217,6 +228,7 @@ final class DownloadModel: ObservableObject {
     @Published var editRequest = UUID()
     @Published var listRequest = UUID()
     @Published var searchRequest = UUID()
+    @Published private(set) var fileRefreshRevision = 0
     @Published var previewURL: URL?
     @Published var diagnosticItem: DownloadItem?
     let shortcuts: ShortcutSettings
@@ -227,6 +239,7 @@ final class DownloadModel: ObservableObject {
     let engine: DownloadEngine
     private let preferences: UserDefaults
     let opener: (URL) -> Bool
+    private let revealer: ([URL]) -> Void
     private let recycleFile: (URL) throws -> Void
     private var worker: Task<Void, Never>?
     private var runID = UUID()
@@ -237,20 +250,23 @@ final class DownloadModel: ObservableObject {
     private var stateURL: URL? { persistence?.stateURL }
     private var saveWork: DispatchWorkItem?
     private var workspaceRevision = 0
-    private var libraryRevision = 0
-    private var mediaLibraryRevision = 0
+    private(set) var libraryRevision = 0
+    let libraryQueries = LibraryQueryCache()
+    private(set) var mediaLibraryRevision = 0
     private var persistenceSequence = 0
     private var appliedPersistenceSequence = 0
     private var savingWorkspace = false
     private var pendingWorkspaceSave = false
     private var persistenceReady = false
     private var activePanel: NSOpenPanel?
+    @Published private(set) var libraryMutationInProgress = false
+    private var libraryMutationWaiters: [CheckedContinuation<Void, Never>] = []
     private var libraryDirty = false
     private(set) var libraryWritable = true
     private var shortcutChanges: AnyCancellable?
     private var libraryURL: URL? { persistence?.libraryURL }
 
-    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil, recycleFile: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }, updates: UpdateChecker? = nil) {
+    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil, recycleFile: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }, updates: UpdateChecker? = nil, revealer: @escaping ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }) {
         let authenticationSettings = BrowserAuthenticationSettings(preferences)
         browserAuthentication = authenticationSettings
         self.updates = updates ?? UpdateChecker(preferences: preferences)
@@ -259,9 +275,13 @@ final class DownloadModel: ObservableObject {
         self.preferences = preferences
         shortcuts = ShortcutSettings(preferences)
         self.opener = opener
+        self.revealer = revealer
         self.recycleFile = recycleFile
         persistence = stateURL.map(WorkspacePersistence.init)
         let downloadPreferences = DownloadPreferences(preferences)
+        documentDisplayMode = LibraryDisplayMode(rawValue: preferences.string(forKey: "documentDisplayMode") ?? "") ?? .list
+        mediaDisplayMode = LibraryDisplayMode(rawValue: preferences.string(forKey: "mediaDisplayMode") ?? "") ?? .list
+        namingRules = downloadPreferences.namingRules
         naming = downloadPreferences.naming
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
         theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
@@ -285,7 +305,7 @@ final class DownloadModel: ObservableObject {
         let current = Set(items.map(\.id))
         return items + history.filter { !current.contains($0.id) }
     }
-    var canClearDownloadRecords: Bool { !busy && (!items.isEmpty || !history.isEmpty) }
+    var canClearDownloadRecords: Bool { !busy && !libraryMutationInProgress && (!items.isEmpty || !history.isEmpty) }
 
     func clearDownloadRecords() {
         guard canClearDownloadRecords, replaceDownloadRecords(items: [], history: []) else { return }
@@ -294,7 +314,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func clearDownloadRecord(_ id: UUID) {
-        guard !busy, downloads.contains(where: { $0.id == id }) else { return }
+        guard !busy, !libraryMutationInProgress, downloads.contains(where: { $0.id == id }) else { return }
         if replaceDownloadRecords(items: items.filter { $0.id != id }, history: history.filter { $0.id != id }) {
             recordAnimation = UUID()
             if diagnosticItem?.id == id { diagnosticItem = nil }
@@ -302,54 +322,110 @@ final class DownloadModel: ObservableObject {
     }
 
     func canManageLibrary(_ collection: LibraryCollection) -> Bool {
-        !busy && (collection == .documents ? libraryWritable && !importingPDFs : mediaLibraryWritable)
+        !busy && !libraryMutationInProgress && (collection == .documents ? libraryWritable && !importingPDFs : mediaLibraryWritable)
     }
 
     @discardableResult
-    func setLibraryRemoved(_ ids: Set<UUID>, in collection: LibraryCollection, removed: Bool) -> Bool {
-        changeLibraryRemoval(ids, in: collection, removed: removed, registerUndo: true)
+    func setLibraryRemoved(_ ids: Set<UUID>, in collection: LibraryCollection, removed: Bool) async -> Bool {
+        await changeLibraryRemoval(ids, in: collection, removed: removed, registerUndo: true)
     }
 
-    private func changeLibraryRemoval(_ ids: Set<UUID>, in collection: LibraryCollection, removed: Bool, registerUndo: Bool) -> Bool {
+    private func changeLibraryRemoval(_ ids: Set<UUID>, in collection: LibraryCollection, removed: Bool, registerUndo: Bool) async -> Bool {
         guard canManageLibrary(collection) else {
             notice = busy ? "下载结束后可整理资料库。" : "资料库当前无法修改，原记录已保留。"
             return false
+        }
+        libraryMutationInProgress = true
+        saveWork?.cancel(); saveWork = nil
+        defer {
+            libraryMutationInProgress = false
+            let waiters = libraryMutationWaiters; libraryMutationWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+            saveWorkspace()
         }
         do {
             let changed: Set<UUID>
             switch collection {
             case .documents:
+                let revision = libraryRevision
                 var updated = papers
                 changed = Set(updated.filter { ids.contains($0.id) && $0.removed != removed }.map(\.id))
                 guard !changed.isEmpty else { return false }
                 for i in updated.indices where changed.contains(updated[i].id) {
                     updated[i].removed = removed
-                    if !removed { updated[i].missing = updated[i].file.map { !FileManager.default.fileExists(atPath: $0.path) } ?? true }
+                }
+                let before = Dictionary(papers.filter { changed.contains($0.id) }.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+                if !removed {
+                    let snapshot = updated
+                    updated = await Task.detached(priority: .userInitiated) {
+                        var checked = snapshot
+                        for i in checked.indices where changed.contains(checked[i].id) {
+                            checked[i].missing = checked[i].file.map { !FileManager.default.fileExists(atPath: $0.path) } ?? true
+                        }
+                        return checked
+                    }.value
                 }
                 // The serial writer drains older saves before this commit. Publish
                 // only after it succeeds; revision checks reject late completions.
-                try persistence?.writeLibrary(updated)
-                papers = updated; libraryDirty = false; libraryNotice = nil
+                try await persistence?.commitLibrary(updated)
+                let unchanged = revision == libraryRevision
+                if unchanged { papers = updated; libraryDirty = false }
+                else {
+                    // Preserve newer metadata/relinks while merging the fields
+                    // this transaction checked. Unrelated edits must not discard
+                    // a successful missing-file recovery.
+                    let checked = Dictionary(updated.filter { changed.contains($0.id) }.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+                    var merged = papers
+                    for i in merged.indices where changed.contains(merged[i].id) {
+                        merged[i].removed = removed
+                        if !removed, let original = before[merged[i].id], let saved = checked[merged[i].id],
+                           merged[i].file == original.file, merged[i].missing == original.missing {
+                            merged[i].missing = saved.missing
+                        }
+                    }
+                    papers = merged
+                }
+                libraryNotice = nil
             case .media:
+                let revision = mediaLibraryRevision
                 var updated = mediaLibrary
                 changed = Set(updated.filter { ids.contains($0.id) && $0.isLibraryRemoved != removed }.map(\.id))
                 guard !changed.isEmpty else { return false }
                 let date = removed ? Date() : nil
-                for i in updated.indices where changed.contains(updated[i].id) {
-                    updated[i].libraryRemovedAt = date
-                    if !removed {
-                        let complete = updated[i].incompleteFileList != true &&
-                            updated[i].localURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
-                        if !complete {
-                            updated[i].state = .missing
-                            updated[i].error = "部分或全部文件已不在原位置，可重新下载。"
-                        } else if updated[i].state == .missing {
-                            updated[i].state = .saved; updated[i].error = nil
+                let before = Dictionary(mediaLibrary.filter { changed.contains($0.id) }.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+                for i in updated.indices where changed.contains(updated[i].id) { updated[i].libraryRemovedAt = date }
+                if !removed {
+                    let snapshot = updated
+                    updated = await Task.detached(priority: .userInitiated) {
+                        var checked = snapshot
+                        for i in checked.indices where changed.contains(checked[i].id) {
+                            let complete = checked[i].incompleteFileList != true && !checked[i].localURLs.isEmpty &&
+                                checked[i].localURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
+                            if !complete {
+                                checked[i].state = .missing; checked[i].error = "部分或全部文件已不在原位置，可重新下载。"
+                            } else if checked[i].state == .missing {
+                                checked[i].state = .saved; checked[i].error = nil
+                            }
+                        }
+                        return checked
+                    }.value
+                }
+                try await persistence?.commitMediaLibrary(updated)
+                if revision == mediaLibraryRevision { mediaLibrary = updated; mediaLibraryDirty = false }
+                else {
+                    let checked = Dictionary(updated.filter { changed.contains($0.id) }.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+                    var merged = mediaLibrary
+                    for i in merged.indices where changed.contains(merged[i].id) {
+                        merged[i].libraryRemovedAt = date
+                        if !removed, let original = before[merged[i].id], let saved = checked[merged[i].id],
+                           merged[i].localURLs == original.localURLs, merged[i].state == original.state,
+                           merged[i].incompleteFileList == original.incompleteFileList {
+                            merged[i].state = saved.state; merged[i].error = saved.error
                         }
                     }
+                    mediaLibrary = merged
                 }
-                try persistence?.writeMediaLibrary(updated)
-                mediaLibrary = updated; mediaLibraryDirty = false; mediaLibraryNotice = nil
+                mediaLibraryNotice = nil
             }
             recordAnimation = UUID()
             if registerUndo { libraryUndo = LibraryRemovalUndo(collection: collection, ids: changed, removed: removed) }
@@ -362,11 +438,17 @@ final class DownloadModel: ObservableObject {
     }
 
     @discardableResult
-    func undoLibraryRemoval() -> Bool {
+    func undoLibraryRemoval() async -> Bool {
         guard let undo = libraryUndo,
-              changeLibraryRemoval(undo.ids, in: undo.collection, removed: !undo.removed, registerUndo: false) else { return false }
+              await changeLibraryRemoval(undo.ids, in: undo.collection, removed: !undo.removed, registerUndo: false) else { return false }
         libraryUndo = nil
         return true
+    }
+
+    func waitForLibraryMutation() async {
+        if libraryMutationInProgress {
+            await withCheckedContinuation { libraryMutationWaiters.append($0) }
+        }
     }
 
     private func sameMediaSave(_ lhs: DownloadItem, _ rhs: DownloadItem) -> Bool {
@@ -392,7 +474,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func canTrashFiles(_ ids: Set<UUID>, in collection: RecordCollection) -> Bool {
-        !busy && (stateURL == nil || (libraryWritable && mediaLibraryWritable)) &&
+        !busy && !libraryMutationInProgress && (stateURL == nil || (libraryWritable && mediaLibraryWritable)) &&
             filesForRecords(ids, in: collection).contains { FileManager.default.fileExists(atPath: $0.path) }
     }
 
@@ -407,7 +489,7 @@ final class DownloadModel: ObservableObject {
 
     @discardableResult
     func confirmFileTrash(_ request: FileTrashRequest) -> Bool {
-        guard !busy, pendingFileTrash?.id == request.id else { return false }
+        guard !busy, !libraryMutationInProgress, pendingFileTrash?.id == request.id else { return false }
         defer { if pendingFileTrash?.id == request.id { pendingFileTrash = nil } }
         let files = Set(request.files)
         guard files == filesForRecords(request.ids, in: request.collection), !files.isEmpty else {
@@ -453,10 +535,12 @@ final class DownloadModel: ObservableObject {
     }
 
     private func refreshMissingFiles(_ files: Set<URL>) {
+        fileRefreshRevision += 1
         let missing = files.filter { !FileManager.default.fileExists(atPath: $0.path) }
         guard !missing.isEmpty else { return }
         func affected(_ item: DownloadItem) -> Bool { item.localURLs.contains { missing.contains(fileLocation($0)) } }
         func mark(_ item: inout DownloadItem) {
+            if item.state != .missing && item.incompleteFileList == nil { item.incompleteFileList = false }
             item.state = .missing
             item.restoreReference = item.metadata?.reference
             item.error = item.localURLs.contains { FileManager.default.fileExists(atPath: $0.path) }
@@ -508,7 +592,7 @@ final class DownloadModel: ObservableObject {
             for var item in (history + items).reversed() {
                 // Older history may have discarded missing attachment paths.
                 // Only a successful re-download can complete that collection.
-                if item.state == .missing { item.incompleteFileList = true }
+                if item.state == .missing && item.incompleteFileList == nil { item.incompleteFileList = true }
                 upsertMedia(item)
             }
         } catch { mediaLibraryWritable = false; mediaLibraryNotice = "媒体库无法读取，原文件已保留：\(error.localizedDescription)" }
@@ -617,12 +701,13 @@ final class DownloadModel: ObservableObject {
     }
 
     func retryFromLibrary(_ item: DownloadItem) {
-        guard !busy, let source = item.source else { return }
+        guard !busy, !libraryMutationInProgress, let source = item.source else { return }
         // Restore the exact version, even when the original request used “latest”.
         let original = item.metadata?.reference.identifier ?? source.webURL.absoluteString
         archiveResults()
         guard let restored = try? DownloadSource.parse(original) else { return }
-        items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued, mediaFormat: item.mediaFormat)]
+        let snapshot = item.namingSnapshot ?? AssetNamingSnapshot(rules: namingRules, paperStyle: naming, now: item.createdAt)
+        items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued, mediaFormat: item.mediaFormat, namingSnapshot: item.localURLs.isEmpty ? snapshot : snapshot.saving(item.localURLs))]
         duplicateCount = 0; batchID = UUID()
         record(.info, DiagnosticMessage(.redownload), item: items[0])
         saveWorkspace()
@@ -697,7 +782,7 @@ final class DownloadModel: ObservableObject {
     // Coalesce automatic saves while encoding and disk writes run off the UI.
     func saveWorkspace() {
         saveWork?.cancel(); saveWork = nil
-        if savingWorkspace { pendingWorkspaceSave = true; return }
+        if libraryMutationInProgress || savingWorkspace { pendingWorkspaceSave = true; return }
         guard let persistence, let request = persistenceRequest() else { return }
         savingWorkspace = true
         persistence.save(request) { [weak self] result in
@@ -713,6 +798,7 @@ final class DownloadModel: ObservableObject {
 
     // Explicit saves and termination drain earlier writes before returning.
     func persistWorkspace() {
+        guard !libraryMutationInProgress else { pendingWorkspaceSave = true; return }
         saveWork?.cancel(); saveWork = nil
         pendingWorkspaceSave = false
         guard let persistence, let request = persistenceRequest() else { return }
@@ -721,6 +807,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func persistWorkspaceAndWait() async {
+        await waitForLibraryMutation()
         saveWork?.cancel(); saveWork = nil
         pendingWorkspaceSave = false
         guard let persistence, let request = persistenceRequest() else { return }
@@ -757,7 +844,7 @@ final class DownloadModel: ObservableObject {
     }
 
     var tokenCount: Int { DownloadSource.tokens(in: input).count }
-    var hasMediaInput: Bool { DownloadSource.tokens(in: input).contains { (try? DownloadSource.parse($0))?.isMedia == true } }
+    var hasMediaInput: Bool { DownloadSource.tokens(in: input).contains { (try? DownloadSource.parse($0))?.supportsAudioExtraction == true } }
     var retryCount: Int { downloads.filter(\.canRetry).count }
     var canRetry: Bool { downloads.contains(where: \.canRetry) }
     var completed: Int { items.filter { $0.state.terminal }.count }
@@ -840,6 +927,7 @@ final class DownloadModel: ObservableObject {
     }
 
     private func submitDownload(_ text: String, quick: Bool) throws -> Int {
+        guard !libraryMutationInProgress else { throw DownloadError.limit("正在保存资料库，请稍后添加任务。") }
         guard !cancelling, quick || !busy else { throw DownloadError.limit("正在停止，请稍后添加任务。") }
         let batch = try BatchInput(text)
         if quick, let invalid = batch.entries.first(where: { $0.source == nil }) {
@@ -852,10 +940,11 @@ final class DownloadModel: ObservableObject {
         guard retainedItems.count + entries.count <= ResourceLimits.batchCount else {
             throw DownloadError.limit("队列最多保留 200 项，请等待部分任务完成。")
         }
+        let namingSnapshot = AssetNamingSnapshot(rules: namingRules, paperStyle: naming)
         let added = entries.map { entry in
             DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL,
                 state: entry.source == nil ? .failed : .queued, error: entry.error, errorMessage: entry.diagnostic,
-                mediaFormat: entry.source?.isMedia == true ? mediaFormat : nil, preservesInput: quick ? true : nil)
+                mediaFormat: entry.source?.supportsAudioExtraction == true ? mediaFormat : nil, preservesInput: quick ? true : nil, namingSnapshot: namingSnapshot)
         }
         let updatedItems = retainedItems + added
         var updatedHistory = historyByArchivingResults()
@@ -881,7 +970,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func retry(_ single: UUID? = nil) {
-        guard !busy else { return }
+        guard !busy, !libraryMutationInProgress else { return }
         if single == nil, history.contains(where: { old in old.canRetry && !items.contains(where: { $0.id == old.id }) }) {
             let candidates = Array(downloads.filter(\.canRetry).prefix(ResourceLimits.batchCount))
             archiveResults(); items = candidates; duplicateCount = 0; batchID = UUID()
@@ -930,42 +1019,80 @@ final class DownloadModel: ObservableObject {
         else { directoryNotice = nil }
     }
 
-    private func localFile(_ item: DownloadItem) -> URL? {
-        if let index = mediaLibrary.firstIndex(where: { $0.id == item.id }) {
-            // A download-history item can contain only the surviving attachments;
-            // the library retains and validates its full original collection.
-            let record = mediaLibrary[index]
-            let remaining = record.localURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
-            if remaining.count < record.localURLs.count {
-                mediaLibrary[index].state = .missing
-                mediaLibrary[index].error = remaining.isEmpty ? "原位置的文件不存在，可重新下载。" : "部分文件已不在原位置，仍可打开其余文件，或重新下载。"
-            } else if record.state == .missing && record.incompleteFileList != true {
-                mediaLibrary[index].state = .saved; mediaLibrary[index].error = nil
-            }
-        }
-        let files = item.localURLs
+    func localFile(_ item: DownloadItem) -> URL? {
+        fileRefreshRevision += 1
+        // Older history can contain a pruned collection. Prefer the retained
+        // library's complete paths; absence never destroys recovery information.
+        let copies = mediaLibrary.filter { $0.incompleteFileList != true && sameMediaSave(item, $0) }
+        let retained = mediaLibrary.first { $0.id == item.id && $0.incompleteFileList != true } ?? (copies.count == 1 ? copies[0] : nil)
+        let document = papers.first { ($0.id == item.id || $0.taskID == item.id) && $0.file != nil }
+        let documentIDs = Set([document?.id, document?.taskID].compactMap { $0 })
+        let files = retained?.localURLs ?? (item.localURLs.isEmpty ? document?.file.map { [$0] } ?? [] : item.localURLs)
         guard !files.isEmpty else { return nil }
-        let available = files.filter { FileManager.default.fileExists(atPath: $0.path) }
-        guard available.count == files.count else {
-            let message = available.isEmpty ? "原位置的文件不存在，可重新下载。" : "部分文件已不在原位置，仍可打开其余文件，或重新下载。"
-            update(item.id) {
-                $0.state = .missing; $0.savedURL = available.first
-                $0.additionalURLs = available.count > 1 ? Array(available.dropFirst()) : nil
-                $0.restoreReference = $0.metadata?.reference
-                $0.error = message
-            }
-            if let index = history.firstIndex(where: { $0.id == item.id }) {
-                history[index].state = .missing; history[index].savedURL = available.first
-                history[index].additionalURLs = available.count > 1 ? Array(available.dropFirst()) : nil
-                history[index].error = message
-            }
-            notice = message
-            record(.warning, DiagnosticMessage(.localMissing), item: item)
-            archiveResults()
-            saveWorkspace()
-            return available.first
+        let names = Set(files.map(\.lastPathComponent))
+        var parents: [URL: URL] = [:]
+        func location(_ url: URL) -> URL {
+            let parent = url.deletingLastPathComponent().standardizedFileURL
+            let resolved = parents[parent] ?? parent.resolvingSymlinksInPath()
+            parents[parent] = resolved
+            return resolved.appendingPathComponent(url.lastPathComponent)
         }
-        notice = nil
+        let locations = Set(files.map(location))
+        func belongs(_ url: URL) -> Bool {
+            names.contains(url.lastPathComponent) && locations.contains(location(url))
+        }
+        var existence: [URL: Bool] = [:]
+        func exists(_ url: URL) -> Bool {
+            if let cached = existence[url] { return cached }
+            let result = FileManager.default.fileExists(atPath: url.path)
+            existence[url] = result
+            return result
+        }
+        let available = files.filter(exists)
+        let missing = available.count != files.count || retained?.incompleteFileList == true
+        let message = available.isEmpty ? "原位置的文件不存在，可重新下载。" : "部分文件已不在原位置，仍可打开其余文件，或重新下载。"
+        func refresh(_ value: inout DownloadItem) {
+            if let retained, value.id == retained.id || (copies.count == 1 && sameMediaSave(value, retained)) {
+                value.savedURL = retained.savedURL; value.additionalURLs = retained.additionalURLs
+                value.incompleteFileList = false
+            }
+            if value.localURLs.isEmpty, documentIDs.contains(value.id), let file = document?.file {
+                value.savedURL = file; value.incompleteFileList = false
+            }
+            let absent = value.localURLs.isEmpty || value.localURLs.contains { !exists($0) }
+            if value.state != .missing && value.incompleteFileList == nil { value.incompleteFileList = false }
+            if absent || value.incompleteFileList == true {
+                value.state = .missing; value.restoreReference = value.metadata?.reference
+                value.error = message; value.errorMessage = nil
+            } else if value.state == .missing {
+                value.state = .saved; value.error = nil; value.errorMessage = nil
+            }
+        }
+        func matches(_ value: DownloadItem) -> Bool {
+            value.id == item.id || documentIDs.contains(value.id) || (copies.count == 1 && sameMediaSave(value, copies[0])) || value.localURLs.contains(where: belongs)
+        }
+        func refreshed(_ records: [DownloadItem]) -> [DownloadItem]? {
+            var updated = records, changed = false
+            for i in records.indices where matches(records[i]) {
+                var value = records[i]; refresh(&value)
+                if value.state != records[i].state || value.localURLs != records[i].localURLs ||
+                   value.error != records[i].error || value.incompleteFileList != records[i].incompleteFileList ||
+                   value.restoreReference != records[i].restoreReference || value.errorMessage != records[i].errorMessage {
+                    updated[i] = value; changed = true
+                }
+            }
+            return changed ? updated : nil
+        }
+        if let updated = refreshed(items) { items = updated }
+        if let updated = refreshed(history) { history = updated }
+        if let updated = refreshed(mediaLibrary) { mediaLibrary = updated }
+        for i in papers.indices where papers[i].file.map(belongs) == true {
+            let absent = !exists(papers[i].file!)
+            if papers[i].missing != absent { papers[i].missing = absent }
+        }
+        notice = missing ? message : nil
+        if missing { record(.warning, DiagnosticMessage(.localMissing), item: item) }
+        saveWorkspace()
         return available.first
     }
 
@@ -976,7 +1103,10 @@ final class DownloadModel: ObservableObject {
 
     func openFile(_ item: DownloadItem, reveal: Bool = false) {
         guard let url = localFile(item) else { return }
-        if reveal { NSWorkspace.shared.activateFileViewerSelecting(item.localURLs.filter { FileManager.default.fileExists(atPath: $0.path) }) }
+        if reveal {
+            let current = downloads.first { $0.id == item.id } ?? mediaLibrary.first { $0.id == item.id } ?? item
+            revealer(current.localURLs.filter { FileManager.default.fileExists(atPath: $0.path) })
+        }
         else if !opener(url) { notice = "无法打开文件，请检查默认应用。文件仍保存在原位置。" }
         else { notice = nil; if !reveal { markRead(url) } }
     }
@@ -1045,7 +1175,7 @@ final class DownloadModel: ObservableObject {
             switch event {
             case .coordinating: item.state = .coordinating
             case .metadata: item.state = .metadata
-            case .resolved(let metadata): item.metadata = metadata; item.state = .downloading
+            case .resolved(let metadata): item.metadata = metadata
             case .document(let title): item.documentTitle = title
             case .browserAuthentication, .anonymousFallback, .diagnostic: break
             case .checkingLocal: item.state = .checkingLocal
@@ -1083,7 +1213,9 @@ final class DownloadModel: ObservableObject {
                 saveWorkspace()
                 continue
             }
-            update(id) { $0.state = source.reference == nil ? .checkingLocal : .metadata; $0.diagnostics = TaskDiagnostics() }
+            let baseSnapshot = item.namingSnapshot ?? AssetNamingSnapshot(rules: namingRules, paperStyle: namingStyle, now: item.createdAt)
+            let snapshot = item.localURLs.isEmpty ? baseSnapshot : baseSnapshot.saving(item.localURLs)
+            update(id) { $0.namingSnapshot = snapshot; $0.state = source.reference == nil ? .checkingLocal : .metadata; $0.diagnostics = TaskDiagnostics() }
             record(.info, DiagnosticMessage(source.reference == nil ? .preparing : .paperMetadata), item: item)
             var continuation: AsyncStream<DownloadEvent>.Continuation!
             let events = AsyncStream<DownloadEvent>(bufferingPolicy: .bufferingNewest(128)) { continuation = $0 }
@@ -1092,10 +1224,11 @@ final class DownloadModel: ObservableObject {
                 for await event in events { self?.receive(event, for: id, run: run) }
             }
             do {
-                let saved = try await engine.download(source, to: target, naming: namingStyle, mediaFormat: item.mediaFormat ?? .automatic, organizeByType: true) { event in sink.yield(event) }
+                let saved = try await engine.download(source, to: target, naming: snapshot.paperStyle, namingSnapshot: snapshot, mediaFormat: item.mediaFormat ?? .automatic, organizeByType: true) { event in sink.yield(event) }
                 sink.finish()
                 await listener.value
                 update(id) {
+                    $0.namingSnapshot = snapshot.saving([saved.url] + saved.additionalURLs)
                     $0.metadata = saved.metadata
                     $0.documentTitle = saved.title
                     $0.savedURL = saved.url
@@ -1547,6 +1680,7 @@ struct SlidingSegments<Selection: Hashable>: View {
 }
 
 struct SettingsView: View {
+    @ViewState private var showsNamingRules = false
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     @Environment(\.colorScheme) private var scheme
@@ -1583,20 +1717,17 @@ struct SettingsView: View {
                         .accessibilityLabel(L("更改保存位置"))
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 28)
-                .help(L("自动归入 Papers、Videos、Audio、Images；首次下载时创建。"))
+                .help(L("按类型归入 Papers、Documents、Archives、Videos、Audio、Images；首次下载时创建。"))
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 16) {
-                    settingLabel(L("论文命名"))
-                    Picker(L("文件命名"), selection: $model.naming) {
-                        ForEach(NamingStyle.allCases, id: \.self) { Text(L($0.label)).tag($0) }
-                    }.id(localization.language).labelsHidden().disabled(model.busy).frame(maxWidth: .infinity, alignment: .leading)
-                        .help(L("arXiv 使用所选命名，年月取首次提交日期；其他 PDF 使用标题或原文件名。"))
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(model.namingExample).font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(ThemePalette.color(palette.secondary)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }.padding(.leading, labelWidth + 16).frame(maxWidth: .infinity, alignment: .leading)
-            }
+                    settingLabel(L("文件命名"))
+                    Text(L("按资产类型设置")).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
+                    Button(L("设置…")) { showsNamingRules = true }.controlSize(.small).accessibilityLabel(L("文件命名规则"))
+                }.frame(height: 28)
+                Text(L("自定义论文、文档、视频、音频、图片与压缩文件的命名。"))
+                    .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+                    .fixedSize(horizontal: false, vertical: true).padding(.leading, labelWidth + 16)
+            }.sheet(isPresented: $showsNamingRules) { AssetNamingSettings(model: model, palette: palette) }
             Divider()
             HStack(spacing: 16) {
                 settingLabel(L("语言"))
@@ -1628,7 +1759,7 @@ struct SettingsView: View {
                     }
                 }.frame(width: 422 - labelWidth - 16)
             }
-            Text(model.busy ? L("下载结束后可更改目录和命名。") : "")
+            Text(model.busy ? L("下载结束后可更改目录。") : "")
                 .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(height: 14).padding(.leading, labelWidth + 16)
         }
         .frame(maxHeight: .infinity, alignment: .top)
@@ -1878,8 +2009,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var updateTimer: Timer?
     private var presentingUpdate = false
 
-    init(model: DownloadModel? = nil) {
+    init(model: DownloadModel? = nil, menuBar: MenuBarController? = nil) {
         self.model = model ?? DownloadModel(stateURL: WorkspaceStore.defaultURL)
+        self.menuBar = menuBar
         super.init()
         AppLocalization.shared.language = self.model.language
     }
@@ -1980,7 +2112,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !model.showsMenuBarIcon }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationPending { return .terminateLater }
-        guard model.busy else { model.cancelVersionCheck(); model.persistWorkspace(); return .terminateNow }
+        guard model.busy else {
+            model.cancelVersionCheck()
+            terminationPending = true
+            Task { [self] in
+                await model.persistWorkspaceAndWait()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
         let alert = NSAlert()
         alert.messageText = L("仍有文件正在下载")
         alert.informativeText = L("已保存的文件会保留。退出将停止当前下载和等待中的任务。")
@@ -1996,7 +2136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === window {
-            if model.showsMenuBarIcon { sender.orderOut(nil); model.persistWorkspace() }
+            if model.showsMenuBarIcon { sender.orderOut(nil); model.saveWorkspace() }
             else { NSApp.terminate(sender) }
             return false
         }
@@ -2014,6 +2154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc private func focusInput() {
+        if menuBar?.focusInputIfShown() == true { return }
         guard window.attachedSheet == nil, !model.busy else { return }
         window.makeKeyAndOrderFront(nil)
         model.focusInput()

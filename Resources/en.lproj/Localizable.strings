@@ -8,7 +8,7 @@
 "发表年份" = "Publication Year";
 "文档库超过 32 MB。" = "The document library exceeds 32 MB.";
 "文档库格式无效。" = "The document library format is invalid.";
-"文档库最多保存 20,000 篇，已有文档不会被自动移除。" = "The document library holds up to 20,000 documents. Existing documents will be kept.";
+"文档库最多保存 20,000 项，已有文档不会被自动移除。" = "The document library holds up to 20,000 documents. Existing documents will be kept.";
 "文档库格式无效，已有文件保持不变。" = "The document library format is invalid. Existing files have been kept.";
 "文档库超过 32 MB，已有文件保持不变。" = "The document library exceeds 32 MB. Existing files have been kept.";
 "文档库只读，无法保存新增或修改；原文件已保留。" = "The document library is read-only. Existing files have been kept.";
@@ -53,7 +53,7 @@
 "重新关联 PDF…" = "Relink PDF…";
 "详情…" = "Details…";
 "移出文档库" = "Remove from Library";
-"保留 PDF，可从已移除的文档中恢复" = "Keep the PDF. Restore it from Removed documents.";
+"保留文件，可从已移除的文档中恢复" = "Keep the file. Restore it from Removed documents.";
 "恢复到文档库" = "Restore to Library";
 "保存位置无法创建或不可写，请更改位置后重试。" = "The save location could not be created or is not writable. Choose another location.";
 "%@ 文件夹无法创建或不可写，请检查保存位置与权限。" = "The %@ folder could not be created or is not writable. Check the location and permissions.";
@@ -647,3 +647,59 @@
 
 "停止" = "Stop";
 "已加入 1 项" = "Added 1 item";
+
+"最近下载" = "Recent downloads";
+"打开保存位置" = "Open download folder";
+"正在保存资料库，请稍后添加任务。" = "Saving the library. Please try again shortly.";
+
+/* Common file downloads */
+"按文件类型自动归档" = "Organized automatically by file type";
+"按类型归入 Papers、Documents、Archives、Videos、Audio、Images；首次下载时创建。" = "Organized into Papers, Documents, Archives, Videos, Audio, and Images; created on first download.";
+"重新关联文件" = "Relink File";
+"重新关联文件…" = "Relink File…";
+"本地文件" = "Local file";
+"文件已移动或不可读，请重新关联。" = "The file has moved or cannot be read. Please relink it.";
+"无法打开文件，请检查默认应用。" = "Unable to open the file. Check the default application.";
+"请选择相同格式的文件。" = "Choose a file in the same format.";
+"无法读取文件目录，文件可能损坏或过于复杂。" = "Unable to read the file directory. The file may be damaged or too complex.";
+"收到的是网页而不是文件，请使用文件的直接下载链接。" = "The server returned a web page. Use a direct file download link.";
+"文件内容与格式不符或文件已损坏，未保存。" = "The file is damaged or does not match its format. Nothing was saved.";
+
+"download.invalid_file" = "The file is damaged or does not match its format. Nothing was saved.";
+"download.invalid_file_directory" = "Unable to read the file directory. The file may be damaged or too complex.";
+"download.web_page" = "The server returned a web page. Use a direct file download link.";
+
+"文档与 PDF" = "Documents & PDFs";
+"压缩文件" = "Archives";
+"研究笔记" = "Research notes";
+"文件命名规则" = "File naming rules";
+"规则用于新任务，已有文件与进行中的任务保持原命名。" = "Rules apply to new tasks. Existing files and queued tasks keep their names.";
+"资产类型" = "Asset type";
+"命名格式" = "Name format";
+"默认命名" = "Default naming";
+"日期 + 标题" = "Date + title";
+"来源 + 标题" = "Source + title";
+"自定义模板" = "Custom template";
+"命名模板" = "Name template";
+"{title} 标题 · {date} 任务日期 · {source} 来源域名 · {id} 来源编号" = "{title} Title · {date} Task date · {source} Host · {id} Source ID";
+"文件名预览" = "Filename preview";
+"模板须包含 {title} 或 {id}，且不能含路径、未知占位符或非法字符。" = "Include {title} or {id}. Paths, unknown tokens and invalid characters are not allowed.";
+"扩展名自动保留；同名文件不会覆盖。多附件会追加编号，音频提取使用音频规则。" = "Extensions are preserved; existing files are never overwritten. Attachments get numbers, and extracted audio uses audio rules.";
+"按资产类型设置" = "Rules for each asset type";
+"自定义论文、文档、视频、音频、图片与压缩文件的命名。" = "Customize names for papers, documents, videos, audio, images and archives.";
+"下载结束后可更改目录。" = "The folder can be changed when downloads finish.";
+
+"arXiv 论文" = "arXiv papers";
+
+"连接下载…" = "Connecting…";
+"遵守 arXiv 请求间隔，稍后自动继续。" = "Waiting for the arXiv request interval; continuing automatically.";
+
+"列表视图" = "List view";
+"网格视图" = "Grid view";
+"显示方式" = "View mode";
+
+"需要修正模板" = "Fix template";
+
+"保存" = "Save";
+"下载进度" = "Download progress";
+"正在下载" = "Downloading";

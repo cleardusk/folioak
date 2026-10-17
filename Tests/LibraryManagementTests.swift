@@ -44,9 +44,9 @@ extension CoreTests {
         try await libraryRemovalTests(root: root, pdf: pdf, preferences: preferences)
         try await libraryReplayTests(root: root, preferences: preferences)
         try await libraryRemovalFailureTests(root: root, pdf: pdf, preferences: preferences)
-        try libraryFileTrashTests(root: root, pdf: pdf, preferences: preferences)
+        try await libraryFileTrashTests(root: root, pdf: pdf, preferences: preferences)
         try libraryFileTrashFailureTests(root: root, preferences: preferences)
-        print("PASS library management: synchronous remove/restore/undo, legacy migration, replay tombstones, bulk retention, shared-file trash, stale confirmations and failure recovery")
+        print("PASS library management: asynchronous remove/restore/undo, legacy migration, replay tombstones, bulk retention, shared-file trash, stale confirmations and failure recovery")
     }
 
     @MainActor private static func libraryRemovalTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
@@ -70,25 +70,25 @@ extension CoreTests {
             let onDisk = try? LibraryStore.read(state.deletingLastPathComponent().appendingPathComponent("library.json"))
             publishedAfterCommit = publishedAfterCommit && onDisk?.map(\.removed) == proposed.map(\.removed)
         }
-        try expect(model.setLibraryRemoved([item.id], in: .documents, removed: true), "document removal commits successfully")
+        try expect((await model.setLibraryRemoved([item.id], in: .documents, removed: true)), "document removal commits successfully")
         try expect(publishedAfterCommit && model.papers[0].removed && model.library.isEmpty &&
                    model.libraryUndo?.collection == .documents && model.libraryUndo?.ids == [item.id], "document removal is durable before publication and registers exact undo IDs")
         let restarted = LibraryManagementFixture.model(state, preferences)
         try expect(restarted.library.isEmpty && restarted.papers[0].removed && restarted.downloads.count == 1 &&
                    restarted.input == model.input && restarted.logs.map(\.id) == logIDs && (try Data(contentsOf: copy)) == fileBytes,
                    "removed documents stay removed across restart without clearing files, history or draft")
-        try expect(model.undoLibraryRemoval() && model.libraryUndo == nil && (try LibraryManagementFixture.encoded(model.papers[0])) == baseline,
+        try expect((await model.undoLibraryRemoval()) && model.libraryUndo == nil && (try LibraryManagementFixture.encoded(model.papers[0])) == baseline,
                    "undo restores all document organization and metadata without rewriting it from history")
         observation.cancel()
-        try expect(model.setLibraryRemoved([item.id], in: .documents, removed: true), "document can be removed again")
+        try expect((await model.setLibraryRemoved([item.id], in: .documents, removed: true)), "document can be removed again")
         var refreshed = item; refreshed.documentTitle = "Downloaded title"
         model.upsertPaper(refreshed)
         try expect(model.papers[0].removed && model.papers[0].title == "Personal title", "passive document upsert preserves removal and personal metadata")
-        try expect(model.setLibraryRemoved([item.id], in: .documents, removed: false), "explicit document restore succeeds")
+        try expect((await model.setLibraryRemoved([item.id], in: .documents, removed: false)), "explicit document restore succeeds")
         model.busy = true
-        try expect(!model.setLibraryRemoved([item.id], in: .documents, removed: true) && !model.papers[0].removed, "busy model rejects catalog removal")
+        try expect(!(await model.setLibraryRemoved([item.id], in: .documents, removed: true)) && !model.papers[0].removed, "busy model rejects catalog removal")
         model.busy = false
-        _ = model.setLibraryRemoved([UUID()], in: .documents, removed: true)
+        _ = await model.setLibraryRemoved([UUID()], in: .documents, removed: true)
         try expect(!model.papers[0].removed, "unknown catalog IDs do not change other entries")
 
         let first = try LibraryManagementFixture.file(state, "first.png"), second = try LibraryManagementFixture.file(state, "second.png")
@@ -96,9 +96,9 @@ extension CoreTests {
         var alreadyRemoved = LibraryManagementFixture.media(second, name: "second")
         alreadyRemoved.libraryRemovedAt = Date(timeIntervalSince1970: 50)
         model.mediaLibrary = [media, alreadyRemoved]; model.persistWorkspace()
-        try expect(model.setLibraryRemoved([media.id, alreadyRemoved.id], in: .media, removed: true), "mixed batch removal changes active media")
+        try expect((await model.setLibraryRemoved([media.id, alreadyRemoved.id], in: .media, removed: true)), "mixed batch removal changes active media")
         try expect(model.libraryUndo?.ids == [media.id], "undo records only IDs whose removal status actually changed")
-        try expect(model.undoLibraryRemoval() && !model.mediaLibrary[0].isLibraryRemoved && model.mediaLibrary[1].isLibraryRemoved,
+        try expect((await model.undoLibraryRemoval()) && !model.mediaLibrary[0].isLibraryRemoved && model.mediaLibrary[1].isLibraryRemoved,
                    "undo never resurrects entries that were already removed before the batch")
 
         let many = try (0..<502).map { index -> DownloadItem in
@@ -106,17 +106,17 @@ extension CoreTests {
         }
         model.mediaLibrary = many; model.items = Array(many.prefix(3)); model.history = Array(many.prefix(20)); model.persistWorkspace()
         let selected = Set(many.prefix(501).map(\.id))
-        try expect(model.setLibraryRemoved(selected, in: .media, removed: true), "bulk catalog removal is not limited by download-history retention")
+        try expect((await model.setLibraryRemoved(selected, in: .media, removed: true)), "bulk catalog removal is not limited by download-history retention")
         let bulkRestart = LibraryManagementFixture.model(state, preferences)
         try expect(bulkRestart.mediaLibrary.count == 502 && bulkRestart.mediaLibrary.filter(\.isLibraryRemoved).count == 501 &&
                    bulkRestart.mediaLibrary.first { $0.id == many.last!.id }?.isLibraryRemoved == false,
                    "all 501 tombstones survive restart while the unselected entry remains active")
-        try expect(bulkRestart.setLibraryRemoved(selected, in: .media, removed: false) && bulkRestart.mediaLibrary.allSatisfy { !$0.isLibraryRemoved },
+        try expect((await bulkRestart.setLibraryRemoved(selected, in: .media, removed: false)) && bulkRestart.mediaLibrary.allSatisfy { !$0.isLibraryRemoved },
                    "bulk restore retains every original entry beyond the history limit")
 
         // The old asynchronous write is already queued when removal commits.
         model.mediaLibrary = [media]; model.saveWorkspace()
-        try expect(model.setLibraryRemoved([media.id], in: .media, removed: true), "catalog commit drains earlier queued saves")
+        try expect((await model.setLibraryRemoved([media.id], in: .media, removed: true)), "catalog commit drains earlier queued saves")
         try await Task.sleep(nanoseconds: 50_000_000)
         let afterLateCompletion = LibraryManagementFixture.model(state, preferences)
         try expect(model.mediaLibrary[0].isLibraryRemoved && afterLateCompletion.mediaLibrary.first { $0.id == media.id }?.isLibraryRemoved == true,
@@ -132,7 +132,7 @@ extension CoreTests {
         let migrated = LibraryManagementFixture.model(legacyState, preferences)
         try expect(migrated.mediaLibrary.count == 1 && !migrated.mediaLibrary[0].isLibraryRemoved && migrated.input == "legacy draft",
                    "old workspace records decode and migrate without a removal timestamp")
-        try expect(migrated.setLibraryRemoved([legacy.id], in: .media, removed: true), "migrated media can be removed")
+        try expect((await migrated.setLibraryRemoved([legacy.id], in: .media, removed: true)), "migrated media can be removed")
         migrated.clearDownloadRecords()
         let afterClear = LibraryManagementFixture.model(legacyState, preferences)
         try expect(afterClear.downloads.isEmpty && afterClear.mediaLibrary[0].isLibraryRemoved, "clearing download history preserves media tombstones")
@@ -151,7 +151,7 @@ extension CoreTests {
         let schemaMigrated = LibraryManagementFixture.model(schemaState, preferences)
         try expect(schemaMigrated.mediaLibrary.map(\.id) == [schemaMedia.id] && !schemaMigrated.mediaLibrary[0].isLibraryRemoved,
                    "schema-one media catalogs remain readable without optional removal markers")
-        try expect(schemaMigrated.setLibraryRemoved([schemaMedia.id], in: .media, removed: true), "schema-one media can be removed")
+        try expect((await schemaMigrated.setLibraryRemoved([schemaMedia.id], in: .media, removed: true)), "schema-one media can be removed")
         let schemaObject = try JSONSerialization.jsonObject(with: Data(contentsOf: schemaLibrary)) as? [String: Any]
         let schemaReloaded = try MediaLibraryStore.read(schemaLibrary)
         try expect(schemaObject?["schema"] as? Int == 2 && schemaReloaded?.first?.isLibraryRemoved == true,
@@ -170,8 +170,11 @@ extension CoreTests {
         model.upsertMedia(unrelated)
         try FileManager.default.removeItem(at: first)
         model.items = [recent]; model.preview(recent)
+        // Explicitly model history written by the old path-pruning version.
+        model.items[0].savedURL = second; model.items[0].additionalURLs = nil
+        model.items[0].incompleteFileList = nil
         try expect(model.items[0].id != original.id && model.items[0].localURLs == [second], "fixture has a new history ID with pruned attachments")
-        try expect(model.setLibraryRemoved([original.id], in: .media, removed: true), "complete retained group can be removed independently")
+        try expect((await model.setLibraryRemoved([original.id], in: .media, removed: true)), "complete retained group can be removed independently")
         model.persistWorkspace()
         let restarted = LibraryManagementFixture.model(state, preferences)
         guard let retained = restarted.mediaLibrary.first(where: { $0.id == original.id }) else { throw TestFailure.failed("missing retained media group") }
@@ -204,25 +207,25 @@ extension CoreTests {
             let originalBytes = try Data(contentsOf: library)
             try FileManager.default.removeItem(at: library)
             try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
-            try expect(!model.setLibraryRemoved([id], in: collection, removed: true) && model.libraryUndo == nil,
+            try expect(!(await model.setLibraryRemoved([id], in: collection, removed: true)) && model.libraryUndo == nil,
                        "failed \(name) commit does not publish removal or undo")
             try expect(collection == .documents ? !model.papers[0].removed : !model.mediaLibrary[0].isLibraryRemoved,
                        "failed removal keeps the in-memory entry active")
             try FileManager.default.removeItem(at: library); try originalBytes.write(to: library)
-            try expect(model.setLibraryRemoved([id], in: collection, removed: true), "removal can be retried after storage recovery")
+            try expect((await model.setLibraryRemoved([id], in: collection, removed: true)), "removal can be retried after storage recovery")
             let removedBytes = try Data(contentsOf: library)
             try FileManager.default.removeItem(at: library); try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
-            try expect(!model.undoLibraryRemoval() && model.libraryUndo != nil, "failed undo remains available for retry")
+            try expect(!(await model.undoLibraryRemoval()) && model.libraryUndo != nil, "failed undo remains available for retry")
             try expect(collection == .documents ? model.papers[0].removed : model.mediaLibrary[0].isLibraryRemoved,
                        "failed restore does not falsely publish an active entry")
             try FileManager.default.removeItem(at: library); try removedBytes.write(to: library)
-            try expect(model.undoLibraryRemoval(), "undo succeeds after the store becomes writable")
+            try expect((await model.undoLibraryRemoval()), "undo succeeds after the store becomes writable")
 
             let future = Data((collection == .documents ? "{\"schema\":99,\"papers\":[]}" : "{\"schema\":99,\"items\":[]}").utf8)
             try future.write(to: library)
             var trashCalls = 0
             let readOnly = LibraryManagementFixture.model(state, preferences, recycle: { _ in trashCalls += 1 })
-            try expect(!readOnly.setLibraryRemoved([id], in: collection, removed: true) && (try Data(contentsOf: library)) == future,
+            try expect(!(await readOnly.setLibraryRemoved([id], in: collection, removed: true)) && (try Data(contentsOf: library)) == future,
                        "future-schema \(name) stores remain read-only and byte-preserved")
             readOnly.items = [media]
             let request = try LibraryManagementFixture.request(readOnly, ids: [media.id], in: .downloads)
@@ -232,7 +235,7 @@ extension CoreTests {
         }
     }
 
-    @MainActor private static func libraryFileTrashTests(root: URL, pdf: URL, preferences: UserDefaults) throws {
+    @MainActor private static func libraryFileTrashTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
         let state = try LibraryManagementFixture.state(root, "library-trash-shared")
         let real = state.deletingLastPathComponent().appendingPathComponent("real"), alias = state.deletingLastPathComponent().appendingPathComponent("alias")
         try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
@@ -245,7 +248,7 @@ extension CoreTests {
         var moves: [URL] = []
         let model = LibraryManagementFixture.model(state, preferences, recycle: { moves.append($0); try LibraryManagementFixture.recycle($0) })
         model.mediaLibrary = [group, shared]; model.items = [group, shared]; model.history = [group]; model.previewURL = aliasFile
-        try expect(model.setLibraryRemoved([group.id], in: .media, removed: true), "selected group is removed before independent file deletion")
+        try expect((await model.setLibraryRemoved([group.id], in: .media, removed: true)), "selected group is removed before independent file deletion")
         let request = try LibraryManagementFixture.request(model, ids: [group.id], in: .media)
         try expect(request.files == [file] && moves.isEmpty && FileManager.default.fileExists(atPath: file.path), "requesting confirmation does not mutate files and deduplicates aliases")
         try expect(model.confirmFileTrash(request) && moves == [file] && model.pendingFileTrash == nil,
@@ -257,7 +260,7 @@ extension CoreTests {
         let restarted = LibraryManagementFixture.model(state, preferences)
         try expect(restarted.mediaLibrary.count == 2 && restarted.mediaLibrary[0].isLibraryRemoved && restarted.mediaLibrary.allSatisfy { $0.state == .missing },
                    "trash and catalog-removal state survive a real model restart")
-        try expect(restarted.setLibraryRemoved([group.id], in: .media, removed: false) && restarted.mediaLibrary[0].state == .missing,
+        try expect((await restarted.setLibraryRemoved([group.id], in: .media, removed: false)) && restarted.mediaLibrary[0].state == .missing,
                    "restoring a trashed catalog item does not pretend its file was restored from Trash")
 
         let paperFile = state.deletingLastPathComponent().appendingPathComponent("shared.pdf")
@@ -272,7 +275,7 @@ extension CoreTests {
         try expect(paperRequest.files == [paperFile] && model.confirmFileTrash(paperRequest) && model.papers.allSatisfy(\.missing) && model.papers[0].removed &&
                    model.papers[0].tags == ["preserved"] && model.items[0].restoreReference == version && model.history[0].restoreReference == version,
                    "document trash updates all shared references and preserves organization and the exact saved arXiv version")
-        try expect(model.setLibraryRemoved([paper.id], in: .documents, removed: false) && model.papers[0].missing,
+        try expect((await model.setLibraryRemoved([paper.id], in: .documents, removed: false)) && model.papers[0].missing,
                    "restoring a removed document preserves its missing-file state")
 
         let staleFile = try LibraryManagementFixture.file(state, "stale.png"), replacement = try LibraryManagementFixture.file(state, "replacement.png")

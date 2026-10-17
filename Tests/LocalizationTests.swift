@@ -33,13 +33,17 @@ extension CoreTests {
         let settings = NSHostingView(rootView: SettingsView(model: model))
         let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 588), styleMask: [.borderless], backing: .buffered, defer: false)
         settingsWindow.contentView = settings
+        let namingSettings = NSHostingView(rootView: AssetNamingSettings(model: model, palette: model.theme.palette(dark: false)))
+        let namingWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 470), styleMask: [.borderless], backing: .buffered, defer: false)
+        namingWindow.contentView = namingSettings
+        defer { namingWindow.orderOut(nil) }
         defer { settingsWindow.orderOut(nil) }
         func pickerTitles(in view: NSView) -> [String] {
             if let picker = view as? NSPopUpButton { return picker.itemTitles }
             return view.subviews.flatMap { pickerTitles(in: $0) }
         }
-        settings.layoutSubtreeIfNeeded()
-        try expect(pickerTitles(in: settings).contains("年月 + 标题"), "native naming picker starts in Chinese")
+        settings.layoutSubtreeIfNeeded(); namingSettings.layoutSubtreeIfNeeded()
+        try expect(pickerTitles(in: namingSettings).contains("年月 + 标题"), "native naming picker starts in Chinese")
         let palette = AppTheme.graphite.palette(dark: false)
         let tabs = NSHostingView(rootView: FilterTabs(options: ActivityLevel.allCases, selection: .constant(.success), title: { L($0.label) }, palette: palette).frame(width: 540, height: 40))
         let day = NSHostingView(rootView: LogDaySeparator(date: Date(timeIntervalSince1970: 1_791_635_400), palette: palette).frame(width: 540, height: 40))
@@ -58,13 +62,13 @@ extension CoreTests {
         model.language = .english
         try await Task.sleep(nanoseconds: 150_000_000)
         view.layoutSubtreeIfNeeded()
-        settings.layoutSubtreeIfNeeded()
+        settings.layoutSubtreeIfNeeded(); namingSettings.layoutSubtreeIfNeeded()
         try expect(try pixels(tabs) != chineseTabs && pixels(day) != chineseDay, "mounted log filters and date update immediately without remounting")
         for hour in [0, 12, 23] {
             let date = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 11, hour: hour, minute: 2, second: 30))!
             try expect(L10n.logTime(date) == String(format: "%02d:02:30", hour), "English log times use an unambiguous 24-hour clock")
         }
-        try expect(pickerTitles(in: settings).contains("Year & Month + Title") && pickerTitles(in: settings).contains("System"), "native picker menus update to English")
+        try expect(pickerTitles(in: namingSettings).contains("Year & Month + Title") && pickerTitles(in: settings).contains("System"), "native picker menus update to English")
         try expect(editor(in: view) === input && input.selectedRange() == NSRange(location: 2, length: 3), "language changes preserve the native editor and selection")
         try expect(input.accessibilityLabel() == "Download links, one per line" && LinkTextView.example == "Paste paper or media links", "native labels and placeholder update immediately")
         try expect(L("设置") == "Settings" && L("自动重试 2/3") == "Retrying 2/3", "labels and dynamic state translate")
@@ -82,10 +86,10 @@ extension CoreTests {
         try expect(DownloadModel(preferences: preferences).language == .english, "explicit language persists")
         model.language = .chinese
         try await Task.sleep(nanoseconds: 150_000_000)
-        settings.layoutSubtreeIfNeeded()
+        settings.layoutSubtreeIfNeeded(); namingSettings.layoutSubtreeIfNeeded()
         try expect(try pixels(tabs) == chineseTabs, "mounted log filters update back to Chinese")
         try expect(try pixels(day) == chineseDay, "mounted log date updates back to Chinese")
-        try expect(pickerTitles(in: settings).contains("年月 + 标题") && pickerTitles(in: settings).contains("跟随系统") && !pickerTitles(in: settings).contains("Year & Month + Title"), "native picker menus refresh when switching back to Chinese")
+        try expect(pickerTitles(in: namingSettings).contains("年月 + 标题") && pickerTitles(in: settings).contains("跟随系统") && !pickerTitles(in: namingSettings).contains("Year & Month + Title"), "native picker menus refresh when switching back to Chinese")
         try expect(L("设置") == "设置" && L(DownloadError.invalidLink("123").localizedDescription) == DownloadError.invalidLink("123").localizedDescription, "switching back restores Chinese")
         preferences.set("unsupported", forKey: "language")
         try expect(DownloadModel(preferences: preferences).language == .system, "unknown saved language falls back to system")

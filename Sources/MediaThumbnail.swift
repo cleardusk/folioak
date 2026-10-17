@@ -38,6 +38,9 @@ private typealias ThumbnailState<Value> = SwiftUI.State<Value>
 
 @MainActor final class MediaThumbnailCache {
     static let shared = MediaThumbnailCache()
+    #if TESTING
+    static var loadCount = 0
+    #endif
     static let countLimit = 96
     static let byteLimit = 16 * 1024 * 1024
     private let images = NSCache<NSString, NSImage>()
@@ -47,25 +50,34 @@ private typealias ThumbnailState<Value> = SwiftUI.State<Value>
         images.totalCostLimit = Self.byteLimit
     }
 
-    static func key(url: URL, scale: CGFloat) -> String? {
+    nonisolated static func key(url: URL, scale: CGFloat, size: CGSize = CGSize(width: 44, height: 44)) -> String? {
         guard url.isFileURL,
               let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]),
               values.isRegularFile == true else { return nil }
-        return "\(url.standardizedFileURL.path)|\(values.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0)|\(values.fileSize ?? 0)|\(scale)"
+        return "\(url.standardizedFileURL.path)|\(values.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0)|\(values.fileSize ?? 0)|\(scale)|\(size.width)x\(size.height)"
     }
 
-    func image(url: URL, key: String, scale: CGFloat) async -> NSImage? {
+    static func load(url: URL, scale: CGFloat, size: CGSize = CGSize(width: 44, height: 44)) async -> NSImage? {
+        #if TESTING
+        loadCount += 1
+        #endif
+        let key = await Task.detached(priority: .utility) { Self.key(url: url, scale: scale, size: size) }.value
+        guard !Task.isCancelled, let key else { return nil }
+        return await shared.image(url: url, key: key, scale: scale, size: size)
+    }
+
+    func image(url: URL, key: String, scale: CGFloat, size: CGSize = CGSize(width: 44, height: 44)) async -> NSImage? {
         guard !Task.isCancelled else { return nil }
         if let cached = images.object(forKey: key as NSString) { return cached }
-        let request = MediaThumbnailRequest(url: url, size: CGSize(width: 44, height: 44), scale: scale)
+        let request = MediaThumbnailRequest(url: url, size: size, scale: scale)
         let result = await withTaskCancellationHandler {
             await withCheckedContinuation { request.start($0) }
         } onCancel: {
             Task { @MainActor in request.cancel() }
         }
         guard !Task.isCancelled, let result else { return nil }
-        let side = Int((44 * scale).rounded(.up))
-        images.setObject(result, forKey: key as NSString, cost: side * side * 4)
+        let width = Int((size.width * scale).rounded(.up)), height = Int((size.height * scale).rounded(.up))
+        images.setObject(result, forKey: key as NSString, cost: width * height * 4)
         return result
     }
 }
@@ -74,27 +86,36 @@ struct FileThumbnail: View {
     let url: URL?
     let fallbackSymbol: String
     let palette: ThemePalette
+    var revision = ""
+    var size = CGSize(width: 44, height: 44)
+    var flexible = false
+    var contentInset: CGFloat = 0
+    var loadImage: ((URL, CGFloat) async -> NSImage?)? = nil
     @Environment(\.displayScale) private var scale
     @ThumbnailState private var thumbnail: NSImage?
 
     var body: some View {
-        let key = url.flatMap { MediaThumbnailCache.key(url: $0, scale: scale) }
+        let requestID = "\(url?.absoluteString ?? "")|\(scale)|\(revision)|\(size.width)x\(size.height)"
         ZStack {
             if let thumbnail {
                 Image(nsImage: thumbnail).resizable().scaledToFit()
             } else {
-                Image(systemName: fallbackSymbol).font(.system(size: 22, weight: .light))
+                Image(systemName: fallbackSymbol).font(.system(size: min(size.height * 0.5, 40), weight: .light))
                     .foregroundStyle(ThemePalette.color(palette.secondary))
             }
         }
-        .frame(width: WorkspaceMetrics.rowIconSize, height: WorkspaceMetrics.rowIconSize)
+        .padding(contentInset)
+        .frame(width: flexible ? nil : size.width, height: flexible ? nil : size.height)
+        .frame(maxWidth: flexible ? .infinity : nil, maxHeight: flexible ? .infinity : nil)
         .background(ThemePalette.color(palette.surface))
         .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
         .accessibilityHidden(true)
-        .task(id: key) {
+        .task(id: requestID) {
             thumbnail = nil
-            guard let url, let key else { return }
-            let image = await MediaThumbnailCache.shared.image(url: url, key: key, scale: scale)
+            guard let url else { return }
+            let image: NSImage?
+            if let loadImage { image = await loadImage(url, scale) }
+            else { image = await MediaThumbnailCache.load(url: url, scale: scale, size: size) }
             if !Task.isCancelled { thumbnail = image }
         }
     }

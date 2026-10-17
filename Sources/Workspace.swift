@@ -102,6 +102,7 @@ enum WorkspaceStore {
         guard references.allSatisfy({ (try? ArxivReference.parse($0.identifier)) == $0 }),
               item.original.utf8.count <= ResourceLimits.inputBytes,
               item.diagnostics?.valid ?? true,
+              item.namingSnapshot?.valid ?? true,
               item.metadata.map({ $0.title.count <= ResourceLimits.titleCharacters && (1...12).contains($0.month) && (1900...2199).contains($0.year) }) ?? true,
               item.documentTitle.map({ $0.count <= ResourceLimits.titleCharacters }) ?? true,
               item.savedURL.map(validFile) ?? true,
@@ -111,7 +112,7 @@ enum WorkspaceStore {
         return true
     }
     private static func validFile(_ url: URL) -> Bool {
-        url.isFileURL && (url.pathExtension.lowercased() == "pdf" || FileStorage.extensions.contains(url.pathExtension.lowercased()))
+        url.isFileURL && (url.pathExtension.lowercased() == "pdf" || FileStorage.extensions.contains(url.pathExtension.lowercased()) || GenericFileStorage.extensions.contains(url.pathExtension.lowercased()))
     }
 
     static func export(_ data: Data, named name: String, to directory: URL) throws -> URL {

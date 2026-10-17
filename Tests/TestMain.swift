@@ -94,6 +94,7 @@ actor MockTransport: HTTPTransport {
 @main
 struct CoreTests {
     @MainActor static func main() {
+        setbuf(stdout, nil)
         // Native sheets can stop a run-loop iteration. Swift's async-main drain
         // then exits with status 0, so keep the host alive until the suite returns.
         var completed = false
@@ -109,6 +110,14 @@ struct CoreTests {
         defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--native-menus-only") {
+                try await quickDownloadUITests()
+                try await librarySelectionUITests()
+                return
+            }
+            if CommandLine.arguments.contains("--picker-clicks-only") {
+                try await libraryDisplayPickerClickTests(); return
+            }
             if CommandLine.arguments.contains("--row-clicks-only") {
                 try await fileRowDoubleClickTests()
                 return
@@ -171,6 +180,19 @@ struct CoreTests {
             defer { try? FileManager.default.removeItem(at: root) }
             let pdf = root.appendingPathComponent("sample.pdf")
             try createPDF(at: pdf)
+            if CommandLine.arguments.contains("--large-library-only") {
+                try await largeLibraryRegressionTests(root: root, pdf: pdf); return
+            }
+            try await downloadProgressTests(root: root, pdf: pdf)
+            if CommandLine.arguments.contains("--progress-only") { return }
+            try await libraryGridTests(root: root, pdf: pdf)
+            if CommandLine.arguments.contains("--grid-only") { return }
+            try await namingTests(root: root, pdf: pdf)
+            if CommandLine.arguments.contains("--naming-only") { return }
+            try await genericFileTests(root: root, pdf: pdf)
+            if CommandLine.arguments.contains("--files-only") { return }
+            try await stageOneRegressionTests(root: root, pdf: pdf)
+            if CommandLine.arguments.contains("--stage-one-only") { return }
             try await mediaTests(root: root)
             try await fileInformationTests(root: root, pdf: pdf)
             try await thumbnailTests()
@@ -228,6 +250,7 @@ struct CoreTests {
             if CommandLine.arguments.contains("--stress") {
                 try await resourceTests(root: root, pdf: pdf)
                 try workspaceBenchmark(root: root)
+                try await largeLibraryRegressionTests(root: root, pdf: pdf)
             }
             if CommandLine.arguments.contains("--snapshots") { try renderSnapshots() }
             if CommandLine.arguments.contains("--live") { try await liveTests() }
@@ -319,6 +342,7 @@ struct CoreTests {
         if case .limit? = observer.failure { } else { throw TestFailure.failed("streaming limit did not report clear error") }
         for (path, mime, limited) in [("/download", "application/pdf", true), ("/download", "application/octet-stream", true),
                                       ("/download", "video/mp4", false), ("/download", "image/png", false),
+                                      ("/slides.pptx", "application/octet-stream", false), ("/download", "application/epub+zip", false),
                                       ("/video.mp4", "application/octet-stream", false), ("/video.mp4", "application/pdf", true)] {
             let response = HTTPURLResponse(url: URL(string: "https://example.org" + path)!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": mime])!
             let task = ResponseDownloadTask(response)
@@ -570,7 +594,7 @@ struct CoreTests {
         try expect(opening.notice != nil && opening.items[0].state == model.items[0].state, "opener failure feedback preserves file")
         opening.items[0].savedURL = root.appendingPathComponent("deleted.pdf")
         opening.openFile(opening.items[0])
-        try expect(opening.items[0].state == .missing && opening.items[0].savedURL == nil && opening.items[0].canRetry, "deleted file feedback and retry")
+        try expect(opening.items[0].state == .missing && opening.items[0].savedURL == root.appendingPathComponent("deleted.pdf") && opening.items[0].canRetry, "deleted file feedback and retry")
         opening.directory = root.appendingPathComponent("deleted-directory")
         opening.openDirectory()
         try expect(opening.directoryNotice != nil, "deleted directory feedback")
@@ -597,7 +621,9 @@ struct CoreTests {
 
         let frozenTransport = MockTransport(sourcePDF: pdf, delay: 50_000_000)
         let frozen = DownloadModel(engine: DownloadEngine(transport: frozenTransport, requestInterval: 0, retryDelay: 0), preferences: preferences)
-        frozen.directory = output
+        // Exercise a new transfer; existing files intentionally retain their old names.
+        let frozenOutput = root.appendingPathComponent("queue-frozen")
+        frozen.directory = frozenOutput
         frozen.naming = .identifierTitle
         frozen.input = "2501.12345v2"
         frozen.start()
@@ -607,7 +633,7 @@ struct CoreTests {
         frozen.naming = .titleOnly
         frozen.directory = root.appendingPathComponent("another-folder")
         try await waitForQueue(frozen)
-        try expect(frozen.items[0].savedURL?.deletingLastPathComponent() == output.appendingPathComponent("Papers", isDirectory: true) && frozen.items[0].savedURL?.lastPathComponent.hasPrefix("[2501.12345v2]") == true, "active batch freezes directory and naming")
+        try expect(frozen.items[0].savedURL?.deletingLastPathComponent() == frozenOutput.appendingPathComponent("Papers", isDirectory: true) && frozen.items[0].savedURL?.lastPathComponent.hasPrefix("[2501.12345v2]") == true, "active batch freezes directory and naming")
         try expect(frozen.input.isEmpty, "all successful inputs cleared")
         let completedItem = frozen.items[0].id
         frozen.start()
@@ -1131,6 +1157,19 @@ struct CoreTests {
                             name: "logs-compact-\(scheme == .light ? "light" : "dark")-\(width)")
             }
         }
+        model.papers = [("Quarterly product review — design and product decisions", "pptx"), ("阅读笔记与产品设计参考", "epub"), ("Project specification", "docx"), ("Research measurements", "csv"), ("Project resources", "zip")].map { title, ext in
+            LibraryPaper(DownloadItem(original: "https://example.com/file." + ext, directURL: URL(string: "https://example.com/file." + ext), state: .saved,
+                savedURL: output.appendingPathComponent(title + "." + ext), documentTitle: title))
+        }
+        for language in [AppLanguage.chinese, .english] {
+            model.language = language
+            for scheme in [ColorScheme.light, .dark] {
+                app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+                try capture(DownloaderView(model: model, page: .library).environment(\.colorScheme, scheme), width: 820, height: 600,
+                    name: "common-files-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "Folioak")
+            }
+        }
+        model.language = savedLanguage
         print("UI snapshots: \(output.path)")
     }
 

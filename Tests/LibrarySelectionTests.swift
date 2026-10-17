@@ -7,10 +7,10 @@ private final class LibrarySelectionHost<Content: View>: NSHostingView<Content> 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-private final class LibrarySelectionWindow: NSWindow {
-    // Match SelectionTestWindow: background runners cannot activate the desktop,
-    // but still exercise real responders while rendering an active selection.
-    override var isKeyWindow: Bool { true }
+private final class LibrarySelectionWindow: NSPanel {
+    // Give the field editor and menus a real key window without activating
+    // the application or depending on the preceding test's desktop focus.
+    override var canBecomeKey: Bool { true }
 }
 
 extension CoreTests {
@@ -126,9 +126,10 @@ extension CoreTests {
         let view = LibrarySelectionHost(rootView: DownloaderView(model: model, page: page)
             .environment(\.colorScheme, scheme))
         let window = LibrarySelectionWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),
-            styleMask: [.borderless], backing: .buffered, defer: false)
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.contentView = view; window.orderFront(nil)
+        window.hidesOnDeactivate = false
+        window.contentView = view; window.makeKeyAndOrderFront(nil)
         defer { window.close() }
         func settle() async {
             try? await Task.sleep(nanoseconds: 120_000_000)
@@ -136,17 +137,33 @@ extension CoreTests {
         }
         func descendants(_ parent: NSView) -> [NSView] { [parent] + parent.subviews.flatMap(descendants) }
         func keyView() -> PaperListKeyboard.KeyView? { descendants(view).compactMap { $0 as? PaperListKeyboard.KeyView }.first }
-        func keys(_ code: UInt16, _ text: String, _ modifiers: NSEvent.ModifierFlags = []) throws {
-            guard let responder = keyView() else { throw TestFailure.failed("library keyboard is mounted") }
-            responder.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
-                windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!)
+        func keys(_ code: UInt16, _ text: String, _ modifiers: NSEvent.ModifierFlags = []) async throws {
+            // Removing/restoring the last result remounts the list after its
+            // transition. Wait for that native responder, not a fixed frame.
+            for _ in 0..<20 {
+                if let responder = keyView(), responder.window === window {
+                    responder.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                        windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!)
+                    return
+                }
+                await settle()
+            }
+            try snapshot("keyboard-failure")
+            throw TestFailure.failed("library keyboard is mounted: page=\(page.rawValue), language=\(language.rawValue), scheme=\(scheme), code=\(code), removed=\(removedCount())")
         }
-        func clickFromTop(_ x: CGFloat, _ y: CGFloat) {
+        func clickFromTop(_ x: CGFloat, _ y: CGFloat) async throws {
+            // Synthetic events bypass the WindowServer focus transfer that a
+            // physical click performs, including after a native sheet closes.
+            window.makeKeyAndOrderFront(nil)
+            try expect(NSApp.keyWindow === window, "library click targets the real key window")
             let location = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y), to: nil)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!)
+                // Dispatch physical down/up on separate run-loop turns so
+                // field-editor and SwiftUI gesture transitions can complete.
+                try await Task.sleep(nanoseconds: 15_000_000)
             }
         }
         func menu(_ title: String, perform: Bool = true) async throws {
@@ -155,6 +172,7 @@ extension CoreTests {
             var trackedMenu: NSMenu?
             var actionFinished = false
             var trackingEnded = false
+            var dispatchAction: Timer?
             let point = NSPoint(x: view.bounds.width - 40, y: view.isFlipped ? 38 : view.bounds.height - 38)
             let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { notification in
                 guard let menu = notification.object as? NSMenu, trackedMenu == nil else { return }
@@ -165,21 +183,24 @@ extension CoreTests {
                 // Cancelling synchronously inside didBeginTracking leaves a
                 // SwiftUI Menu pressed and prevents later openings. Let AppKit
                 // enter tracking before dispatching this native menu action.
-                DispatchQueue.main.async {
+                let action = Timer(timeInterval: 0, repeats: false) { _ in
                     if perform, found, let index { menu.performActionForItem(at: index) }
                     menu.cancelTrackingWithoutAnimation()
                     actionFinished = true
                 }
+                dispatchAction = action
+                RunLoop.main.add(action, forMode: .eventTracking)
             }
             let endObserver = NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: nil) { notification in
                 guard let menu = notification.object as? NSMenu, menu === trackedMenu else { return }
                 trackingEnded = true
             }
             defer {
+                dispatchAction?.invalidate()
                 NotificationCenter.default.removeObserver(observer)
                 NotificationCenter.default.removeObserver(endObserver)
             }
-            clickFromTop(view.bounds.width - 40, 38)
+            try await clickFromTop(view.bounds.width - 40, 38)
             // A following search request must not race native tracking teardown
             // and its responder restoration on slower AppKit/CI environments.
             for _ in 0..<20 {
@@ -228,17 +249,28 @@ extension CoreTests {
             try bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent(name))
         }
         func alert(_ title: String, capture: String? = nil) async throws {
-            await settle()
-            guard let sheet = window.attachedSheet, let content = sheet.contentView,
-                  let button = descendants(content).compactMap({ $0 as? NSButton }).first(where: { $0.title == title }) else {
-                throw TestFailure.failed("native confirmation exposes \(title)")
+            // SwiftUI attaches the native sheet asynchronously; readiness is
+            // the enabled button in that sheet, not a fixed animation delay.
+            for _ in 0..<20 {
+                await settle()
+                guard let sheet = window.attachedSheet, let content = sheet.contentView,
+                      let button = descendants(content).compactMap({ $0 as? NSButton }).first(where: { $0.title == title && $0.isEnabled }) else { continue }
+                if let capture { try snapshot(capture, panel: sheet) }
+                button.performClick(nil)
+                for _ in 0..<20 {
+                    await settle()
+                    if window.attachedSheet == nil { break }
+                }
+                try expect(window.attachedSheet == nil, "native confirmation finishes dismissal before the next interaction")
+                return
             }
-            if let capture { try snapshot(capture, panel: sheet) }
-            button.performClick(nil)
-            await settle()
+            try snapshot("confirmation-failure")
+            let buttons = window.attachedSheet?.contentView.map { descendants($0).compactMap { ($0 as? NSButton)?.title } } ?? []
+            throw TestFailure.failed("native confirmation exposes \(title): pendingTrash=\(model.pendingFileTrash?.files.count ?? 0), sheet=\(String(describing: window.attachedSheet)), buttons=\(buttons), key=\(NSApp.keyWindow === window)")
         }
         func removedCount() -> Int { page == .library ? model.papers.filter(\.removed).count : model.mediaLibrary.filter(\.isLibraryRemoved).count }
         await settle()
+        try expect(NSApp.keyWindow === window, "library UI fixture owns a real key window")
         try expect(view.bounds.size == NSSize(width: 780, height: 540) && keyView()?.allowsMultipleSelection == true,
                    "both libraries retain the minimum layout and enable multi-selection")
         try await menu(L("移出当前结果 2 项…"))
@@ -250,19 +282,19 @@ extension CoreTests {
                    "the native removal confirmation commits the current results while preserving files and download history")
         try await menu(L(page == .library ? "已移除的文档" : "已移除的媒体"))
         model.listRequest = UUID(); await settle()
-        try keys(49, " "); try keys(36, "\r")
+        try await keys(49, " "); try await keys(36, "\r")
         try expect(model.previewURL == nil && opened == 0, "removed document and media rows consistently offer recovery rather than keyboard opening")
         try await menu(L("恢复当前结果 2 项"))
         try await menu(L(page == .library ? "返回文档库" : "返回媒体库"))
         model.listRequest = UUID(); await settle()
-        try keys(0, "a", .command); await settle()
+        try await keys(0, "a", .command); await settle()
         try await menu(L("移出所选 2 项"), perform: false)
         try await menu(L("移出所选 2 项"), perform: false)
         try await search("First")
         try await menu(L("移出所选 1 项"), perform: false)
         try await search("")
         model.listRequest = UUID(); await settle()
-        try keys(0, "a", .command); await settle()
+        try await keys(0, "a", .command); await settle()
         try snapshot("selected")
         try await menu(L("移出所选 2 项"))
         try expect(removedCount() == 2 && model.downloads.count == 2 && recycled.isEmpty,
@@ -275,7 +307,7 @@ extension CoreTests {
         try expect(removedCount() == 0, "native batch restore returns every removed library record")
         try await menu(L(page == .library ? "返回文档库" : "返回媒体库"))
         model.listRequest = UUID(); await settle()
-        try keys(0, "a", .command); await settle()
+        try await keys(0, "a", .command); await settle()
         try await menu(L("将所选文件移到废纸篓…"))
         try expect(model.pendingFileTrash?.files.count == 2 && recycled.isEmpty, "Trash is a separate pending file operation")
         try await alert(L("取消"), capture: "trash-confirmation")

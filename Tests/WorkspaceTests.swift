@@ -251,7 +251,7 @@ extension CoreTests {
         try FileManager.default.removeItem(at: missing.savedURL!)
         model.openFile(missing)
         let libraryMissing = model.history[0]
-        try expect(libraryMissing.state == .missing && libraryMissing.savedURL == nil, "missing file updates library state")
+        try expect(libraryMissing.state == .missing && libraryMissing.savedURL == missing.savedURL, "missing file updates library state")
         model.input = "2503.99999"
         model.retryFromLibrary(libraryMissing)
         try await waitForQueue(model)

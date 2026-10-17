@@ -11,12 +11,21 @@ enum DownloadSource: Hashable, Sendable {
         switch self { case .arxiv: return nil; case .pdf(let url), .file(let url), .media(let url): return url }
     }
     var isMedia: Bool { if case .media = self { return true }; return false }
+    // A direct response can reveal its type only after downloading. The engine
+    // applies this preference to video streams and leaves documents/images alone.
+    var supportsAudioExtraction: Bool {
+        if isMedia { return true }
+        guard let url = directURL else { return false }
+        let ext = url.pathExtension.lowercased()
+        return FileStorage.videoExtensions.contains(ext) || (!FileStorage.extensions.contains(ext) && ext != "pdf" && !GenericFileStorage.extensions.contains(ext))
+    }
     var isPaper: Bool { switch self { case .arxiv, .pdf: return true; default: return false } }
     var symbol: String {
         if isPaper { return "doc.text" }
         if isMedia { return "play.rectangle" }
         let ext = directURL?.pathExtension.lowercased() ?? ""
         if FileStorage.videoExtensions.contains(ext) { return "play.rectangle" }
+        if GenericFileStorage.extensions.contains(ext) { return GenericFileStorage.symbol(ext) }
         return FileStorage.imageExtensions.contains(ext) ? "photo" : "waveform"
     }
     var label: String {
@@ -64,7 +73,7 @@ enum DownloadSource: Hashable, Sendable {
         var path = parts.percentEncodedPath.components(separatedBy: "/")
         if ["github.com", "www.github.com"].contains(parts.host?.lowercased() ?? ""),
            path.count >= 6, path[3] == "blob", path.dropFirst().allSatisfy({ !$0.isEmpty }),
-           (url.pathExtension.lowercased() == "pdf" || FileStorage.extensions.contains(url.pathExtension.lowercased())) {
+           (url.pathExtension.lowercased() == "pdf" || FileStorage.extensions.contains(url.pathExtension.lowercased()) || GenericFileStorage.extensions.contains(url.pathExtension.lowercased())) {
             path.remove(at: 3)
             parts.host = "raw.githubusercontent.com"
             parts.percentEncodedPath = path.joined(separator: "/")
@@ -98,7 +107,7 @@ enum DownloadSource: Hashable, Sendable {
             }
             return .media(canonical)
         }
-        if FileStorage.extensions.contains(canonical.pathExtension.lowercased()) { return .file(canonical) }
+        if FileStorage.extensions.union(GenericFileStorage.extensions).contains(canonical.pathExtension.lowercased()) { return .file(canonical) }
         return .pdf(canonical)
     }
 
@@ -251,6 +260,7 @@ enum PDFStorage {
         let etag: String?
         let modified: String?
         let updated: Date
+        var title: String? = nil
     }
     struct Cached {
         let saved: SavedDocument
@@ -273,7 +283,7 @@ enum PDFStorage {
             try Task.checkCancellation(); visited += 1
             guard visited <= ResourceLimits.localScanEntries else { break }
             guard file.pathExtension.lowercased() == "pdf",
-                  let record = PaperStorage.readRecord(Record.self, at: file, attribute: attribute, limit: 2048),
+                  let record = PaperStorage.readRecord(Record.self, at: file, attribute: attribute, limit: 16384),
                   record.schema == 1, record.source == sourceKey, record.hash.utf8.count == 64,
                   record.hash.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }), record.updated.timeIntervalSince1970.isFinite,
                   record.updated.timeIntervalSinceNow <= 60 else { continue }
@@ -283,14 +293,14 @@ enum PDFStorage {
             do {
                 guard try fingerprint(file) == record.hash else { continue }
                 let pages = try PaperStorage.validatePDF(at: file)
-                let saved = SavedDocument(title: file.deletingPathExtension().lastPathComponent, url: file.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: true, pages: pages)
+                let saved = SavedDocument(title: record.title.flatMap { $0.count <= ResourceLimits.titleCharacters ? $0 : nil } ?? file.deletingPathExtension().lastPathComponent, url: file.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: true, pages: pages)
                 return Cached(saved: saved, hash: record.hash, etag: header(record.etag, limit: 1024), modified: header(record.modified, limit: 128))
             } catch is CancellationError { throw CancellationError() }
             catch { continue }
         }
         return nil
     }
-    static func save(downloaded: URL, source: URL, response: HTTPURLResponse, directory: URL) throws -> SavedDocument {
+    static func save(downloaded: URL, source: URL, response: HTTPURLResponse, directory: URL, namingSnapshot: AssetNamingSnapshot? = nil) throws -> SavedDocument {
         _ = try PaperStorage.validatePDF(at: downloaded)
         let suggested = response.suggestedFilename
         let fallback = suggested.flatMap { $0.utf8.count <= ResourceLimits.titleCharacters ? $0 : nil } ?? source.lastPathComponent
@@ -300,14 +310,15 @@ enum PDFStorage {
         let title = PaperMetadata.cleanTitle(raw.flatMap { !$0.isEmpty && $0.count <= ResourceLimits.titleCharacters && !["untitled", "unknown"].contains($0.lowercased()) ? $0 : nil } ?? (basename.isEmpty || basename == "Unknown" ? (source.host ?? "PDF") + " document" : basename))
         let sourceKey = key(source.absoluteString)
         let saved = try PaperStorage.publish(downloaded: downloaded, directory: directory, tag: String(sourceKey.prefix(10)),
-            filename: { PaperMetadata.filename(title: title, ending: $0 + ".pdf") }, record: { file, hash in
+            filename: { PaperMetadata.filename(title: namingSnapshot?.savedTitle(extension: "pdf") ?? namingSnapshot?.title(title, kind: .documents, source: source) ?? title, ending: $0 + ".pdf") }, record: { file, hash in
                 // Validators identify this exact resource, not a redirect target.
                 let direct = response.url == source
-                let record = Record(schema: 1, source: sourceKey, hash: hash.map { String(format: "%02x", $0) }.joined(),
+                var record = Record(schema: 1, source: sourceKey, hash: hash.map { String(format: "%02x", $0) }.joined(),
                     etag: direct ? header(response.value(forHTTPHeaderField: "ETag"), limit: 1024) : nil,
-                    modified: direct ? header(response.value(forHTTPHeaderField: "Last-Modified"), limit: 128) : nil, updated: Date())
-                PaperStorage.writeRecord(record, at: file, attribute: attribute, limit: 2048)
+                    modified: direct ? header(response.value(forHTTPHeaderField: "Last-Modified"), limit: 128) : nil, updated: Date(), title: title)
+                if (try? JSONEncoder().encode(record).count).map({ $0 > 16384 }) ?? true { record.title = nil }
+                PaperStorage.writeRecord(record, at: file, attribute: attribute, limit: 16384)
             })
-        return SavedDocument(title: saved.url.deletingPathExtension().lastPathComponent, url: saved.url.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: saved.existing, pages: saved.pages)
+        return SavedDocument(title: title, url: saved.url.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: saved.existing, pages: saved.pages)
     }
 }

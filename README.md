@@ -4,11 +4,14 @@
 <h1 align="center">Folioak</h1>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
-**A native macOS downloader for papers and media.**
+**A native macOS downloader for papers, files, and media.**
 
 - **Documents** — arXiv, Hugging Face papers, OpenReview, ACL, CVF, GitHub PDFs, and public PDF links.
+- **Files** — public HTTPS links for PPT/PPTX, DOC/DOCX, XLS/XLSX, EPUB, OpenDocument, text/data files, and ZIP/7Z/RAR/TAR/GZ/BZ2/XZ archives. Direct endpoints can identify files through response headers or supported container signatures.
 - **Media** — individual videos from YouTube, Bilibili, X, Toutiao, Xiaohongshu, Douyin, TikTok, Instagram, and Vimeo, plus direct image, audio, and video links.
-- **Organization** — one download folder, with `Papers`, `Videos`, `Audio`, and `Images` subfolders and built-in document and media libraries.
+- **Organization** — one download folder, with `Papers`, `Documents`, `Archives`, `Videos`, `Audio`, and `Images` subfolders and built-in document and media libraries.
+
+Common files remain in the document library after download history is cleared. Open them with the default application or macOS Quick Look; preview availability depends on the system and installed apps. Archives are saved without extraction. Validation checks file signatures and container directories, not every embedded document object or archive checksum.
 
 All download components are bundled. No Python or Homebrew required. Site downloads depend on public access from your network; some sites require login or verification even for public videos. Media downloads are anonymous by default. You can opt in to browser authentication in Settings to reuse an existing browser session. Playlists, profiles and image-only posts are not supported. For Xiaohongshu, paste the full video share link, keeping its access parameters; `xhslink.com` short links are also recognized. For Toutiao, use the full `/video/ID/` page URL.
 
@@ -31,6 +34,10 @@ For videos that need sign-in, open Settings → Browser Authentication, choose t
 New installations use `~/Downloads/Folioak`; type subfolders are created as needed. Click the folder to change the save location. Upgrades preserve your settings, files, and libraries. When upgrading from an earlier product name, quit and move the old app out of Applications after installing Folioak.
 
 [CLI guide (中文)](CLI-README.md)
+
+File naming rules in Settings → General cover arXiv papers, documents/PDFs, videos, audio, images and archives. Templates support `{title}`, `{date}`, `{source}` and `{id}` with a live preview. Defaults preserve existing behavior. Each task keeps its submission date and rules; retries prefer previously allocated names, and existing files are never overwritten. Extracted audio uses audio rules, and multi-file results receive attachment numbers. Both libraries can search actual filenames.
+
+Document and media libraries each remember their list/grid view. Grid view supports arrow navigation, Shift ranges, Command selection, Space previews, double-click opening and the existing management actions. Thumbnails load near the visible viewport and fall back to file icons when unavailable.
 
 ## Develop
 

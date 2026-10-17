@@ -305,6 +305,7 @@ enum FileStorage {
         if try handle.read(upToCount: 5) == Data("%PDF-".utf8) { return "pdf" }
         if let image = CGImageSourceCreateWithURL(file as CFURL, nil), let type = CGImageSourceGetType(image),
            let ext = UTType(type as String)?.preferredFilenameExtension, imageExtensions.contains(ext) { return ext }
+        if let ext = try await GenericFileStorage.detectedExtension(file, source: source, response: response) { return ext }
         let types = ["application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
                      "image/heic": "heic", "image/tiff": "tiff", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm",
                      "video/x-matroska": "mkv", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/x-m4a": "m4a",
@@ -387,7 +388,7 @@ enum FileStorage {
         return digest.finalize()
     }
 
-    static func save(_ file: URL, title: String, extension ext: String, to directory: URL) throws -> SavedDocument {
+    static func save(_ file: URL, title: String, extension ext: String, to directory: URL, filenameTitle: String? = nil, attachmentSuffix: String = "") throws -> SavedDocument {
         let manager = FileManager.default
         let staged = directory.appendingPathComponent(".download-\(UUID().uuidString).partial")
         defer { try? manager.removeItem(at: staged) }
@@ -410,7 +411,7 @@ enum FileStorage {
         for index in 0..<1000 {
             try Task.checkCancellation()
             let suffix = index == 0 ? "" : " (\(index + 1))"
-            let target = directory.appendingPathComponent(PaperMetadata.filename(title: title, ending: suffix + "." + ext))
+            let target = directory.appendingPathComponent(PaperMetadata.filename(title: filenameTitle ?? title, ending: attachmentSuffix + suffix + "." + ext))
             if renamex_np(staged.path, target.path, UInt32(RENAME_EXCL)) == 0 {
                 return SavedDocument(title: title, url: target, alreadyExisted: false, pages: 0)
             }
@@ -423,16 +424,19 @@ enum FileStorage {
         throw DownloadError.storage("同名文件过多，请选择其他目录。")
     }
 
-    static func publish(_ files: [URL], title: String?, to directory: URL, organizeByType: Bool = false) async throws -> SavedDocument {
+    static func publish(_ files: [URL], title: String?, to directory: URL, organizeByType: Bool = false, namingSnapshot: AssetNamingSnapshot? = nil, source: URL? = nil) async throws -> SavedDocument {
         guard !files.isEmpty else { throw DownloadError.metadata("没有媒体输出文件。") }
         // Validate the entire result before exposing any of it in the destination.
         for file in files { try await validate(file, extension: file.pathExtension.lowercased()) }
         var saved: [SavedDocument] = []
         do {
-            for file in files {
+            for (index, file) in files.enumerated() {
                 let destination = organizeByType ? try DownloadFolder.media(extension: file.pathExtension).prepare(in: directory) : directory
-                saved.append(try save(file, title: files.count == 1 ? (title ?? file.deletingPathExtension().lastPathComponent) : file.deletingPathExtension().lastPathComponent,
-                                      extension: file.pathExtension.lowercased(), to: destination))
+                let originalTitle = files.count == 1 ? (title ?? file.deletingPathExtension().lastPathComponent) : file.deletingPathExtension().lastPathComponent
+                let restoredTitle = namingSnapshot?.savedTitle(extension: file.pathExtension, index: index)
+                let rendered = source.flatMap { namingSnapshot?.title(title ?? originalTitle, kind: .output(file.pathExtension), source: $0) }
+                saved.append(try save(file, title: originalTitle, extension: file.pathExtension.lowercased(), to: destination,
+                                      filenameTitle: restoredTitle ?? rendered, attachmentSuffix: restoredTitle == nil && rendered != nil && files.count > 1 ? String(format: " - %02d", index + 1) : ""))
             }
         } catch {
             // Never roll back a pre-existing file reused by content hash.
@@ -488,7 +492,7 @@ enum MediaDownloader {
 
     static let hosts = Set(MediaSite.allCases.flatMap(\.hosts))
 
-    typealias Download = @Sendable (URL, URL, MediaFormat, Bool, BrowserAuthenticationSelection?,
+    typealias Download = @Sendable (URL, URL, MediaFormat, Bool, BrowserAuthenticationSelection?, AssetNamingSnapshot?,
                                     @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument
 
     // Retry the entire attempt: authenticated partials, temporary cookie copies
@@ -563,7 +567,7 @@ enum MediaDownloader {
     }
 
     static func download(_ url: URL, to directory: URL, format: MediaFormat, organizeByType: Bool = false,
-                         authentication: BrowserAuthenticationSelection? = nil,
+                         authentication: BrowserAuthenticationSelection? = nil, namingSnapshot: AssetNamingSnapshot? = nil,
                          event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         guard accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
         let authentication = MediaSite.site(for: url.host) == .douyin ? nil : authentication
@@ -589,7 +593,7 @@ enum MediaDownloader {
                 files[index] = try await preferMP4(files[index], tools: tools, scratch: scratch.appendingPathComponent(String(index)))
             }
         }
-        let result = try await FileStorage.publish(files, title: output.title, to: directory, organizeByType: organizeByType)
+        let result = try await FileStorage.publish(files, title: output.title, to: directory, organizeByType: organizeByType, namingSnapshot: namingSnapshot, source: url)
         // Keep the coordination inode; remove only our completed media files.
         for file in output.files { try? FileManager.default.removeItem(at: file) }
         return result

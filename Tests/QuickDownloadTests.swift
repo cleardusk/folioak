@@ -150,7 +150,7 @@ extension CoreTests {
 
         let cooldownGate = QuickTransport(pdf: pdf)
         await cooldownGate.block("media")
-        let cooldownEngine = DownloadEngine(mediaDownload: { _, _, _, _, _, _ in
+        let cooldownEngine = DownloadEngine(mediaDownload: { _, _, _, _, _, _, _ in
             try await cooldownGate.waitFor("media")
             throw DownloadError.cooldown(60)
         })
@@ -191,7 +191,9 @@ extension CoreTests {
         let suite = "folioak-quick-ui-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
-        let model = DownloadModel(preferences: preferences)
+        var openedFiles: [URL] = [], revealedFiles: [[URL]] = []
+        let model = DownloadModel(preferences: preferences,
+            opener: { openedFiles.append($0); return true }, revealer: { revealedFiles.append($0) })
         model.directory = URL(fileURLWithPath: "/Users/Fixture/Downloads/A deliberately long saved folder for papers and media/Folioak")
         let state = QuickDownloadState(model: model)
         for language in [AppLanguage.chinese, .english] {
@@ -230,7 +232,7 @@ extension CoreTests {
                 }
                 try expect(host.bounds.width == 380 && host.fittingSize.height < 430, "panel has bounded readable dimensions with long path and error")
                 model.busy = true
-                model.items = [DownloadItem(original: "https://example.com/queued.pdf", directURL: URL(string: "https://example.com/queued.pdf"), state: .queued)]
+                model.items = [DownloadItem(original: "https://example.com/queued.pdf", directURL: URL(string: "https://example.com/queued.pdf"), state: .queued, preservesInput: true)]
                 state.draft = "https://example.com/new.pdf"
                 try await Task.sleep(nanoseconds: 50_000_000)
                 host.layoutSubtreeIfNeeded()
@@ -238,7 +240,64 @@ extension CoreTests {
                     host.cacheDisplay(in: host.bounds, to: bitmap)
                     try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent("\(language.rawValue)-\(scheme == .light ? "light" : "dark")-busy.png"))
                 }
-                model.busy = false; model.items = []
+                guard let pendingResult = descendants(host).compactMap({ $0 as? FileRowClickRegion.Region }).first else {
+                    throw TestFailure.failed("queued quick result is visible before completion")
+                }
+                try expect(!host.gestureRecognizers.contains { ($0 as? NSClickGestureRecognizer)?.numberOfClicksRequired == 2 },
+                    "queued result without a local file has no open gesture")
+                model.busy = false
+                let resultFile = root.appendingPathComponent("A long downloaded filename for menu bar verification.pdf")
+                try createPDF(at: resultFile)
+                var completedResult = model.items[0]
+                completedResult.state = .saved; completedResult.savedURL = resultFile
+                completedResult.documentTitle = "Downloaded document"
+                model.items = [completedResult]
+                state.draft = ""
+                try await Task.sleep(nanoseconds: 50_000_000)
+                window.setContentSize(host.fittingSize); host.layoutSubtreeIfNeeded()
+                try expect(state.status == model.items[0].state.label && state.recentItems.count == 1, "completed download replaces idle with a findable result")
+                try expect(descendants(host).compactMap { $0 as? QuickLinkEditor.Editor }.first === editor, "result insertion preserves native editor/undo identity")
+                if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent("\(language.rawValue)-\(scheme == .light ? "light" : "dark")-completed.png"))
+                }
+                guard let result = descendants(host).compactMap({ $0 as? FileRowClickRegion.Region }).first else {
+                    throw TestFailure.failed("quick result native double-click region")
+                }
+                try expect(result === pendingResult, "download completion enables the existing row without remounting")
+                let resultRect = result.convert(result.bounds, to: host)
+                func resultClick(_ point: NSPoint, count: Int = 1, flags: NSEvent.ModifierFlags = []) async throws {
+                    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: host.convert(point, to: nil), modifierFlags: flags,
+                            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                            eventNumber: count, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!)
+                        try await Task.sleep(nanoseconds: 15_000_000)
+                    }
+                }
+                let titlePoint = NSPoint(x: resultRect.midX, y: resultRect.minY + resultRect.height * 0.25)
+                let pathPoint = NSPoint(x: resultRect.midX, y: resultRect.minY + resultRect.height * 0.75)
+                let openCount = openedFiles.count
+                try await resultClick(titlePoint)
+                try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9))
+                try expect(openedFiles.count == openCount, "quick result single click never opens a file")
+                for point in [titlePoint, pathPoint] {
+                    try await resultClick(point); try await resultClick(point, count: 2)
+                }
+                try expect(openedFiles.count == openCount + 2 && openedFiles.last == resultFile,
+                    "quick result title and path double clicks each open the saved file exactly once")
+                try await resultClick(titlePoint, flags: .command); try await resultClick(titlePoint, count: 2, flags: .command)
+                try expect(openedFiles.count == openCount + 2, "modified quick result clicks do not open files")
+                let revealCount = revealedFiles.count
+                let finderPoint = NSPoint(x: resultRect.maxX + 8 + 16, y: resultRect.midY)
+                try await resultClick(finderPoint)
+                try expect(revealedFiles.count == revealCount + 1 && revealedFiles.last == [resultFile],
+                    "quick result Finder button still reveals the exact file")
+                try await resultClick(finderPoint); try await resultClick(finderPoint, count: 2)
+                try expect(openedFiles.count == openCount + 2, "Finder double clicks never trigger the file-open region")
+                model.items = []
+                try await Task.sleep(nanoseconds: 50_000_000)
+                try expect(!host.gestureRecognizers.contains { ($0 as? NSClickGestureRecognizer)?.numberOfClicksRequired == 2 },
+                    "removed quick results detach their double-click recognizer")
                 state.draft = ""
                 editor.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                     windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!)
@@ -250,8 +309,130 @@ extension CoreTests {
         try await removalAnimationUITests()
         let controller = MenuBarController(model: model, openWindow: {}, openSettings: {}, quit: {})
         try await Task.sleep(nanoseconds: 150_000_000)
+        // Check the whole pointer sequence, including the mouse-up frame that
+        // performClick + a delayed final-state assertion used to miss.
+        guard let statusButton = controller.item?.button, let statusWindow = statusButton.window else { throw TestFailure.failed("status mouse target") }
+        func statusEvent(_ type: NSEvent.EventType, inside: Bool = true, flags: NSEvent.ModifierFlags = []) -> NSEvent {
+            let point = inside ? NSPoint(x: statusButton.bounds.midX, y: statusButton.bounds.midY) : NSPoint(x: -50, y: -50)
+            return NSEvent.mouseEvent(with: type, location: statusButton.convert(point, to: nil), modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: statusWindow.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!
+        }
+        for _ in 0..<3 {
+            try expect(controller.handleStatusMouseEvent(statusEvent(.leftMouseDown)) == nil, "status pointer down is consumed before native tracking")
+            try expect(controller.popover.isShown && statusButton.isHighlighted, "pointer down opens with immediate native highlight")
+            for _ in 0..<4 {
+                try await Task.sleep(nanoseconds: 4_000_000)
+                try expect(statusButton.isHighlighted, "held status press never loses highlight")
+            }
+            try expect(controller.handleStatusMouseEvent(statusEvent(.leftMouseUp)) == nil && statusButton.isHighlighted,
+                "mouse-up frame keeps the open popover highlighted without deferred repair")
+            for _ in 0..<4 {
+                try await Task.sleep(nanoseconds: 4_000_000)
+                try expect(controller.popover.isShown && statusButton.isHighlighted, "post-release frames stay highlighted")
+            }
+            let closeDown = statusEvent(.leftMouseDown)
+            _ = controller.handleStatusMouseEvent(closeDown)
+            try expect(!controller.popover.isShown && !statusButton.isHighlighted, "second pointer down closes once")
+            _ = controller.handleStatusMouseEvent(closeDown)
+            try expect(!controller.popover.isShown && !statusButton.isHighlighted, "replayed down cannot reopen the just-closed popover")
+            _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseUp))
+        }
+        let commandDrag = statusEvent(.leftMouseDown, flags: .command)
+        try expect(controller.handleStatusMouseEvent(commandDrag) === commandDrag, "Command-drag stays with native status-item rearrangement")
+        let commandRelease = statusEvent(.leftMouseUp)
+        try expect(controller.handleStatusMouseEvent(commandRelease) === commandRelease, "native Command-drag release passes through even after releasing Command")
+        _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseDown))
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        let otherRelease = statusEvent(.leftMouseUp, inside: false)
+        try expect(controller.handleStatusMouseEvent(otherRelease) === otherRelease, "deactivation cannot leave a press that consumes another control's release")
+        controller.popover.close()
+        let unrelated = statusEvent(.leftMouseDown, inside: false)
+        try expect(controller.handleStatusMouseEvent(unrelated) === unrelated, "events outside status button pass through unchanged")
+        _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseDown))
+        _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseUp, inside: false))
+        _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseDown))
+        try expect(!controller.popover.isShown, "release outside clears the press so the next click works")
+        _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseUp))
+        _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseDown))
+        _ = controller.handleStatusMouseEvent(statusEvent(.leftMouseUp))
+        var rightMenuHighlighted = false, rightMenuStarted = false, rightMenuSampled = false
+        var rightTimer: Timer?
+        let rightMenu = controller.actionMenu
+        let rightObserver = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: rightMenu, queue: nil) { _ in
+            MainActor.assumeIsolated {
+                rightMenuStarted = true
+                let timer = Timer(timeInterval: 0, repeats: false) { _ in
+                    MainActor.assumeIsolated {
+                        rightMenuSampled = true
+                        rightMenuHighlighted = statusButton.isHighlighted && !controller.popover.isShown
+                        let release = statusEvent(.rightMouseUp, inside: false)
+                        rightMenuHighlighted = rightMenuHighlighted && controller.handleStatusMouseEvent(release) === release
+                        if !rightMenuHighlighted {
+                            print("RIGHT MENU SAMPLE", statusButton.state.rawValue, statusButton.isHighlighted, controller.popover.isShown)
+                        }
+                        rightMenu.cancelTrackingWithoutAnimation()
+                    }
+                }
+                rightTimer = timer
+                RunLoop.main.add(timer, forMode: .eventTracking)
+            }
+        }
+        _ = controller.handleStatusMouseEvent(statusEvent(.rightMouseDown))
+        try expect(!controller.popover.isShown && statusButton.isHighlighted,
+            "right-click closes the transient popover before queuing menu activation without dropping highlight")
+        for _ in 0..<20 {
+            if rightMenuSampled && controller.item?.menu == nil { break }
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        rightTimer?.invalidate()
+        NotificationCenter.default.removeObserver(rightObserver)
+        _ = controller.handleStatusMouseEvent(statusEvent(.rightMouseUp))
+        try expect(rightMenuStarted && rightMenuSampled, "right-menu handoff is sampled during native tracking")
+        try expect(rightMenuHighlighted && !statusButton.isHighlighted, "popover-to-right-menu handoff keeps native highlight until the menu closes")
+        var cancelledRequestOpened = false
+        let cancelTimer = Timer(timeInterval: 0.05, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                cancelledRequestOpened = true
+                controller.actionMenu.cancelTracking()
+            }
+        }
+        RunLoop.main.add(cancelTimer, forMode: .eventTracking)
+        _ = controller.handleStatusMouseEvent(statusEvent(.rightMouseDown))
+        model.showsMenuBarIcon = false
+        model.showsMenuBarIcon = true
+        try await Task.sleep(nanoseconds: 100_000_000)
+        cancelTimer.invalidate()
+        try expect(!cancelledRequestOpened && controller.item?.button?.isHighlighted == false,
+            "queued right-menu request cannot outlive a hidden/recreated status item")
+        print("PASS status pointer: held/released frames, repeated clicks, replayed events, outside release and right-menu handoff")
         controller.state.draft = "keep popover draft"
-        controller.togglePopover()
+        let statusQA = URL(fileURLWithPath: "build/qa/menu-highlight")
+        try FileManager.default.createDirectory(at: statusQA, withIntermediateDirectories: true)
+        func captureStatus(_ name: String) throws {
+            guard let button = controller.item?.button else { throw TestFailure.failed("status button exists") }
+            button.needsDisplay = true; button.displayIfNeeded()
+            guard let bitmap = button.bitmapImageRepForCachingDisplay(in: button.bounds) else { throw TestFailure.failed("status button snapshot") }
+            button.cacheDisplay(in: button.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])!.write(to: statusQA.appendingPathComponent(name + ".png"))
+        }
+        try captureStatus("closed")
+        // A visible workspace behind another app must stay there when only
+        // the menu-bar utility is requested. Keep a real ordinary window open.
+        let originalActivationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.regular)
+        defer { NSApp.setActivationPolicy(originalActivationPolicy) }
+        let backgroundWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 240),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        backgroundWindow.isReleasedWhenClosed = false
+        backgroundWindow.title = "Folioak focus regression"
+        backgroundWindow.orderFront(nil)
+        defer { backgroundWindow.close() }
+        NSApp.deactivate()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        try expect(!NSApp.isActive, "menu focus regression starts with Folioak inactive")
+        let previousApplication = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        controller.item?.button?.performClick(nil)
         try await Task.sleep(nanoseconds: 100_000_000)
         if !controller.popover.isShown || !(controller.popover.contentViewController?.view.window?.firstResponder is QuickLinkEditor.Editor) {
             print("POPOVER DIAGNOSTIC", controller.popover.isShown, String(describing: controller.item?.button?.window),
@@ -260,6 +441,33 @@ extension CoreTests {
         }
         try expect(controller.popover.isShown && controller.popover.contentViewController?.view.window?.firstResponder is QuickLinkEditor.Editor,
             "real menu bar popover opens with native input focus")
+        try expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == previousApplication,
+            "opening quick entry does not activate Folioak or replace the foreground app")
+        try expect(backgroundWindow.isVisible && !backgroundWindow.isKeyWindow,
+            "quick entry keeps the workspace open without making it key")
+        try expect(controller.item?.button?.state == .on, "status button stays selected while its popover is open")
+        try expect(controller.item?.button?.isHighlighted == true, "native mouse tracking keeps the status background highlighted after release")
+        try captureStatus("open")
+        let originalMenu = NSApp.mainMenu
+        defer { NSApp.mainMenu = originalMenu }
+        let delegate = AppDelegate(model: model, menuBar: controller)
+        let mainEdit = model.editRequest, mainPage = model.batchID
+        for shortcut in [AppShortcut(key: "l"), AppShortcut(key: "k", modifiers: NSEvent.ModifierFlags([.command, .shift]).rawValue)] {
+            _ = model.shortcuts.set(shortcut, for: .input)
+            delegate.makeMenu()
+            let oldFocus = controller.state.focusRequest
+            model.busy = true
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shortcut.flags, timestamp: 0,
+                windowNumber: controller.popover.contentViewController!.view.window!.windowNumber, context: nil,
+                characters: shortcut.key, charactersIgnoringModifiers: shortcut.key, isARepeat: false, keyCode: shortcut.key == "l" ? 37 : 40)!
+            try expect(NSApp.mainMenu!.performKeyEquivalent(with: event), "actual input menu shortcut is consumed while popup is key")
+            try await Task.sleep(nanoseconds: 20_000_000)
+            try expect(controller.state.focusRequest != oldFocus && model.editRequest == mainEdit && model.batchID == mainPage &&
+                controller.popover.contentViewController?.view.window?.firstResponder is QuickLinkEditor.Editor,
+                "default/custom input shortcuts focus popup even during downloads without touching main-window focus/page")
+        }
+        model.busy = false; model.shortcuts.reset()
+        try expect(!controller.popover.animates, "quick panel has no system fade delay on rapid toggles")
         let initialSize = controller.popover.contentSize
         controller.state.submit()
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -275,6 +483,82 @@ extension CoreTests {
             try await Task.sleep(nanoseconds: 30_000_000)
         }
         try expect(!controller.popover.isShown && controller.state.draft == "keep popover draft", "popover dismissal retains unsubmitted draft")
+        try expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == previousApplication,
+            "closing quick entry leaves the foreground app unchanged")
+        try expect(controller.item?.button?.state == .off && controller.item?.button?.isHighlighted == false, "toggle close clears status selection")
+        try captureStatus("closed-again")
+        for dismiss in 0..<3 {
+            controller.togglePopover()
+            try await Task.sleep(nanoseconds: 40_000_000)
+            try expect(controller.item?.button?.state == .on, "every reopen selects status button")
+            if dismiss == 0 { controller.popover.performClose(nil) }
+            else if dismiss == 1, let editor = controller.popover.contentViewController?.view.window?.firstResponder as? QuickLinkEditor.Editor {
+                editor.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: editor.window!.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!)
+            } else if dismiss == 2 { controller.actionMenu.performActionForItem(at: 0) }
+            try await Task.sleep(nanoseconds: 20_000_000)
+            try expect(!controller.popover.isShown && controller.item?.button?.state == .off, "external/Escape/open-window dismissal clears status selection")
+        }
+        var menuSelected = false, menuSampled = false, menuStarted = false, menuEnded = false
+        var menuStates: [String] = []
+        var trackingSample: Timer?
+        let menu = controller.actionMenu
+        let beginTracking = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: menu, queue: nil) { _ in
+            MainActor.assumeIsolated {
+                menuStarted = true
+                menuStates.append("begin state=\(controller.item?.button?.state.rawValue ?? -1) highlighted=\(controller.item?.button?.isHighlighted ?? false)")
+                // Sample after the real tracking loop starts, then close it.
+                // A wall-clock timer can miss a short-lived native menu entirely.
+                let sample = Timer(timeInterval: 0, repeats: false) { _ in
+                    MainActor.assumeIsolated {
+                        menuSelected = controller.item?.button?.state == .on && controller.item?.button?.isHighlighted == true
+                        menuSampled = true
+                        menuStates.append("sample state=\(controller.item?.button?.state.rawValue ?? -1) highlighted=\(controller.item?.button?.isHighlighted ?? false)")
+                        menu.cancelTrackingWithoutAnimation()
+                    }
+                }
+                trackingSample = sample
+                RunLoop.main.add(sample, forMode: .eventTracking)
+            }
+        }
+        let endTracking = NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: menu, queue: nil) { _ in
+            MainActor.assumeIsolated {
+                menuEnded = true
+                menuStates.append("end state=\(controller.item?.button?.state.rawValue ?? -1) highlighted=\(controller.item?.button?.isHighlighted ?? false)")
+            }
+        }
+        guard let currentButton = controller.item?.button, let currentWindow = currentButton.window else {
+            throw TestFailure.failed("current native action-menu target exists")
+        }
+        func currentMenuEvent(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type,
+                location: currentButton.convert(NSPoint(x: currentButton.bounds.midX, y: currentButton.bounds.midY), to: nil),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: currentWindow.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: type == .rightMouseDown ? 1 : 0)!
+        }
+        _ = controller.handleStatusMouseEvent(currentMenuEvent(.rightMouseDown))
+        for _ in 0..<20 {
+            if menuEnded && controller.item?.menu == nil { break }
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        _ = controller.handleStatusMouseEvent(currentMenuEvent(.rightMouseUp))
+        trackingSample?.invalidate()
+        NotificationCenter.default.removeObserver(beginTracking)
+        NotificationCenter.default.removeObserver(endTracking)
+        if !menuSelected || !menuStarted || !menuSampled || !menuEnded || controller.item?.button?.state != .off || controller.item?.button?.isHighlighted != false || controller.item?.menu != nil {
+            print("MENU LIFECYCLE", menuStates, "returned", controller.item?.button?.state.rawValue ?? -1, controller.item?.button?.isHighlighted ?? false, controller.item?.menu == nil)
+        }
+        try expect(menuStarted && menuSampled && menuEnded, "native action menu begins, is sampled while tracking, and finishes")
+        try expect(menuSelected && controller.item?.button?.state == .off && controller.item?.button?.isHighlighted == false && controller.item?.menu == nil,
+            "native action menu keeps selection until tracking ends")
+        for _ in 0..<5 {
+            let start = Date()
+            controller.togglePopover()
+            try expect(controller.popover.isShown && controller.item?.button?.state == .on, "rapid open completes synchronously with selected status button")
+            controller.togglePopover()
+            try expect(!controller.popover.isShown && controller.item?.button?.state == .off, "rapid close leaves no stale visible popup or selection")
+            print(String(format: "BENCH menu toggle pair %.2f ms", Date().timeIntervalSince(start) * 1000))
+        }
         controller.togglePopover()
         model.showsMenuBarIcon = false
         for _ in 0..<20 {
@@ -368,8 +652,8 @@ extension CoreTests {
             try await Task.sleep(nanoseconds: 50_000_000)
             try expect(opened - beforeButton == baseline, "action buttons behave identically with row double-click enabled on \(page.rawValue)")
             let beforeRemoval = opened
-            if page == .library { _ = model.setLibraryRemoved([model.papers[0].id], in: .documents, removed: true) }
-            else if page == .media { _ = model.setLibraryRemoved([item.id], in: .media, removed: true) }
+            if page == .library { _ = (await model.setLibraryRemoved([model.papers[0].id], in: .documents, removed: true)) }
+            else if page == .media { _ = (await model.setLibraryRemoved([item.id], in: .media, removed: true)) }
             else { model.clearDownloadRecord(item.id) }
             try await click(130, 24); try await click(130, 24, count: 2)
             try await Task.sleep(nanoseconds: 50_000_000)
@@ -423,7 +707,7 @@ extension CoreTests {
             try snapshot("0-before")
             let firstID = page == .library ? model.papers.sorted { $0.addedAt > $1.addedAt }.first!.id : records[0].id
             if page == .downloads { model.clearDownloadRecord(firstID) }
-            else { _ = model.setLibraryRemoved([firstID], in: page == .library ? .documents : .media, removed: true) }
+            else { _ = (await model.setLibraryRemoved([firstID], in: page == .library ? .documents : .media, removed: true)) }
             try await Task.sleep(nanoseconds: 60_000_000); try snapshot("1-fading")
             try await Task.sleep(nanoseconds: 100_000_000); try snapshot("2-closing")
             try await Task.sleep(nanoseconds: 180_000_000); try snapshot("3-after")
@@ -436,7 +720,7 @@ extension CoreTests {
             try expect(regions().count == 2 && host.gestureRecognizers.compactMap { $0 as? NSClickGestureRecognizer }.count == 2,
                 "deleted row has no active native recognizer after fade and reflow")
             if page == .downloads { model.clearDownloadRecords() }
-            else { _ = model.setLibraryRemoved(Set(page == .library ? model.papers.map(\.id) : records.map(\.id)), in: page == .library ? .documents : .media, removed: true) }
+            else { _ = await model.setLibraryRemoved(Set(page == .library ? model.papers.map(\.id) : records.map(\.id)), in: page == .library ? .documents : .media, removed: true) }
             try await Task.sleep(nanoseconds: 330_000_000); try snapshot("4-empty")
             for _ in 0..<20 {
                 if regions().isEmpty { break }

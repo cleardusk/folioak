@@ -62,7 +62,7 @@ struct ArxivReference: Hashable, Sendable, Codable {
     }
 }
 
-enum NamingStyle: String, CaseIterable, Sendable {
+enum NamingStyle: String, CaseIterable, Codable, Sendable {
     case dateTitle, identifierTitle, titleOnly
     var label: String {
         switch self {
@@ -294,6 +294,9 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
             let media = ["image/", "audio/", "video/"].contains { mime.hasPrefix($0) }
                 || FileStorage.extensions.contains(((response.suggestedFilename ?? "") as NSString).pathExtension.lowercased())
                 || FileStorage.extensions.contains(response.url?.pathExtension.lowercased() ?? "")
+                || GenericFileStorage.mimeTypes[mime] != nil
+                || GenericFileStorage.extensions.contains(((response.suggestedFilename ?? "") as NSString).pathExtension.lowercased())
+                || GenericFileStorage.extensions.contains(response.url?.pathExtension.lowercased() ?? "")
             if mime == "application/pdf" || !media { responseLimit = ResourceLimits.pdfBytes }
         }
         if totalBytesWritten > responseLimit || totalBytesExpectedToWrite > responseLimit {
@@ -306,6 +309,67 @@ final class ProgressObserver: NSObject, URLSessionDownloadDelegate, @unchecked S
         lock.unlock()
         guard publish else { return }
         progress(DownloadProgress(received: totalBytesWritten, total: totalBytesExpectedToWrite))
+    }
+}
+
+// A dedicated session delegate receives real download progress. Completion-handler
+// and async download APIs only forward task-delegate callbacks on macOS.
+private final class StreamingDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let configuration: URLSessionConfiguration
+    private let observer: ProgressObserver
+    private let lock = NSLock()
+    private var session: URLSession?
+    private var task: URLSessionDownloadTask?
+    private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+    private var cancelled = false
+    // Delegate callbacks run serially; only cancellation/task installation cross queues.
+    private var savedFile: URL?
+    private var saveError: Error?
+    init(configuration: URLSessionConfiguration, observer: ProgressObserver) {
+        self.configuration = configuration; self.observer = observer
+    }
+    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if cancelled { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
+                self.continuation = continuation
+                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+                self.session = session
+                let task = session.downloadTask(with: request); self.task = task
+                task.resume(); lock.unlock()
+            }
+        } onCancel: { self.cancel() }
+    }
+    private func cancel() {
+        lock.lock(); cancelled = true; let task = task; lock.unlock(); task?.cancel()
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        observer.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: request, completionHandler: completionHandler)
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        observer.urlSession(session, downloadTask: downloadTask, didWriteData: bytesWritten, totalBytesWritten: totalBytesWritten, totalBytesExpectedToWrite: totalBytesExpectedToWrite)
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-transfer-" + UUID().uuidString)
+        do { try FileManager.default.moveItem(at: location, to: target); savedFile = target }
+        catch { saveError = error }
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let continuation = continuation; self.continuation = nil
+        let cancelled = cancelled; self.task = nil; self.session = nil
+        lock.unlock()
+        session.finishTasksAndInvalidate()
+        if cancelled || error != nil || saveError != nil || savedFile == nil || task.response == nil {
+            if let file = savedFile { try? FileManager.default.removeItem(at: file) }
+            continuation?.resume(throwing: cancelled ? CancellationError() : error ?? saveError ?? URLError(.badServerResponse))
+        } else if let file = savedFile, let response = task.response {
+            continuation?.resume(returning: (file, response))
+        }
+        savedFile = nil
     }
 }
 
@@ -360,7 +424,12 @@ final class URLSessionTransport: HTTPTransport {
     func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
         let conditional = policy == .externalPDF && (request.value(forHTTPHeaderField: "If-None-Match") != nil || request.value(forHTTPHeaderField: "If-Modified-Since") != nil)
         return try await perform(request, conditional: conditional, progress: progress) { observer in
-            let (url, response) = try await session.download(for: request, delegate: observer)
+            let configuration = session.configuration
+            // A large paper on a slow connection can exceed five minutes while
+            // continuously transferring; retain the 30-second idle timeout.
+            configuration.timeoutIntervalForResource = fileLimit > ResourceLimits.pdfBytes ? 14_400 : 1800
+            let transfer = StreamingDownload(configuration: configuration, observer: observer)
+            let (url, response) = try await transfer.download(request)
             do {
                 if let failure = observer.failure { throw failure }
                 if let response = observer.httpFailure { throw HTTPResponseFailure(response: response) }
@@ -425,24 +494,17 @@ enum PaperStorage {
         _ = data.withUnsafeBytes { fsetxattr(handle.fileDescriptor, attribute, $0.baseAddress, data.count, 0, 0) }
     }
 
-    static func existing(metadata: PaperMetadata, directory: URL, naming: NamingStyle) throws -> SavedPaper? {
+    static func existing(metadata: PaperMetadata, directory: URL, naming: NamingStyle, namingSnapshot: AssetNamingSnapshot? = nil) throws -> SavedPaper? {
         guard metadata.reference.version != nil else { return nil }
-        let primary = directory.appendingPathComponent(metadata.filename(style: naming))
+        let primary = directory.appendingPathComponent(namingSnapshot?.paperFilename(metadata) ?? metadata.filename(style: naming))
         if let saved = try trustedExisting(at: primary, metadata: metadata) { return saved }
-        let tag = metadata.reference.identifier.replacingOccurrences(of: "/", with: "-")
         guard let entries = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [], options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants], errorHandler: { _, _ in false }) else { return nil }
         var visited = 0
         for case let url as URL in entries {
             try Task.checkCancellation()
             visited += 1
             guard visited <= ResourceLimits.localScanEntries else { return nil }
-            let name = url.lastPathComponent
-            guard name.hasSuffix(".pdf"), let start = name.lastIndex(of: "[") else { continue }
-            let suffix = String(name[start...])
-            let numberedPrefix = "[\(tag)-"
-            let collision = suffix.hasPrefix(numberedPrefix) && suffix.hasSuffix("].pdf")
-                && Int(suffix.dropFirst(numberedPrefix.count).dropLast(5)).map { (2..<1000).contains($0) } == true
-            guard suffix == "[\(tag)].pdf" || collision else { continue }
+            guard url.pathExtension.lowercased() == "pdf" else { continue }
             if let saved = try trustedExisting(at: url, metadata: metadata) { return saved }
         }
         return nil
@@ -508,10 +570,10 @@ enum PaperStorage {
         return hash.finalize()
     }
 
-    static func save(downloaded: URL, metadata: PaperMetadata, directory: URL, naming: NamingStyle = .dateTitle) throws -> SavedPaper {
+    static func save(downloaded: URL, metadata: PaperMetadata, directory: URL, naming: NamingStyle = .dateTitle, namingSnapshot: AssetNamingSnapshot? = nil) throws -> SavedPaper {
         let tag = metadata.reference.identifier.replacingOccurrences(of: "/", with: "-")
         let saved = try publish(downloaded: downloaded, directory: directory, tag: tag,
-            filename: { metadata.filename(style: naming, suffix: $0) },
+            filename: { namingSnapshot?.paperFilename(metadata, suffix: $0) ?? metadata.filename(style: naming, suffix: $0) },
             record: { file, hash in
                 guard metadata.reference.version != nil else { return }
                 writeRecord(SourceRecord(schema: 1, identifier: metadata.reference.identifier, sha256: hash.map { String(format: "%02x", $0) }.joined()), at: file, attribute: sourceAttribute)
@@ -574,8 +636,8 @@ actor DownloadEngine {
     private var rateLimitStrikes = 0
     private static let cooldownKey = "requestCooldownUntil"
 
-    init(transport: HTTPTransport = URLSessionTransport(), pdfTransport: HTTPTransport? = nil, requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil, mediaAuthentication: @escaping @Sendable () async throws -> BrowserAuthenticationSelection? = { nil }, mediaDownload: @escaping MediaDownloader.Download = { url, directory, format, organize, authentication, event in
-        try await MediaDownloader.download(url, to: directory, format: format, organizeByType: organize, authentication: authentication, event: event)
+    init(transport: HTTPTransport = URLSessionTransport(), pdfTransport: HTTPTransport? = nil, requestInterval: Double = 15.1, retryDelay: Double = 3, rateLimitDelay: Double = 60, cooldownPreferences: UserDefaults? = nil, coordinator: RequestCoordinator? = nil, mediaAuthentication: @escaping @Sendable () async throws -> BrowserAuthenticationSelection? = { nil }, mediaDownload: @escaping MediaDownloader.Download = { url, directory, format, organize, authentication, namingSnapshot, event in
+        try await MediaDownloader.download(url, to: directory, format: format, organizeByType: organize, authentication: authentication, namingSnapshot: namingSnapshot, event: event)
     }) {
         self.transport = transport
         self.pdfTransport = pdfTransport
@@ -737,13 +799,13 @@ actor DownloadEngine {
         }
     }
 
-    func download(_ reference: ArxivReference, to directory: URL, naming: NamingStyle = .dateTitle, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedPaper {
+    func download(_ reference: ArxivReference, to directory: URL, naming: NamingStyle = .dateTitle, namingSnapshot: AssetNamingSnapshot? = nil, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedPaper {
         defer { lease = nil }
         try await acquire(event: event)
         let metadata = try await fetchMetadata(reference, event: event)
         event(.resolved(metadata))
         event(.checkingLocal)
-        if let existing = try PaperStorage.existing(metadata: metadata, directory: directory, naming: naming) { return existing }
+        if let existing = try PaperStorage.existing(metadata: metadata, directory: directory, naming: naming, namingSnapshot: namingSnapshot) { return existing }
         let local: URL = try await retried(event: event) {
             event(.resolved(metadata))
             let request = URLRequest(url: metadata.reference.pdfURL)
@@ -761,7 +823,7 @@ actor DownloadEngine {
         defer { try? FileManager.default.removeItem(at: local) }
         try Task.checkCancellation()
         event(.validating)
-        return try PaperStorage.save(downloaded: local, metadata: metadata, directory: directory, naming: naming)
+        return try PaperStorage.save(downloaded: local, metadata: metadata, directory: directory, naming: naming, namingSnapshot: namingSnapshot)
     }
 
     func latestReference(_ baseID: String) async throws -> ArxivReference {
@@ -788,12 +850,12 @@ actor DownloadEngine {
         }
     }
 
-    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, mediaFormat: MediaFormat = .automatic, organizeByType: Bool = false, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
+    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, namingSnapshot: AssetNamingSnapshot? = nil, mediaFormat: MediaFormat = .automatic, organizeByType: Bool = false, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
         try Task.checkCancellation()
         switch source {
         case .arxiv(let reference):
             let destination = organizeByType ? try DownloadFolder.papers.prepare(in: directory) : directory
-            let paper = try await download(reference, to: destination, naming: naming, event: event)
+            let paper = try await download(reference, to: destination, naming: naming, namingSnapshot: namingSnapshot, event: event)
             return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
         case .media(let url):
             guard MediaDownloader.accepts(url) else { throw DownloadError.invalidLink(url.absoluteString) }
@@ -801,10 +863,10 @@ actor DownloadEngine {
             if MediaSite.site(for: url.host) == .douyin {
                 // This backend is anonymous even when another site's browser
                 // authentication is enabled or its saved selection is invalid.
-                return try await mediaDownload(url, directory, mediaFormat, organizeByType, nil, event)
+                return try await mediaDownload(url, directory, mediaFormat, organizeByType, nil, namingSnapshot, event)
             }
             return try await MediaDownloader.withAuthenticationFallback(authentication: mediaAuthentication, event: event) { authentication in
-                try await self.mediaDownload(url, directory, mediaFormat, organizeByType, authentication, event)
+                try await self.mediaDownload(url, directory, mediaFormat, organizeByType, authentication, namingSnapshot, event)
             }
         case .pdf(let url), .file(let url):
             guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
@@ -819,26 +881,33 @@ actor DownloadEngine {
             let native = pdfTransport ?? URLSessionTransport(policy: .externalPDF, fileLimit: url.pathExtension.lowercased() == "pdf" ? ResourceLimits.pdfBytes : FileStorage.byteLimit)
             let client = DownloadEngine(transport: native, requestInterval: coordinator == nil ? min(1, requestInterval) : 1,
                 retryDelay: retryDelay, rateLimitDelay: rateLimitDelay, coordinator: shared)
-            return try await client.downloadDirect(url, to: directory, mediaFormat: mediaFormat, organizeByType: organizeByType, event: event)
+            return try await client.downloadDirect(url, to: directory, namingSnapshot: namingSnapshot, mediaFormat: mediaFormat, organizeByType: organizeByType, event: event)
         }
     }
 
-    private func downloadDirect(_ url: URL, to directory: URL, mediaFormat: MediaFormat, organizeByType: Bool,
+    private func downloadDirect(_ url: URL, to directory: URL, namingSnapshot: AssetNamingSnapshot?, mediaFormat: MediaFormat, organizeByType: Bool,
                                 event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         defer { lease = nil }
         try await acquire(event: event)
         event(.checkingLocal)
         let paperDirectory = organizeByType ? directory.appendingPathComponent(DownloadFolder.papers.rawValue, isDirectory: true) : directory
-        var cached = FileStorage.extensions.contains(url.pathExtension.lowercased()) ? nil : try PDFStorage.existing(source: url, directory: paperDirectory)
+        var cached = FileStorage.extensions.union(GenericFileStorage.extensions).contains(url.pathExtension.lowercased()) ? nil : try PDFStorage.existing(source: url, directory: paperDirectory)
         return try await retried(event: event) {
             var request = URLRequest(url: url)
-            request.setValue("application/pdf, image/*, audio/*, video/*, application/octet-stream;q=0.9", forHTTPHeaderField: "Accept")
+            request.setValue("application/pdf, image/*, audio/*, video/*, application/octet-stream;q=0.9, */*;q=0.8", forHTTPHeaderField: "Accept")
             if let cached {
                 request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match")
                 if cached.etag == nil { request.setValue(cached.modified, forHTTPHeaderField: "If-Modified-Since") }
             }
             event(.progress(DownloadProgress(received: 0, total: -1)))
-            let (file, response) = try await transport.download(for: request) { event(.progress($0)) }
+            let downloaded: (URL, HTTPURLResponse)
+            do { downloaded = try await transport.download(for: request) { event(.progress($0)) } }
+            catch let failure as HTTPResponseFailure where failure.response.statusCode == 304 && cached != nil {
+                // A real redirect strips validators and the delegate rejects its
+                // 304. Drop the original cache condition before retrying too.
+                cached = nil; throw DownloadError.invalidPDF
+            }
+            let (file, response) = downloaded
             defer { try? FileManager.default.removeItem(at: file) }
             if response.statusCode == 304 {
                 guard response.url == url, let previous = cached, (previous.etag != nil || previous.modified != nil),
@@ -857,7 +926,14 @@ actor DownloadEngine {
             let saved: SavedDocument
             if ext == "pdf" {
                 let destination = organizeByType ? try DownloadFolder.papers.prepare(in: directory) : directory
-                saved = try PDFStorage.save(downloaded: file, source: url, response: response, directory: destination)
+                saved = try PDFStorage.save(downloaded: file, source: url, response: response, directory: destination, namingSnapshot: namingSnapshot)
+            } else if GenericFileStorage.extensions.contains(ext) {
+                try await GenericFileStorage.validate(file, extension: ext)
+                let folder: DownloadFolder = GenericFileStorage.archiveExtensions.contains(ext) ? .archives : .documents
+                let destination = organizeByType ? try folder.prepare(in: directory) : directory
+                let filename = (response.suggestedFilename ?? url.lastPathComponent) as NSString
+                let title = PaperMetadata.cleanTitle((filename.lastPathComponent as NSString).deletingPathExtension)
+                saved = try FileStorage.save(file, title: title, extension: ext, to: destination, filenameTitle: namingSnapshot?.savedTitle(extension: ext) ?? namingSnapshot?.title(title, kind: .output(ext), source: url))
             } else {
                 let streams = try await FileStorage.validate(file, extension: ext)
                 let audioOnly = mediaFormat == .audio && (FileStorage.videoExtensions.contains(ext) || streams.contains(where: \.isVideo))
@@ -868,7 +944,7 @@ actor DownloadEngine {
                 let destination = organizeByType ? try DownloadFolder.media(extension: outputExtension).prepare(in: directory) : directory
                 let filename = (response.suggestedFilename ?? url.lastPathComponent) as NSString
                 let title = PaperMetadata.cleanTitle((filename.lastPathComponent as NSString).deletingPathExtension)
-                saved = try FileStorage.save(audioOnly ? converted : file, title: title, extension: outputExtension, to: destination)
+                saved = try FileStorage.save(audioOnly ? converted : file, title: title, extension: outputExtension, to: destination, filenameTitle: namingSnapshot?.savedTitle(extension: outputExtension) ?? namingSnapshot?.title(title, kind: .output(outputExtension), source: url))
             }
             event(.document(saved.title))
             return saved

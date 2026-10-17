@@ -42,7 +42,7 @@ extension CoreTests {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let engine = DownloadEngine(transport: MockTransport(sourcePDF: pdf),
                                     pdfTransport: MockTransport(sourcePDF: pdf), requestInterval: 0, retryDelay: 0,
-                                    mediaAuthentication: { try await probe.selection() }, mediaDownload: { _, _, _, _, selection, _ in
+                                    mediaAuthentication: { try await probe.selection() }, mediaDownload: { _, _, _, _, selection, _, _ in
                                         try expect(selection == nil, "a failed provider only reaches the anonymous attempt")
                                         throw DownloadError.browserAuthentication(.loginRequired)
                                     })
@@ -520,7 +520,7 @@ extension CoreTests {
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let probe = AnonymousFallbackProbe()
-        let engine = DownloadEngine(mediaAuthentication: { selection }, mediaDownload: { _, _, _, _, auth, event in
+        let engine = DownloadEngine(mediaAuthentication: { selection }, mediaDownload: { _, _, _, _, auth, _, event in
             try await probe.download(authentication: auth, image: image, event: event)
         })
         let model = DownloadModel(engine: engine, preferences: preferences)

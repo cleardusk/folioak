@@ -54,6 +54,20 @@ import Foundation
         try queue.sync { try MediaLibraryStore.write(items, to: mediaURL) }
     }
 
+    func commitLibrary(_ papers: [LibraryPaper]) async throws {
+        let url = libraryURL
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { continuation.resume(with: Result { try LibraryStore.write(papers, to: url) }) }
+        }
+    }
+
+    func commitMediaLibrary(_ items: [DownloadItem]) async throws {
+        let url = mediaURL
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { continuation.resume(with: Result { try MediaLibraryStore.write(items, to: url) }) }
+        }
+    }
+
     func save(_ request: Request, completion: @escaping @MainActor (WriteResult) -> Void) {
         queue.async {
             let result = Self.write(request)
