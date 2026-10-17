@@ -266,11 +266,13 @@ extension CoreTests {
                 }
                 try expect(result === pendingResult, "download completion enables the existing row without remounting")
                 let resultRect = result.convert(result.bounds, to: host)
+                var resultEventNumber = 0
                 func resultClick(_ point: NSPoint, count: Int = 1, flags: NSEvent.ModifierFlags = []) async throws {
                     for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        resultEventNumber += 1
                         NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: host.convert(point, to: nil), modifierFlags: flags,
                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
-                            eventNumber: count, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!)
+                            eventNumber: resultEventNumber, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!)
                         try await Task.sleep(nanoseconds: 15_000_000)
                     }
                 }
@@ -280,11 +282,26 @@ extension CoreTests {
                 try await resultClick(titlePoint)
                 try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9))
                 try expect(openedFiles.count == openCount, "quick result single click never opens a file")
-                for point in [titlePoint, pathPoint] {
+                for (index, point) in [titlePoint, pathPoint].enumerated() {
                     try await resultClick(point); try await resultClick(point, count: 2)
+                    let expected = openCount + index + 1
+                    // AppKit dispatches recognizer actions asynchronously. Wait
+                    // for this one gesture, then let duplicate callbacks settle.
+                    for _ in 0..<20 {
+                        if openedFiles.count >= expected { break }
+                        try await Task.sleep(nanoseconds: 25_000_000)
+                    }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                    if openedFiles.count != expected || openedFiles.last != resultFile {
+                        let recognizers = host.gestureRecognizers.compactMap { $0 as? NSClickGestureRecognizer }
+                        print("QUICK RESULT DOUBLE CLICK", language.rawValue, scheme, index,
+                            "expected", expected, "actual", openedFiles.count, "last", String(describing: openedFiles.last),
+                            "recognizers", recognizers.map { "\($0.numberOfClicksRequired):\($0.state.rawValue):\($0.isEnabled)" },
+                            "region", result.bounds, result.visibleRect, "key", NSApp.keyWindow === window)
+                    }
+                    try expect(openedFiles.count == expected && openedFiles.last == resultFile,
+                        "quick result \(index == 0 ? "title" : "path") double click opens the saved file exactly once")
                 }
-                try expect(openedFiles.count == openCount + 2 && openedFiles.last == resultFile,
-                    "quick result title and path double clicks each open the saved file exactly once")
                 try await resultClick(titlePoint, flags: .command); try await resultClick(titlePoint, count: 2, flags: .command)
                 try expect(openedFiles.count == openCount + 2, "modified quick result clicks do not open files")
                 let revealCount = revealedFiles.count
