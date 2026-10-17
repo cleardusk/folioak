@@ -298,6 +298,9 @@ extension CoreTests {
                 try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9))
                 try expect(openedFiles.count == openCount, "quick result single click never opens a file")
                 for (index, point) in [titlePoint, pathPoint].enumerated() {
+                    // These are separate double clicks, each restarting at count 1.
+                    // End the previous multi-click sequence before starting another.
+                    if index > 0 { try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.05) * 1e9)) }
                     resultEventTimes.removeAll(); clickTrace.removeAll()
                     try await resultClick(point); try await resultClick(point, count: 2)
                     let offsets = resultEventTimes.map { $0 - resultEventTimes[0] }
@@ -320,7 +323,7 @@ extension CoreTests {
                             "expected", expected, "actual", openedFiles.count, "last", String(describing: openedFiles.last),
                             "recognizers", recognizers.map { "\($0.numberOfClicksRequired):\($0.state.rawValue):\($0.isEnabled)" },
                             "region", result.bounds, result.visibleRect, "key", NSApp.keyWindow === window,
-                            "point", point, "hit", String(describing: host.hitTest(point)), "trace", clickTrace)
+                            "point", point, "hit", String(describing: host.hitTest(host.convert(point, to: host.superview))), "trace", clickTrace)
                     }
                     try expect(openedFiles.count == expected && openedFiles.last == resultFile,
                         "quick result \(index == 0 ? "title" : "path") double click opens the saved file exactly once")

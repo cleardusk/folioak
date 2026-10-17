@@ -41,7 +41,12 @@ struct FileRowClickRegion: NSViewRepresentable {
             guard let host = window?.contentView else { return }
             if click?.view === host { return }
             if let click { click.view?.removeGestureRecognizer(click) }
+            #if TESTING
+            let recognizer = TracedClickRecognizer(target: self, action: #selector(openFile))
+            recognizer.trace = { [weak self] in self?.clickTrace?($0) }
+            #else
             let recognizer = NSClickGestureRecognizer(target: self, action: #selector(openFile))
+            #endif
             recognizer.numberOfClicksRequired = 2
             recognizer.delaysPrimaryMouseButtonEvents = false
             recognizer.delegate = self
@@ -73,6 +78,24 @@ struct FileRowClickRegion: NSViewRepresentable {
             return allowsClick(at: point)
         }
         func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool { true }
+        #if TESTING
+        // Observe AppKit's real state machine without changing its transitions.
+        private final class TracedClickRecognizer: NSClickGestureRecognizer {
+            var trace: ((String) -> Void)?
+            private func record(_ phase: String, event: NSEvent? = nil) {
+                trace?("recognizer=\(ObjectIdentifier(self)) \(phase) state=\(state.rawValue) event=\(event.map { "\($0.type.rawValue):\($0.clickCount):\($0.timestamp)" } ?? "none")")
+            }
+            override func mouseDown(with event: NSEvent) {
+                record("before down", event: event); super.mouseDown(with: event); record("after down", event: event)
+            }
+            override func mouseUp(with event: NSEvent) {
+                record("before up", event: event); super.mouseUp(with: event); record("after up", event: event)
+            }
+            override func reset() {
+                record("before reset"); super.reset(); record("after reset")
+            }
+        }
+        #endif
         @objc private func openFile() {
             #if TESTING
             clickTrace?("opened")
