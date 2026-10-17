@@ -28,6 +28,9 @@ struct FileRowClickRegion: NSViewRepresentable {
         var open: () -> Void = {}
         var isControls = false
         private var click: NSClickGestureRecognizer?
+        #if TESTING
+        var clickTrace: ((String) -> Void)?
+        #endif
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); configure() }
         func configure() {
@@ -45,6 +48,10 @@ struct FileRowClickRegion: NSViewRepresentable {
             host.addGestureRecognizer(recognizer); click = recognizer
         }
         func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+            #if TESTING
+            let point = convert(event.locationInWindow, from: nil)
+            clickTrace?("attempt type=\(event.type.rawValue) clicks=\(event.clickCount) point=\(point) allowed=\(allowsClick(at: point)) window=\(event.windowNumber == window?.windowNumber)")
+            #endif
             guard event.windowNumber == window?.windowNumber,
                   event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty else { return false }
             return allowsClick(at: convert(event.locationInWindow, from: nil))
@@ -59,10 +66,19 @@ struct FileRowClickRegion: NSViewRepresentable {
             return true
         }
         func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
-            allowsClick(at: gestureRecognizer.location(in: self))
+            let point = gestureRecognizer.location(in: self)
+            #if TESTING
+            clickTrace?("begin point=\(point) allowed=\(allowsClick(at: point))")
+            #endif
+            return allowsClick(at: point)
         }
         func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool { true }
-        @objc private func openFile() { open() }
+        @objc private func openFile() {
+            #if TESTING
+            clickTrace?("opened")
+            #endif
+            open()
+        }
     }
 }
 

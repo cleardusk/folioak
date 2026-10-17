@@ -275,6 +275,8 @@ extension CoreTests {
                     throw TestFailure.failed("quick result native double-click region")
                 }
                 try expect(result === pendingResult, "download completion enables the existing row without remounting")
+                var clickTrace: [String] = []
+                result.clickTrace = { clickTrace.append($0) }
                 let resultRect = result.convert(result.bounds, to: host)
                 var resultEventNumber = 0
                 func resultClick(_ point: NSPoint, count: Int = 1, flags: NSEvent.ModifierFlags = []) async throws {
@@ -307,13 +309,15 @@ extension CoreTests {
                         print("QUICK RESULT DOUBLE CLICK", language.rawValue, scheme, index,
                             "expected", expected, "actual", openedFiles.count, "last", String(describing: openedFiles.last),
                             "recognizers", recognizers.map { "\($0.numberOfClicksRequired):\($0.state.rawValue):\($0.isEnabled)" },
-                            "region", result.bounds, result.visibleRect, "key", NSApp.keyWindow === window)
+                            "region", result.bounds, result.visibleRect, "key", NSApp.keyWindow === window,
+                            "point", point, "hit", String(describing: host.hitTest(point)), "trace", clickTrace)
                     }
                     try expect(openedFiles.count == expected && openedFiles.last == resultFile,
                         "quick result \(index == 0 ? "title" : "path") double click opens the saved file exactly once")
                 }
                 try await resultClick(titlePoint, flags: .command); try await resultClick(titlePoint, count: 2, flags: .command)
                 try expect(openedFiles.count == openCount + 2, "modified quick result clicks do not open files")
+                result.clickTrace = nil
                 let revealCount = revealedFiles.count
                 let finderPoint = NSPoint(x: resultRect.maxX + 8 + 16, y: resultRect.midY)
                 try await resultClick(finderPoint)
