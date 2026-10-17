@@ -35,6 +35,35 @@ private final class QuickTestHost<Content: View>: NSHostingView<Content> {
 private final class QuickTestWindow: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+    private var dispatchedMouseEvents: [Int: TimeInterval] = [:]
+    override func sendEvent(_ event: NSEvent) {
+        super.sendEvent(event)
+        if event.type == .leftMouseDown || event.type == .leftMouseUp {
+            dispatchedMouseEvents[event.eventNumber] = event.timestamp
+        }
+    }
+    func dispatchQueuedMouseEvent(_ event: NSEvent) async throws {
+        NSApp.postEvent(event, atStart: false)
+        // Native gesture resets happen at AppKit event boundaries. Fetch each
+        // queued event instead of injecting directly into an active callback.
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            if let queued = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp], until: Date(), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(queued)
+                // AppKit's CGEvent bridge can round timestamp fractions below a
+                // nanosecond; identity still requires type, window and event number.
+                if queued.type == event.type && queued.windowNumber == event.windowNumber &&
+                   queued.eventNumber == event.eventNumber && abs(queued.timestamp - event.timestamp) < 0.000001 {
+                    try expect(dispatchedMouseEvents[event.eventNumber] == queued.timestamp, "queued mouse event completes native dispatch")
+                    return
+                }
+                // Other windows' queued events are dispatched once, never discarded.
+            } else {
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        throw TestFailure.failed("queued mouse event was not dispatched by AppKit")
+    }
 }
 
 extension CoreTests {
@@ -206,8 +235,21 @@ extension CoreTests {
                 let window = QuickTestWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false; window.hidesOnDeactivate = false
                 window.contentView = host; window.makeKeyAndOrderFront(nil)
-                state.focusRequest = UUID()
                 func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+                var mountedEditor: QuickLinkEditor.Editor?
+                for _ in 0..<40 {
+                    try await Task.sleep(nanoseconds: 25_000_000)
+                    host.layoutSubtreeIfNeeded()
+                    if NSApp.keyWindow === window,
+                       let mounted = descendants(host).compactMap({ $0 as? QuickLinkEditor.Editor }).first,
+                       mounted.window === window {
+                        mountedEditor = mounted
+                        break
+                    }
+                }
+                try expect(mountedEditor != nil, "quick editor mounts in the real key window")
+                // Match the focus request after popover.show and native attachment.
+                state.focusRequest = UUID()
                 var focusedEditor: QuickLinkEditor.Editor?
                 for _ in 0..<40 {
                     try await Task.sleep(nanoseconds: 25_000_000)
@@ -285,9 +327,10 @@ extension CoreTests {
                         resultEventNumber += 1
                         let timestamp = ProcessInfo.processInfo.systemUptime
                         resultEventTimes.append(timestamp)
-                        NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: host.convert(point, to: nil), modifierFlags: flags,
+                        let event = NSEvent.mouseEvent(with: type, location: host.convert(point, to: nil), modifierFlags: flags,
                             timestamp: timestamp, windowNumber: window.windowNumber, context: nil,
-                            eventNumber: resultEventNumber, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!)
+                            eventNumber: resultEventNumber, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!
+                        try await window.dispatchQueuedMouseEvent(event)
                         try await Task.sleep(nanoseconds: 15_000_000)
                     }
                 }
@@ -648,11 +691,10 @@ extension CoreTests {
                 let location = host.convert(NSPoint(x: x, y: host.isFlipped ? y : host.bounds.height - y), to: nil)
                 for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                     eventNumber += 1
-                    NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
+                    let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                        context: nil, eventNumber: eventNumber, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!)
-                    // Let AppKit process each event as it would between physical
-                    // down/up and successive clicks, including recognizer resets.
+                        context: nil, eventNumber: eventNumber, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!
+                    try await window.dispatchQueuedMouseEvent(event)
                     try await Task.sleep(nanoseconds: 15_000_000)
                 }
             }
