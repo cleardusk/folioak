@@ -21,6 +21,42 @@ enum WorkspacePage: String, CaseIterable {
     }
 }
 
+// Session-only navigation: bounded routes, no workspace persistence or timers.
+struct WorkspaceRoute: Equatable {
+    var page: WorkspacePage = .downloads
+    var preferences: WorkspacePreferencesPage?
+    var title: String { preferences?.rawValue ?? page.rawValue }
+}
+
+struct WorkspaceNavigation {
+    private(set) var current = WorkspaceRoute()
+    private(set) var back: [WorkspaceRoute] = []
+    private(set) var forward: [WorkspaceRoute] = []
+    mutating func visit(_ route: WorkspaceRoute) {
+        guard route != current else { return }
+        back.append(current)
+        if back.count > 20 { back.removeFirst(back.count - 20) }
+        current = route; forward.removeAll(keepingCapacity: true)
+    }
+    mutating func goBack() {
+        guard let route = back.popLast() else { return }
+        forward.append(current); current = route
+    }
+    mutating func goForward() {
+        guard let route = forward.popLast() else { return }
+        back.append(current); current = route
+    }
+    init(page: WorkspacePage = .downloads, preferences: WorkspacePreferencesPage? = nil) {
+        current = WorkspaceRoute(page: page, preferences: preferences)
+    }
+}
+
+private struct WorkspaceBrowsingState {
+    var query = ""
+    var searchExpanded = false
+    var selection = FileListSelection()
+}
+
 enum QueueFilter: String, CaseIterable {
     case all = "全部", active = "进行中", saved = "已完成", failed = "未完成"
     func includes(_ item: DownloadItem) -> Bool {
@@ -91,7 +127,32 @@ struct ControlFeedback: ViewModifier {
 struct DownloaderView: View {
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
-    @WorkspaceViewState var page: WorkspacePage = .downloads
+    private let initialPage: WorkspacePage?
+    private var page: WorkspacePage {
+        get { model.navigation.current.page }
+        nonmutating set { model.navigation.visit(WorkspaceRoute(page: newValue)) }
+    }
+    @WorkspaceViewState private var browsing: [WorkspacePage: WorkspaceBrowsingState] = [:]
+    @WorkspaceViewState private var scrollMemory = WorkspaceScrollMemory()
+    private var query: String {
+        get { browsing[page]?.query ?? "" }
+        nonmutating set { browsing[page, default: WorkspaceBrowsingState()].query = newValue }
+    }
+    private var searchExpanded: Bool {
+        get { browsing[page]?.searchExpanded ?? false }
+        nonmutating set { browsing[page, default: WorkspaceBrowsingState()].searchExpanded = newValue }
+    }
+    private var selection: FileListSelection {
+        get { browsing[page]?.selection ?? FileListSelection() }
+        nonmutating set { browsing[page, default: WorkspaceBrowsingState()].selection = newValue }
+    }
+
+    init(model: DownloadModel, page: WorkspacePage? = nil, logItem: DownloadItem? = nil,
+         showSettings: @escaping () -> Void = {}, endTextEditing: @escaping () -> Void = {}) {
+        self.model = model; initialPage = page
+        _logItem = WorkspaceViewState(initialValue: logItem)
+        self.showSettings = showSettings; self.endTextEditing = endTextEditing
+    }
     @WorkspaceViewState var logItem: DownloadItem?
     @WorkspaceViewState private var pendingDetailLogs: DownloadItem?
     var showSettings: () -> Void = {}
@@ -105,15 +166,12 @@ struct DownloaderView: View {
         switch page { case .downloads: return .downloads; case .library: return .documents; case .media: return .media; case .logs: return .logs }
     }
     @WorkspaceViewState private var inputFocused = false
-    @WorkspaceViewState private var query = ""
     @WorkspaceViewState private var traceSearchTask: Task<Void, Never>?
-    @WorkspaceViewState private var searchExpanded = false
     @WorkspaceViewState private var searchFocusRequest: (id: UUID, edit: UUID, list: UUID, page: WorkspacePage)?
     @FocusState private var searchFocused: Bool
     @WorkspaceViewState private var filter: QueueFilter = .all
     @WorkspaceViewState private var logLevel: ActivityLevel? = nil
     @WorkspaceViewState private var dropTargeted = false
-    @WorkspaceViewState private var selection = FileListSelection()
     @WorkspaceViewState private var mediaRemoved = false
     @WorkspaceViewState private var confirmingLibraryRemoval: LibraryRemovalUndo?
     @WorkspaceViewState private var listFocus: UUID?
@@ -165,20 +223,19 @@ struct DownloaderView: View {
     var body: some View {
         tracedLayout
         .onReceive(model.$listRequest.dropFirst()) { _ in
-            model.preferencesPage = nil
             if page == .logs { focusListOnArrival = true; page = .downloads }
-            else { focusList() }
+            else { model.preferencesPage = nil; focusList() }
         }
         .onReceive(model.$editRequest.dropFirst()) { _ in
-            model.preferencesPage = nil
             listFocus = nil; focusListOnArrival = false; page = .downloads; inputFocused = true
         }
         .onReceive(model.$searchRequest.dropFirst()) { openSearch($0) }
-        .onAppear { if model.preferencesPage == .settings { hasOpenedSettings = true } }
+        .onAppear {
+            if let initialPage { model.navigation = WorkspaceNavigation(page: initialPage, preferences: model.preferencesPage) }
+            if model.preferencesPage == .settings { hasOpenedSettings = true }
+        }
         .onChange(of: model.preferencesPage) { destination in
             traceSearchTask?.cancel()
-            model.trace.user(.pageChanged, context: destination == nil ? traceContext : .settings,
-                detail: destination == .about ? .about : destination == .settings ? .general : nil)
             if destination == .settings { hasOpenedSettings = true }
             if destination != nil {
                 if previousPreferencesPage == nil { restoreListFocus = listFocused || selectedID != nil }
@@ -195,9 +252,8 @@ struct DownloaderView: View {
         }
         .onChange(of: page) { _ in
             traceSearchTask?.cancel()
-            model.trace.user(.pageChanged, context: traceContext)
-            query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil
-            if page != .logs { logItem = nil }
+            searchFocusRequest = nil; searchFocused = false; listFocus = nil
+            selection.retainVisible(visibleItems.map(\.id))
             if page != .downloads { inputFocused = false; endTextEditing() }
             if focusListOnArrival { focusListOnArrival = false; focusList() }
         }
@@ -242,7 +298,7 @@ struct DownloaderView: View {
         }
         .sheet(item: $model.diagnosticItem, onDismiss: {
             if let requested = pendingDetailLogs {
-                pendingDetailLogs = nil; logItem = requested; logLevel = nil; query = ""; page = .logs
+                pendingDetailLogs = nil; page = .logs; logItem = requested; logLevel = nil; query = ""
             } else if selectedID != nil { listFocus = UUID() }
         }) { item in
             TaskDiagnosticView(model: model, item: item, libraryPaperID: page == .library ? item.id : nil, fromMediaLibrary: page == .media,
@@ -252,13 +308,14 @@ struct DownloaderView: View {
             AssetRenameView(model: model, request: request)
         }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
-        .onReceive(model.$batchID.dropFirst()) { _ in model.preferencesPage = nil; page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
+        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
     }
 
     // Split the view expression at existing modifier boundaries so adding
     // observers does not inflate SwiftUI's type-checking work or add UI layers.
     private var tracedLayout: some View {
         workspaceLayout
+            .onChange(of: model.navigation.current, perform: traceRouteChanged)
             .onChange(of: query, perform: traceSearchChanged)
             .onDisappear { traceSearchTask?.cancel() }
             .onChange(of: libraryFilter, perform: traceLibraryFilterChanged)
@@ -269,6 +326,12 @@ struct DownloaderView: View {
                 let detail: InteractionEvent.Detail = value ? .removed : .all
                 model.trace.user(.filterChanged, context: .media, detail: detail)
             }
+    }
+
+    private func traceRouteChanged(_ route: WorkspaceRoute) {
+        let context: InteractionEvent.Context = route.preferences == nil ? traceContext : .settings
+        let detail: InteractionEvent.Detail? = route.preferences == .about ? .about : route.preferences == .settings ? .general : nil
+        model.trace.user(.pageChanged, context: context, detail: detail)
     }
 
     private func traceSearchChanged(_ value: String) {
@@ -311,7 +374,8 @@ struct DownloaderView: View {
             sidebar
             Rectangle().fill(ThemePalette.color(palette.border).opacity(0.55)).frame(width: 1)
             VStack(alignment: .leading, spacing: 0) {
-                Group {
+                HStack(spacing: 12) {
+                    navigationControls
                     if let destination = model.preferencesPage {
                         HStack {
                             Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.page)
@@ -413,7 +477,7 @@ struct DownloaderView: View {
             }.padding(.top, 34).padding(.bottom, 10)
             VStack(spacing: 6) {
                 ForEach(WorkspacePage.navigation, id: \.self) { destination in
-                    Button { model.preferencesPage = nil; page = destination } label: {
+                    Button { page = destination } label: {
                         HStack(spacing: 13) {
                             SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: workspaceActive && destination == page)
                                 .font(.system(size: 17, weight: .regular)).frame(width: 24, height: 24)
@@ -440,7 +504,7 @@ struct DownloaderView: View {
             }
             Spacer()
             VStack(alignment: .leading, spacing: 6) {
-            Button { model.preferencesPage = nil; logItem = nil; page = .logs } label: {
+            Button { page = .logs } label: {
                 HStack(spacing: WorkspaceMetrics.Space.regular) {
                     Image(systemName: WorkspacePage.logs.icon).font(.system(size: 17)).frame(width: 24)
                     Text(L("日志")).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
@@ -480,12 +544,21 @@ struct DownloaderView: View {
             .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
     }
 
+    private var navigationControls: some View {
+        HStack(spacing: 0) {
+            Button { model.navigation.goBack() } label: { Image(systemName: "chevron.left") }
+                .disabled(model.navigation.back.isEmpty)
+                .help(model.navigation.back.last.map { L("后退") + " · " + L($0.title) + "（⌘[）" } ?? L("后退"))
+                .accessibilityLabel(L("后退")).accessibilityIdentifier("workspace-back")
+            Button { model.navigation.goForward() } label: { Image(systemName: "chevron.right") }
+                .disabled(model.navigation.forward.isEmpty)
+                .help(model.navigation.forward.last.map { L("前进") + " · " + L($0.title) + "（⌘]）" } ?? L("前进"))
+                .accessibilityLabel(L("前进")).accessibilityIdentifier("workspace-forward")
+        }.buttonStyle(RoundButtonStyle(palette: palette))
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
-            if page == .logs {
-                Button { page = .downloads } label: { Image(systemName: "chevron.left") }
-                    .buttonStyle(RoundButtonStyle(palette: palette)).help(L("返回下载")).accessibilityLabel(L("返回下载"))
-            }
             Text(L(page.rawValue)).font(WorkspaceMetrics.TypeScale.page)
             Spacer()
             if page == .library {
@@ -664,7 +737,7 @@ struct DownloaderView: View {
         if searchExpanded || !query.isEmpty {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(secondary)
-            TextField(searchLabel, text: $query).textFieldStyle(.plain).font(.system(size: 13))
+            TextField(searchLabel, text: Binding(get: { query }, set: { query = $0 })).textFieldStyle(.plain).font(.system(size: 13))
                 .accessibilityLabel(searchLabel).focused($searchFocused)
                 .task(id: model.searchRequest) {
                     guard let request = searchFocusRequest else { return }
@@ -752,6 +825,7 @@ struct DownloaderView: View {
                                 LazyVStack(spacing: 0) { libraryRows(rows) }
                             }
                         }.padding(1).padding(.trailing, 16).padding(.horizontal, 24)
+                            .background(WorkspaceScrollObserver(page: page, memory: scrollMemory))
                             // Keep rows inset while the scroll canvas spans the
                             // content column, including its outer margins and gaps.
                             .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .top)
@@ -760,6 +834,7 @@ struct DownloaderView: View {
                                 dismissEditing()
                             })
                     }
+                    .id(page)
                     .padding(.horizontal, -24)
                     .onChange(of: displayMode) { _ in
                         if let id = selectedID { scroll.scrollTo(id, anchor: .center) }
@@ -806,7 +881,7 @@ struct DownloaderView: View {
                 LibraryRow(paper: paper, model: model, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, grid: displayMode == .grid, select: { selectItem(item.id) })
                     .id(item.id).transition(recordTransition)
             } else {
-            DownloadRow(item: item, model: model, inMediaLibrary: page == .media, grid: displayMode == .grid, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; model.preferencesPage = .settings; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectItem(item.id) })
+            DownloadRow(item: item, model: model, inMediaLibrary: page == .media, grid: displayMode == .grid, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; model.preferencesPage = .settings; showSettings() }, showLogs: { page = .logs; logItem = item; logLevel = nil; query = "" }, select: { selectItem(item.id) })
                 .contentShape(Rectangle())
                 .onTapGesture { selectItem(item.id) }
                 .id(item.id).transition(recordTransition)
@@ -855,7 +930,7 @@ struct DownloaderView: View {
                         .accessibilityIdentifier("clear-task-log-filter")
                 }
             }
-            LogContent(entries: visibleLogs, hasLogs: !model.logs.isEmpty, query: query, level: $logLevel, palette: palette, dismissEditing: dismissEditing)
+            LogContent(entries: visibleLogs, hasLogs: !model.logs.isEmpty, query: query, level: $logLevel, palette: palette, dismissEditing: dismissEditing, scrollMemory: scrollMemory)
         }
     }
 
@@ -1195,6 +1270,7 @@ struct LogContent: View {
     @Binding var level: ActivityLevel?
     let palette: ThemePalette
     var dismissEditing: () -> Void = {}
+    var scrollMemory: WorkspaceScrollMemory?
     @WorkspaceViewState private var position = LogScrollPosition()
     @WorkspaceViewState private var followingLatest = true
     @WorkspaceViewState private var requestedBottom: Bool?
@@ -1258,10 +1334,14 @@ struct LogContent: View {
                             requestedBottom = nil
                             followingLatest = metrics.atBottom
                         }))
+                            .background {
+                                if let scrollMemory { WorkspaceScrollObserver(page: .logs, memory: scrollMemory) }
+                            }
                     }
                 }
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear { if scrollMemory?.origins[.logs] != nil { followingLatest = false } }
             .onChange(of: query) { _ in reset() }
             .onChange(of: level) { _ in reset() }
     }

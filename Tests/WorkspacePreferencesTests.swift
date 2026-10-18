@@ -105,6 +105,7 @@ private final class PreferencesTestWindow: NSPanel {
 
     static func run(snapshots: Bool) async throws {
         _ = NSApplication.shared
+        try navigationHistory()
         let oldLanguage = AppLocalization.shared.language, oldAppearance = NSApp.appearance
         defer { AppLocalization.shared.language = oldLanguage; NSApp.appearance = oldAppearance }
         let suite = "folioak-workspace-preferences-" + UUID().uuidString
@@ -135,6 +136,7 @@ private final class PreferencesTestWindow: NSPanel {
         defer { surface.window.close() }
         await surface.settle()
         try await libraryRoundTrip(model, surface: surface, opened: { opened.count }, snapshots: snapshots)
+        try await navigationRoundTrip(model, surface: surface, opened: { opened.count }, snapshots: snapshots)
         try await mediaGridRoundTrip(preferences: preferences, root: root, snapshots: snapshots)
         try await namingAndSettings(model, preferences: preferences, surface: surface, snapshots: snapshots)
         try await layouts(model, surface: surface, snapshots: snapshots)
@@ -142,6 +144,79 @@ private final class PreferencesTestWindow: NSPanel {
         try expect(model.papers.map(\.id) == originalIDs && model.papers.map(\.file) == originalPaths && model.input == "keep this draft",
             "workspace preferences preserve library IDs, file paths and the working draft")
         print("PASS workspace preferences: one-window routes, preserved library search/filter/selection/scroll, disabled hidden file actions, naming draft persistence, saved preferences and minimum-window layouts")
+    }
+
+    private static func navigationHistory() throws {
+        var history = WorkspaceNavigation()
+        history.goBack(); history.goForward()
+        try expect(history.back.isEmpty && history.forward.isEmpty, "empty navigation is a no-op")
+        let library = WorkspaceRoute(page: .library)
+        history.visit(library); history.visit(library)
+        try expect(history.back.count == 1, "reselecting the current page creates no duplicate entry")
+        history.visit(WorkspaceRoute(page: .library, preferences: .about))
+        history.goBack()
+        try expect(history.current == library && history.forward.count == 1, "About returns to its exact originating workspace")
+        history.visit(library)
+        try expect(history.forward.count == 1, "reselecting the page preserves forward history")
+        history.visit(WorkspaceRoute(page: .media))
+        try expect(history.forward.isEmpty, "a new destination after Back discards the old forward branch")
+        for index in 0..<100 { history.visit(WorkspaceRoute(page: index.isMultiple(of: 2) ? .downloads : .library)) }
+        try expect(history.back.count == 20, "navigation history stays bounded at 20 prior destinations")
+        let current = history.current
+        for _ in 0..<30 { history.goBack() }
+        try expect(history.back.isEmpty && history.forward.count == 20, "Back stops at the bounded beginning")
+        for _ in 0..<30 { history.goForward() }
+        try expect(history.forward.isEmpty && history.current == current && history.back.count == 20, "Forward stops at the original end")
+        print("PASS navigation history: boundaries, duplicate routes, branching and 20-entry cap")
+    }
+
+    private static func navigationRoundTrip(_ model: DownloadModel, surface: Surface, opened: () -> Int, snapshots: Bool) async throws {
+        func contentScroll() -> NSScrollView? {
+            surface.descendants.compactMap { $0 as? NSScrollView }.first {
+                $0.convert($0.bounds, to: surface.host).minX >= 190 && $0.documentView != nil && $0.bounds.height > 150
+            }
+        }
+        guard let scroll = contentScroll() else { throw TestFailure.failed("navigation source scroll") }
+        let origin = scroll.contentView.bounds.origin
+        try await surface.press("下载", sidebar: true)
+        try expect(model.navigation.current.page == .downloads && model.preferencesPage == nil, "sidebar uses shared navigation")
+        let y: CGFloat = surface.host.isFlipped ? 38 : surface.host.bounds.height - 38
+        await surface.click(NSPoint(x: 230, y: y))
+        try expect(model.navigation.current.page == .library, "native Back button returns to the previous page")
+        try expect(surface.field("搜索文档")?.stringValue == "Keep row", "Back restores per-page search")
+        try expect(abs((contentScroll()?.contentView.bounds.origin.y ?? -1000) - origin.y) < 2, "Back restores the library scroll after its content was unmounted")
+        guard let keyboard = surface.descendants.compactMap({ $0 as? PaperListKeyboard.KeyView }).first else { throw TestFailure.failed("navigation restored keyboard") }
+        let count = opened(); surface.key(keyboard)
+        try expect(opened() == count + 1, "Back restores the selected file")
+        let labels = try surface.labels().map(\.0)
+        let rows = labels.filter { $0.hasPrefix("Keep row ") }.compactMap { Int($0.suffix(2)) }
+        try expect(!rows.isEmpty && rows.allSatisfy { $0.isMultiple(of: 2) }, "Back restores favorites filter")
+        try surface.save("navigation-restored", enabled: snapshots)
+        await surface.click(NSPoint(x: 262, y: y))
+        try expect(model.navigation.current.page == .downloads, "native Forward button restores the next page")
+        await surface.click(NSPoint(x: 230, y: y))
+        model.preferencesPage = .about; await surface.settle()
+        await surface.click(NSPoint(x: 230, y: y))
+        try expect(model.navigation.current.page == .library && model.preferencesPage == nil, "Back from About returns to the originating page")
+        try expect(model.navigation.forward.last?.preferences == .about, "About remains forward-reachable")
+        try await surface.press("媒体库", sidebar: true)
+        try expect(model.navigation.forward.isEmpty, "a sidebar jump after Back clears Forward")
+        model.navigation.goBack(); await surface.settle()
+        let originalLogs = model.logs
+        model.logs = (0..<80).map { ActivityEntry(level: .info, message: "Navigation log \($0)", subject: nil, itemID: nil) }
+        model.navigation.visit(WorkspaceRoute(page: .logs)); await surface.settle()
+        guard let logs = contentScroll() else { throw TestFailure.failed("navigation logs scroll") }
+        NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: logs)
+        logs.contentView.scroll(to: NSPoint(x: 0, y: 350)); logs.reflectScrolledClipView(logs.contentView)
+        NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: logs)
+        await surface.settle()
+        let logsOrigin = logs.contentView.bounds.origin.y
+        model.navigation.visit(WorkspaceRoute(page: .downloads)); await surface.settle()
+        model.navigation.goBack(); await surface.settle()
+        try expect(abs((contentScroll()?.contentView.bounds.origin.y ?? -1000) - logsOrigin) < 2, "Back restores log reading position")
+        model.logs = originalLogs
+        model.navigation.visit(WorkspaceRoute(page: .library)); await surface.settle()
+        print("PASS navigation UI: native Back/Forward, About return, sidebar branching, search/filter/selection/scroll restoration")
     }
 
     private static func libraryRoundTrip(_ model: DownloadModel, surface: Surface, opened: () -> Int, snapshots: Bool) async throws {
@@ -235,6 +310,15 @@ private final class PreferencesTestWindow: NSPanel {
             "media grid preserves the same scroll view and position")
         surface.key(keyboard)
         try expect(opened.count == count + 1 && opened.last == selectedFile, "media grid preserves the exact selected file")
+        model.navigation.visit(WorkspaceRoute(page: .downloads)); await surface.settle()
+        model.navigation.goBack(); await surface.settle()
+        let restoredScroll = surface.descendants.compactMap { $0 as? NSScrollView }.first {
+            $0.convert($0.bounds, to: surface.host).minX >= 190 && $0.documentView != nil && $0.bounds.height > 150
+        }
+        try expect(surface.field("搜索媒体")?.stringValue == "Keep media" && abs((restoredScroll?.contentView.bounds.origin.y ?? -1000) - origin.y) < 2,
+            "Back restores media grid query and scroll after another workspace page")
+        if let restoredKeyboard = surface.descendants.compactMap({ $0 as? PaperListKeyboard.KeyView }).first { surface.key(restoredKeyboard) }
+        try expect(opened.count == count + 2 && opened.last == selectedFile, "Back restores exact media selection")
         try surface.save("media-grid-after", enabled: snapshots)
         print("PASS media grid preferences: search, exact selection, scroll and disabled hidden native actions survive Settings/About")
     }
@@ -263,12 +347,20 @@ private final class PreferencesTestWindow: NSPanel {
 
     private static func delegateRoutes(_ model: DownloadModel) async throws {
         let originalMenu = NSApp.mainMenu
-        defer { NSApp.mainMenu = originalMenu }
+        let originalPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.regular)
+        defer { NSApp.mainMenu = originalMenu; NSApp.setActivationPolicy(originalPolicy) }
         model.language = .chinese; model.showsMenuBarIcon = true
         let delegate = AppDelegate(model: model)
         let window = delegate.prepareWorkspaceForTesting()
         defer { window.delegate = nil; window.close() }
+        NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        for _ in 0..<30 {
+            if NSApp.keyWindow === window { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try expect(NSApp.keyWindow === window, "native menu fixture owns keyboard focus")
         let originalContent = window.contentView
         try expect(window.frameAutosaveName.isEmpty, "test window does not touch personal saved window frames")
         delegate.makeMenu()
@@ -277,6 +369,8 @@ private final class PreferencesTestWindow: NSPanel {
               let settingsAction = settings.action, let aboutAction = about.action else {
             throw TestFailure.failed("workspace preferences application menu")
         }
+        try expect(settings.image?.isTemplate == true && settings.image?.size == NSSize(width: 16, height: 16),
+            "Settings has a matching template gear icon")
         try expect(settings.keyEquivalent == "," && settings.keyEquivalentModifierMask == .command,
             "the native Settings menu retains Command-comma")
         try expect(NSApp.sendAction(aboutAction, to: about.target, from: about) && model.preferencesPage == .about,
@@ -286,6 +380,23 @@ private final class PreferencesTestWindow: NSPanel {
             context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43)!
         try expect(menu.performKeyEquivalent(with: comma) && model.preferencesPage == .settings,
             "Command-comma invokes the native Settings route")
+        guard let go = menu.item(withTitle: "前往")?.submenu,
+              let back = go.item(withTitle: "后退"), let forward = go.item(withTitle: "前进") else {
+            throw TestFailure.failed("native navigation menu")
+        }
+        func navigationKey(_ text: String, code: UInt16) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!
+        }
+        let keyWindowMatches = NSApp.keyWindow === window
+        let backEnabled = delegate.validateMenuItem(back)
+        let backPerformed = menu.performKeyEquivalent(with: navigationKey("[", code: 33))
+        try expect(backPerformed && model.preferencesPage == .about,
+            "Command-left-bracket invokes Back through the native menu: key=\(keyWindowMatches), enabled=\(backEnabled), performed=\(backPerformed), route=\(model.navigation.current)")
+        try expect(menu.performKeyEquivalent(with: navigationKey("]", code: 30)) && model.preferencesPage == .settings,
+            "Command-right-bracket invokes Forward through the native menu")
+        try expect(!delegate.validateMenuItem(forward), "Forward is disabled at the end of history")
         try expect(window.contentView === originalContent && window.attachedSheet == nil,
             "menu routes reuse the main workspace host without a settings sheet")
         let sheet = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 240, height: 100),
@@ -294,6 +405,10 @@ private final class PreferencesTestWindow: NSPanel {
         model.preferencesPage = .about
         var sheetEnded = false
         window.beginSheet(sheet, completionHandler: { _ in sheetEnded = true })
+        let modalRoute = model.navigation.current
+        try expect(!delegate.validateMenuItem(back) && !delegate.validateMenuItem(forward), "navigation is disabled during a modal operation")
+        if let action = back.action { _ = NSApp.sendAction(action, to: back.target, from: back) }
+        try expect(model.navigation.current == modalRoute, "navigation actions cannot bypass modal protection")
         delegate.showPreferences(.settings)
         try expect(window.attachedSheet === sheet && model.preferencesPage == .about,
             "preferences commands preserve an existing modal operation instead of switching the page behind it")

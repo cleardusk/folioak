@@ -246,7 +246,11 @@ final class DownloadModel: ObservableObject {
     let traceSettings: InteractionTraceSettings
     private var traceAttempts: [UUID: (id: UUID, start: UInt64)] = [:]
     @Published var settingsTab = "通用"
-    @Published var preferencesPage: WorkspacePreferencesPage?
+    @Published var navigation = WorkspaceNavigation()
+    var preferencesPage: WorkspacePreferencesPage? {
+        get { navigation.current.preferences }
+        set { navigation.visit(WorkspaceRoute(page: navigation.current.page, preferences: newValue)) }
+    }
     private(set) var editTarget = ""
     let engine: DownloadEngine
     private let preferences: UserDefaults
@@ -2081,7 +2085,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        menuItem.action != #selector(checkForUpdates) || (!model.updates.isChecking && !presentingUpdate)
+        if menuItem.action == #selector(navigateBack) || menuItem.action == #selector(navigateForward) {
+            guard let window, NSApp.keyWindow === window, window.attachedSheet == nil, NSApp.modalWindow == nil else { return false }
+            return menuItem.action == #selector(navigateBack) ? !model.navigation.back.isEmpty : !model.navigation.forward.isEmpty
+        }
+        return menuItem.action != #selector(checkForUpdates) || (!model.updates.isChecking && !presentingUpdate)
     }
 
     private func presentUpdateIfPossible() {
@@ -2176,6 +2184,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func showAbout() { showPreferences(.about) }
     @objc private func showSettings() { showPreferences(.settings) }
 
+    @objc private func navigateBack() {
+        guard let window, NSApp.keyWindow === window, window.attachedSheet == nil, NSApp.modalWindow == nil else { return }
+        model.navigation.goBack()
+    }
+    @objc private func navigateForward() {
+        guard let window, NSApp.keyWindow === window, window.attachedSheet == nil, NSApp.modalWindow == nil else { return }
+        model.navigation.goForward()
+    }
+
     func makeMenu() {
         let menu = NSMenu()
         func add(_ title: String, _ items: [(String, Selector?, String)]) -> NSMenu {
@@ -2197,7 +2214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         app.item(withTitle: L("关于 Folioak"))?.target = self
         app.item(withTitle: L("检查更新…"))?.target = self
         app.item(withTitle: L("设置…"))?.target = self
-        for (title, symbol) in [(L("关于 Folioak"), "info.circle"), (L("检查更新…"), "arrow.triangle.2.circlepath")] {
+        for (title, symbol) in [(L("关于 Folioak"), "info.circle"), (L("检查更新…"), "arrow.triangle.2.circlepath"), (L("设置…"), "gearshape")] {
             let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
                 .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 14, weight: .regular))
             image?.size = NSSize(width: 16, height: 16)
@@ -2217,6 +2234,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let start = NSMenuItem(title: L("开始下载"), action: #selector(startDownload), keyEquivalent: "\r"); start.target = self; navigation.addItem(start)
         for (action, item) in [(ShortcutAction.input, navigation.items[0]), (.list, navigation.items[1]), (.download, start)] {
             item.keyEquivalent = model.shortcuts[action].key; item.keyEquivalentModifierMask = model.shortcuts[action].flags
+        }
+        navigation.addItem(.separator())
+        for (title, action, key) in [(L("后退"), #selector(navigateBack), "["), (L("前进"), #selector(navigateForward), "]")] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = self; navigation.addItem(item)
         }
         NSApp.windowsMenu = add(L("窗口"), [(L("关闭窗口"), #selector(NSWindow.performClose(_:)), "w"), (L("最小化"), #selector(NSWindow.performMiniaturize(_:)), "m")])
         NSApp.mainMenu = menu

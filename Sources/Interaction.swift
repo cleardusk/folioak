@@ -851,3 +851,56 @@ struct LogScrollObserver: NSViewRepresentable {
         deinit { transition?.stop(); observing.forEach(NotificationCenter.default.removeObserver) }
     }
 }
+
+// At most four offsets. Scroll notifications do not publish model or SwiftUI state.
+final class WorkspaceScrollMemory {
+    var origins: [WorkspacePage: NSPoint] = [:]
+}
+
+struct WorkspaceScrollObserver: NSViewRepresentable {
+    let page: WorkspacePage
+    let memory: WorkspaceScrollMemory
+    func makeNSView(context: Context) -> Observer { Observer(page: page, memory: memory) }
+    func updateNSView(_ view: Observer, context: Context) { view.connect() }
+    static func dismantleNSView(_ view: Observer, coordinator: ()) { view.disconnect() }
+    final class Observer: NSView {
+        let page: WorkspacePage
+        let memory: WorkspaceScrollMemory
+        weak var scroll: NSScrollView?
+        private var observer: NSObjectProtocol?
+        private var generation = 0
+        init(page: WorkspacePage, memory: WorkspaceScrollMemory) {
+            self.page = page; self.memory = memory; super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); connect() }
+        override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); connect() }
+        func connect() {
+            guard let enclosingScrollView, scroll !== enclosingScrollView else { return }
+            disconnect(); scroll = enclosingScrollView
+            let token = generation
+            let saved = memory.origins[page]
+            DispatchQueue.main.async { [weak self, weak enclosingScrollView] in
+                guard let self, let scroll = enclosingScrollView, self.generation == token else { return }
+                scroll.layoutSubtreeIfNeeded()
+                if let saved, let document = scroll.documentView {
+                    let y = min(max(document.bounds.minY, saved.y), max(document.bounds.minY, document.bounds.maxY - scroll.contentView.bounds.height))
+                    scroll.contentView.scroll(to: NSPoint(x: saved.x, y: y))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                scroll.contentView.postsBoundsChangedNotifications = true
+                self.observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+                    object: scroll.contentView, queue: .main) { [weak self, weak scroll] _ in
+                    guard let self, let scroll else { return }
+                    self.memory.origins[self.page] = scroll.contentView.bounds.origin
+                }
+            }
+        }
+        func disconnect() {
+            generation += 1
+            if let observer { NotificationCenter.default.removeObserver(observer); self.observer = nil }
+            scroll = nil
+        }
+        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+    }
+}
