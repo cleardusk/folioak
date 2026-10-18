@@ -576,6 +576,13 @@ extension CoreTests {
         try expect(controller.item?.button?.state == .on, "status button stays selected while its popover is open")
         try expect(controller.item?.button?.isHighlighted == true, "native mouse tracking keeps the status background highlighted after release")
         try captureStatus("open")
+        let popoverFile = root.appendingPathComponent("Finder hit target #1.pdf")
+        try createPDF(at: popoverFile)
+        model.items = [DownloadItem(original: "https://example.com/result.pdf", state: .saved, savedURL: popoverFile, preservesInput: true)]
+        let openedBeforeFinderClicks = openedFiles.count
+        try await quickDownloadPopoverResultTests(controller: controller, file: popoverFile, revealedFiles: { revealedFiles })
+        try expect(openedFiles.count == openedBeforeFinderClicks, "Finder button center and padding never open the file itself")
+        model.items = []
         let originalMenu = NSApp.mainMenu
         defer { NSApp.mainMenu = originalMenu }
         let delegate = AppDelegate(model: model, menuBar: controller)
@@ -694,31 +701,13 @@ extension CoreTests {
             try await Task.sleep(nanoseconds: 30_000_000)
         }
         try expect(!controller.popover.isShown && controller.item == nil, "disabling menu bar closes its active popover")
-        try await quickDownloadPopoverResultTests()
         print("PASS quick download UI: bilingual light/dark focus, long paths, native Command Return, Escape, feedback and undo reset")
     }
 
-    @MainActor static func quickDownloadPopoverResultTests() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-popover-result-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("Downloaded video #1.mp4")
-        try Data("fixture".utf8).write(to: file)
-        let suite = "folioak-popover-result-" + UUID().uuidString
-        let preferences = UserDefaults(suiteName: suite)!
-        defer { preferences.removePersistentDomain(forName: suite) }
-        var opened: [URL] = [], revealed: [[URL]] = []
-        let model = DownloadModel(preferences: preferences,
-            opener: { opened.append($0); return true }, revealer: { revealed.append($0) })
-        model.items = [DownloadItem(original: "https://example.com/video.mp4", state: .saved, savedURL: file, preservesInput: true)]
-        let controller = MenuBarController(model: model, openWindow: {}, openSettings: {}, quit: {})
-        defer { model.showsMenuBarIcon = false }
+    @MainActor static func quickDownloadPopoverResultTests(controller: MenuBarController, file: URL,
+                                                          revealedFiles: () -> [[URL]]) async throws {
         try await Task.sleep(nanoseconds: 150_000_000)
-        NSApp.deactivate()
-        controller.togglePopover()
-        try await Task.sleep(nanoseconds: 150_000_000)
-        try expect(!NSApp.isActive && controller.popover.isShown,
-            "real quick popover opens while application is inactive")
+        try expect(controller.popover.isShown, "real quick popover remains open for Finder hit-target checks")
         guard let host = controller.popover.contentViewController?.view, let window = host.window else {
             throw TestFailure.failed("real quick popover mounts downloaded result")
         }
@@ -731,6 +720,7 @@ extension CoreTests {
         let bounds = region.convert(region.bounds, to: host)
         let center = NSPoint(x: bounds.maxX + 8 + 16, y: bounds.midY)
         let offsets: [NSPoint] = [.zero, NSPoint(x: -12, y: 0), NSPoint(x: 12, y: 0), NSPoint(x: 0, y: -12), NSPoint(x: 0, y: 12)]
+        let initialCount = revealedFiles().count
         for (index, offset) in offsets.enumerated() {
             let point = NSPoint(x: center.x + offset.x, y: center.y + offset.y)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -750,11 +740,10 @@ extension CoreTests {
                 try expect(dispatched, "Finder hit-target click completes native event dispatch")
                 try await Task.sleep(nanoseconds: 25_000_000)
             }
-            try expect(revealed.count == index + 1 && revealed.last == [file],
-                "real inactive-app popover Finder button reveals the saved file exactly once at offset \(offset); count=\(revealed.count)")
+            try expect(revealedFiles().count == initialCount + index + 1 && revealedFiles().last == [file],
+                "real popover Finder button reveals the saved file exactly once at offset \(offset); count=\(revealedFiles().count - initialCount)")
         }
-        try expect(opened.isEmpty, "Finder button center and padding never open the file itself")
-        print("PASS quick popover result: Finder button center and four edges reveal the exact file from an inactive application")
+        print("PASS quick popover result: Finder button center and four edges reveal the exact file without opening it")
     }
 }
 

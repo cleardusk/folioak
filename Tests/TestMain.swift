@@ -187,10 +187,6 @@ struct CoreTests {
                 try await fileRowDoubleClickTests()
                 return
             }
-            if CommandLine.arguments.contains("--quick-popover-only") {
-                try await quickDownloadPopoverResultTests()
-                return
-            }
             if CommandLine.arguments.contains("--quick-only") {
                 try await quickDownloadTests()
                 try await quickDownloadUITests()
