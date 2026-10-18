@@ -1,22 +1,20 @@
 # folioak CLI
 
-随 [Folioak](README.zh-CN.md) 内置，无需启动界面或单独安装。
+随 [Folioak](README.zh-CN.md) 内置，无需启动界面或单独安装。支持范围与站点限制同应用，但 CLI 始终匿名下载，不读取浏览器认证设置。
 
 ```sh
 alias folioak='"/Applications/Folioak.app/Contents/MacOS/folioak"'
 
-folioak 1706.03762                   # 下载论文
+folioak 1706.03762                    # 下载论文
 folioak 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
-folioak --audio 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
-folioak -i links.txt                 # 批量下载
+folioak --audio 'https://www.youtube.com/watch?v=jNQXAC9IVRw' # 仅音频（M4A）
+folioak -i links.txt                  # 批量下载
 folioak 1706.03762 -o ~/Downloads/Papers
+cat links.txt | folioak --json        # 脚本使用
 folioak --help                       # 全部选项
 ```
 
-默认沿用应用的保存位置与各类型命名规则，按类型归档。`--naming` 仅在本次运行覆盖 arXiv 论文规则，不修改应用设置；其他类型仍使用各自规则。CLI 保持匿名下载，不隐式读取应用的浏览器认证设置。`-o` 直接保存到指定目录，不添加子文件夹；同名文件不会被覆盖。
-
-支持公开论文、PPT/Office/EPUB/文本/压缩包文件直链和媒体链接；站点范围与限制见 [README](README.zh-CN.md)。按 `Ctrl+C` 停止下载，已完成的文件保留。包内保留 `leafpick` 和 `arxiv-download` 兼容入口；若曾设置指向旧应用路径的 shell alias，请按上面的示例更新。
-
-用于脚本：`cat links.txt | folioak --json`。进度写入 stderr；退出码 `0` 成功，`1` 有失败或待重试，`2` 参数错误，`130` 用户取消，`143` 终止。
-
-应用启用独立 PDF 保存目录后，CLI 默认将论文和 PDF 保存到该目录；显式 `-o` / `--output` 会覆盖本次所有文件的输出位置，不修改应用偏好。
+- **保存位置**：默认沿用应用目录、按类型归档，也遵守独立 PDF 目录设置。`-o` / `--output` 优先指定本次所有文件的目录，不追加子文件夹、不修改应用设置，也不覆盖已有文件。
+- **命名**：沿用应用各类型规则；`--naming date-title|id-title|title` 仅在本次运行覆盖 arXiv 规则。
+- **停止与输出**：`Ctrl+C` 停止，已完成文件保留。进度写入 stderr；退出码为 `0` 成功、`1` 有失败或待重试、`2` 参数错误、`130` 用户取消、`143` 终止。
+- **旧版兼容**：包内保留 `leafpick` 和 `arxiv-download` 入口；指向旧应用路径的 shell alias 需按上例更新。

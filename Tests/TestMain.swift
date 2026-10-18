@@ -134,6 +134,8 @@ struct CoreTests {
                 return
             }
             if CommandLine.arguments.contains("--preferences-only") {
+                try themeTests()
+                try filterRenderingTests()
                 try await WorkspacePreferencesTests.run(snapshots: CommandLine.arguments.contains("--snapshots"))
                 try await settingsLayoutTests()
                 try await sidebarIndicatorUITests()
@@ -1275,9 +1277,17 @@ struct CoreTests {
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         try expect(DownloadModel(preferences: preferences).theme == .graphite, "new installs use neutral graphite")
+        try expect(AppTheme.standardThemes.map(\.rawValue) == ["native", "graphite", "iris", "lagoon", "amber", "midnight"], "existing theme identifiers remain stable")
+        try expect(AppTheme.standardThemes + AppTheme.codingThemes == AppTheme.allCases, "theme groups include every theme exactly once")
+        for theme in AppTheme.allCases {
+            let model = DownloadModel(preferences: preferences)
+            model.theme = theme
+            try expect(preferences.string(forKey: "theme") == theme.rawValue, "\(theme.rawValue) selection persists")
+            try expect(DownloadModel(preferences: preferences).theme == theme, "\(theme.rawValue) selection restores")
+        }
         preferences.set("unknown-future-theme", forKey: "theme")
         try expect(DownloadModel(preferences: preferences).theme == .native, "invalid theme fallback")
-        print("PASS themes: 12 palettes contrast, migration and persistent selection")
+        print("PASS themes: \(AppTheme.allCases.count * 2) palettes contrast, migration and persistent selection")
     }
 
     static func liveTests() async throws {

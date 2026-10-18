@@ -832,6 +832,7 @@ extension CoreTests {
                 model.upsertPaper(records.last!)
             }
             model.history = records; model.mediaLibrary = records
+            model.navigation = WorkspaceNavigation(page: page)
             let host = QuickTestHost(rootView: DownloaderView(model: model, page: page)
                 .environment(\.colorScheme, .light))
             let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 600), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)

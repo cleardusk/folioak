@@ -251,6 +251,9 @@ final class DownloadModel: ObservableObject {
     @Published var listRequest = UUID()
     @Published var searchRequest = UUID()
     @Published private(set) var fileRefreshRevision = 0
+    #if TESTING
+    private(set) var fileRefreshPathResolutions = 0
+    #endif
     @Published var previewURL: URL?
     @Published var diagnosticItem: DownloadItem?
     let shortcuts: ShortcutSettings
@@ -677,9 +680,29 @@ final class DownloadModel: ObservableObject {
 
     private func refreshMissingFiles(_ files: Set<URL>) {
         fileRefreshRevision += 1
+        #if TESTING
+        fileRefreshPathResolutions = 0
+        #endif
         let missing = files.filter { !FileManager.default.fileExists(atPath: $0.path) }
         guard !missing.isEmpty else { return }
-        func affected(_ item: DownloadItem) -> Bool { item.localURLs.contains { missing.contains(fileLocation($0)) } }
+        let names = Set(missing.map(\.lastPathComponent))
+        var parents: [URL: URL] = [:]
+        func affected(_ url: URL) -> Bool {
+            // Most records cannot share a removed file. Avoid a filesystem walk
+            // for every library row, and resolve each matching parent just once.
+            guard url.isFileURL, names.contains(url.lastPathComponent) else { return false }
+            let parent = url.deletingLastPathComponent()
+            let resolved: URL
+            if let cached = parents[parent] { resolved = cached }
+            else {
+                resolved = parent.resolvingSymlinksInPath(); parents[parent] = resolved
+                #if TESTING
+                fileRefreshPathResolutions += 1
+                #endif
+            }
+            return missing.contains(resolved.appendingPathComponent(url.lastPathComponent))
+        }
+        func affected(_ item: DownloadItem) -> Bool { item.localURLs.contains(where: affected) }
         func mark(_ item: inout DownloadItem) {
             if item.state != .missing && item.incompleteFileList == nil { item.incompleteFileList = false }
             item.state = .missing
@@ -687,11 +710,20 @@ final class DownloadModel: ObservableObject {
             item.error = item.localURLs.contains { FileManager.default.fileExists(atPath: $0.path) }
                 ? "部分文件已不在原位置，仍可打开其余文件，或重新下载。" : "原位置的文件不存在，可重新下载。"
         }
-        for i in items.indices where affected(items[i]) { mark(&items[i]) }
-        for i in history.indices where affected(history[i]) { mark(&history[i]) }
-        for i in mediaLibrary.indices where affected(mediaLibrary[i]) { mark(&mediaLibrary[i]) }
-        for i in papers.indices where papers[i].file.map({ missing.contains(fileLocation($0)) }) == true { papers[i].missing = true }
-        if let previewURL, missing.contains(fileLocation(previewURL)) { self.previewURL = nil }
+        func refreshed(_ records: [DownloadItem]) -> [DownloadItem]? {
+            var result = records, changed = false
+            for i in records.indices where affected(records[i]) { mark(&result[i]); changed = true }
+            return changed ? result : nil
+        }
+        if let updated = refreshed(items) { items = updated }
+        if let updated = refreshed(history) { history = updated }
+        if let updated = refreshed(mediaLibrary) { mediaLibrary = updated }
+        var updatedPapers = papers, papersChanged = false
+        for i in papers.indices where !papers[i].missing && papers[i].file.map(affected) == true {
+            updatedPapers[i].missing = true; papersChanged = true
+        }
+        if papersChanged { papers = updatedPapers }
+        if let previewURL, affected(previewURL) { self.previewURL = nil }
     }
 
     @discardableResult

@@ -167,6 +167,8 @@ struct FilterTabs<Selection: Hashable>: View {
     @Binding var selection: Selection
     let title: (Selection) -> String
     let palette: ThemePalette
+    var accessibilityIdentifier: (Selection) -> String = { _ in "" }
+    @FocusState private var focusedTab: Selection?
 
     var body: some View {
         HStack(spacing: 4) {
@@ -179,7 +181,9 @@ struct FilterTabs<Selection: Hashable>: View {
                         .foregroundStyle(ThemePalette.color(selection == option ? palette.accent : palette.secondary))
                         .padding(.horizontal, 12).frame(height: 36).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).accessibilityAddTraits(selection == option ? .isSelected : [])
+                .buttonStyle(.plain).focused($focusedTab, equals: option)
+                .accessibilityIdentifier(accessibilityIdentifier(option))
+                .accessibilityAddTraits(selection == option ? .isSelected : [])
                 .background(GeometryReader { geometry in
                     Color.clear.preference(key: FilterTabWidths.self, value: [index: geometry.size.width])
                 })
@@ -190,6 +194,16 @@ struct FilterTabs<Selection: Hashable>: View {
             if let index = options.firstIndex(of: selection), let rect = FilterTabLayout.indicator(widths: widths, index: index) {
                 AnimatedSelectionIndicator(target: rect, axis: .horizontal, color: ThemePalette.color(palette.accent))
             }
+        }
+        .onMoveCommand { direction in
+            guard let index = options.firstIndex(of: focusedTab ?? selection) else { return }
+            let next: Int
+            switch direction {
+            case .left: next = max(0, index - 1)
+            case .right: next = min(options.count - 1, index + 1)
+            default: return
+            }
+            selection = options[next]; focusedTab = options[next]
         }
     }
 }

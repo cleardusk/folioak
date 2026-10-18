@@ -67,6 +67,10 @@ struct ThemePalette {
 
 enum AppTheme: String, CaseIterable {
     case native, graphite, iris, lagoon, amber, midnight
+    case vscode, oneDark, dracula, nord, solarized, gruvbox
+
+    static let standardThemes: [AppTheme] = [.native, .graphite, .iris, .lagoon, .amber, .midnight]
+    static let codingThemes: [AppTheme] = [.vscode, .oneDark, .dracula, .nord, .solarized, .gruvbox]
 
     var label: String {
         switch self {
@@ -76,6 +80,12 @@ enum AppTheme: String, CaseIterable {
         case .lagoon: return L("海湾")
         case .amber: return L("琥珀")
         case .midnight: return L("午夜")
+        case .vscode: return "VS Code"
+        case .oneDark: return "One Dark"
+        case .dracula: return "Dracula"
+        case .nord: return "Nord"
+        case .solarized: return "Solarized"
+        case .gruvbox: return "Gruvbox"
         }
     }
 
@@ -105,6 +115,41 @@ enum AppTheme: String, CaseIterable {
             return ThemePalette(canvas: 0xFAFBFF, surface: 0xEDF0F7, text: 0x242C3C, secondary: 0x646C7F, border: 0xD7DDE9, accent: 0x576C91, action: 0x576C91, onAction: 0xFFFFFF)
         case (.midnight, true):
             return ThemePalette(canvas: 0x0E1016, surface: 0x191D27, text: 0xE2E6F1, secondary: 0xADB5C7, border: 0x333B50, accent: 0xB7C7E9, action: 0x3E4B69, onAction: 0xE2EAFF)
+        // Editor palettes adapted for small UI text: supporting text and accents
+        // retain at least 4.5:1 contrast on both canvas and surface.
+        // https://github.com/microsoft/vscode/tree/main/extensions/theme-defaults/themes
+        case (.vscode, false):
+            return ThemePalette(canvas: 0xFFFFFF, surface: 0xF8F8F8, text: 0x3B3B3B, secondary: 0x616161, border: 0xCECECE, accent: 0x005FB8, action: 0x005FB8, onAction: 0xFFFFFF)
+        case (.vscode, true):
+            return ThemePalette(canvas: 0x1F1F1F, surface: 0x181818, text: 0xCCCCCC, secondary: 0x9D9D9D, border: 0x3C3C3C, accent: 0x4DAAFC, action: 0x0078D4, onAction: 0xFFFFFF)
+        // Light appearance uses the companion One Light palette.
+        // https://github.com/atom/one-dark-syntax/blob/master/styles/colors.less
+        // https://github.com/atom/one-light-syntax/blob/master/styles/colors.less
+        case (.oneDark, false):
+            return ThemePalette(canvas: 0xFAFAFA, surface: 0xF0F0F1, text: 0x383A42, secondary: 0x696C77, border: 0xD7D7DA, accent: 0x305FC7, action: 0x305FC7, onAction: 0xFFFFFF)
+        case (.oneDark, true):
+            return ThemePalette(canvas: 0x282C34, surface: 0x21252B, text: 0xABB2BF, secondary: 0x9DA5B4, border: 0x3E4451, accent: 0x61AFEF, action: 0x61AFEF, onAction: 0x21252B)
+        // Light appearance follows Dracula's Alucard Classic companion.
+        // https://draculatheme.com/spec
+        case (.dracula, false):
+            return ThemePalette(canvas: 0xFFFBEB, surface: 0xEFEDDC, text: 0x1F1F1F, secondary: 0x6C664B, border: 0xCFCFDE, accent: 0x644AC9, action: 0x644AC9, onAction: 0xFFFFFF)
+        case (.dracula, true):
+            return ThemePalette(canvas: 0x282A36, surface: 0x21222C, text: 0xF8F8F2, secondary: 0xABB2CE, border: 0x44475A, accent: 0xBD93F9, action: 0xBD93F9, onAction: 0x282A36)
+        // https://www.nordtheme.com/docs/colors-and-palettes/
+        case (.nord, false):
+            return ThemePalette(canvas: 0xECEFF4, surface: 0xE5E9F0, text: 0x2E3440, secondary: 0x4C566A, border: 0xD8DEE9, accent: 0x446789, action: 0x446789, onAction: 0xECEFF4)
+        case (.nord, true):
+            return ThemePalette(canvas: 0x2E3440, surface: 0x252B35, text: 0xECEFF4, secondary: 0xB8C2D3, border: 0x4C566A, accent: 0x88C0D0, action: 0x88C0D0, onAction: 0x2E3440)
+        // https://ethanschoonover.com/solarized/
+        case (.solarized, false):
+            return ThemePalette(canvas: 0xFDF6E3, surface: 0xEEE8D5, text: 0x073642, secondary: 0x52686F, border: 0x93A1A1, accent: 0x216B8C, action: 0x216B8C, onAction: 0xFDF6E3)
+        case (.solarized, true):
+            return ThemePalette(canvas: 0x002B36, surface: 0x073642, text: 0xEEE8D5, secondary: 0x93A1A1, border: 0x586E75, accent: 0x35ACA3, action: 0x35ACA3, onAction: 0x002B36)
+        // https://github.com/morhetz/gruvbox/blob/master/colors/gruvbox.vim
+        case (.gruvbox, false):
+            return ThemePalette(canvas: 0xFBF1C7, surface: 0xEBDBB2, text: 0x3C3836, secondary: 0x665C54, border: 0xBDAE93, accent: 0xA63803, action: 0xA63803, onAction: 0xFBF1C7)
+        case (.gruvbox, true):
+            return ThemePalette(canvas: 0x282828, surface: 0x32302F, text: 0xEBDBB2, secondary: 0xBDAE93, border: 0x504945, accent: 0xFE8019, action: 0xFE8019, onAction: 0x282828)
         }
     }
 }
@@ -127,7 +172,6 @@ struct PrimaryActionStyle: ButtonStyle {
 
 struct ThemeChoice: View {
     @ObservedObject private var localization = AppLocalization.shared
-    static let previewHeight: CGFloat = 41
     let theme: AppTheme
     let selected: Bool
     let action: () -> Void

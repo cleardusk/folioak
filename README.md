@@ -6,64 +6,42 @@
 
 **A native macOS downloader for papers, files, and media.**
 
-- **Documents** — arXiv, Hugging Face papers, OpenReview, ACL, CVF, GitHub PDFs, and public PDF links.
-- **Files** — public HTTPS links for PPT/PPTX, DOC/DOCX, XLS/XLSX, EPUB, OpenDocument, text/data files, and ZIP/7Z/RAR/TAR/GZ/BZ2/XZ archives. Direct endpoints can identify files through response headers or supported container signatures.
+- **Papers** — arXiv, Hugging Face papers, OpenReview, ACL, CVF, GitHub PDFs, and public PDF links.
+- **Files** — public HTTPS links to Office documents, EPUB, OpenDocument, text/data files, and archives. Archives are saved without extraction.
 - **Media** — individual videos from YouTube, Bilibili, X, Toutiao, Xiaohongshu, Douyin, TikTok, Instagram, and Vimeo, plus direct image, audio, and video links.
-- **Organization** — a default download folder, an optional separate folder for papers and PDFs, and `Papers`, `Documents`, `Archives`, `Videos`, `Audio`, and `Images` subfolders and built-in document and media libraries.
 
-Common files remain in the document library after download history is cleared. Open them with the default application or macOS Quick Look; preview availability depends on the system and installed apps. Archives are saved without extraction. Validation checks file signatures and container directories, not every embedded document object or archive checksum.
-
-All download components are bundled. No Python or Homebrew required. Site downloads depend on public access from your network; some sites require login or verification even for public videos. Media downloads are anonymous by default. You can opt in to browser authentication in Settings to reuse an existing browser session. Playlists, profiles and image-only posts are not supported. For Xiaohongshu, paste the full video share link, keeping its access parameters; `xhslink.com` short links are also recognized. For Toutiao, use the full `/video/ID/` page URL.
+Includes document and media libraries, batch downloads, retries, and previews. All download components are bundled; no Python or Homebrew required.
 
 ## Install
 
-[Download the latest release](https://github.com/cleardusk/folioak/releases/latest) · Apple Silicon · macOS 13+
+[Download the latest release](https://github.com/cleardusk/folioak/releases/latest) · **Apple Silicon · macOS 13+**
 
-Open the DMG and drag Folioak into Applications. The app is not yet notarized by Apple; you may need to allow it in System Settings → Privacy & Security on first launch.
+Open the DMG and drag Folioak into Applications. The app is not yet notarized by Apple; first launch may require approval in System Settings → Privacy & Security.
 
-Folioak checks for stable updates once a day while running. Use **Folioak → Check for Updates…** to check manually, or turn automatic checks off in Settings → General. Update reminders open the release page for manual installation; you can postpone or skip a version.
+Folioak checks for stable updates daily while running. Automatic checks can be disabled in Settings; **Folioak → Check for Updates…** checks manually. Updates open the release page for manual installation. Upgrades preserve your settings, files, and libraries.
 
 ## Use
 
-Paste or drop links, then click the download button or press `⌘ Return`. Click again to stop. Batch downloads, retries, and Quick Look previews are supported; double-click an item to open its file. You can also paste links in the menu bar panel and add more while downloading.
+1. Paste or drop links, then click Download or press `⌘ Return`. Click again to stop. The menu bar panel also accepts links, including during a download.
+2. Find saved files in the document or media library. Switch between list and grid, double-click to open, or press Space to preview. Clearing download history keeps library entries and files.
+3. Set your save location, language, and appearance in Settings. Naming Rules supports `{title}`, `{date}`, `{source}`, and `{id}` with a live preview; existing files are never overwritten.
 
-Choose System, 简体中文, or English in Settings → General → Language. Changes take effect immediately.
+New installations save to `~/Downloads/Folioak`, organized by file type. Settings → General → PDF folder can send new papers and PDFs directly to a separate folder (off by default); existing files stay in place. The [CLI](CLI-README.md) shares these settings, with explicit `-o` / `--output` taking priority for all files in that run.
 
-For videos that need sign-in, open Settings → Browser Authentication, choose the browser where you are already signed in, and enable authentication. Profile selection is optional. Settings and task logs report cookie-read results; a successful read does not confirm site sign-in. macOS may request Keychain or file access. Authentication is read when a supported site download starts. If cookie access fails or a site rejects the session, Folioak retries anonymously once; rate limits, cancellation and storage failures do not trigger fallback. This keeps your authentication settings and does not guarantee access to content requiring verification. A task’s menu can open its original link in the selected authentication browser or show task logs, with filtered export of the initial cause, fallback and final result. Turn authentication off to return to anonymous downloads, or clear the selection. Available quality still depends on the video, site and account; signing in does not guarantee 4K. Folioak does not export a cookies file or keep Cookie contents in its preferences, history or logs. yt-dlp may copy browser databases into a private temporary directory, cleaned after success, failure or cancellation once the process group exits. A crash or unconfirmed process exit can leave temporary data behind.
+Themes include the original six palettes plus **VS Code, One Dark, Dracula, Nord, Solarized, and Gruvbox**, each with light and dark appearances. Settings categories use the library's sliding underline, with horizontal scrolling, arrow-key navigation, and Reduce Motion support.
 
-New installations use `~/Downloads/Folioak`; type subfolders are created as needed. Enable a separate PDF folder in Settings → General → PDF folder (off by default) to save new papers and PDFs directly there, with one copy. Existing files stay where they are. Click the folder to change the save location. Upgrades preserve your settings, files, and libraries. When upgrading from an earlier product name, quit and move the old app out of Applications after installing Folioak.
+**Site limits:** media downloads are anonymous by default. For supported sites that need sign-in, enable Settings → Browser Authentication and choose an already signed-in browser. Access and quality still depend on the site, network, and account. Playlists, profiles, and image-only posts are unsupported. Keep access parameters in Xiaohongshu video share links (`xhslink.com` short links also work); use full `/video/ID/` URLs for Toutiao.
 
-[CLI guide (中文)](CLI-README.md)
-
-File naming rules in Settings → General cover arXiv papers, documents/PDFs, videos, audio, images and archives. Templates support `{title}`, `{date}`, `{source}` and `{id}` with a live preview. Defaults preserve existing behavior. Each task keeps its submission date and rules; retries prefer previously allocated names, and existing files are never overwritten. Extracted audio uses audio rules, and multi-file results receive attachment numbers. Both libraries can search actual filenames.
-
-Document and media libraries each remember their list/grid view. Grid view supports arrow navigation, Shift ranges, Command selection, Space previews, double-click opening and the existing management actions. Thumbnails load near the visible viewport and fall back to file icons when unavailable.
-
-
-### Local interaction history
-
-Settings → General offers opt-in interaction recording, off by default. Events stay on this Mac and are never uploaded. Fixed fields describe actions and outcomes without input text, file names, tag text, full URLs or cookies. Recording uses a bounded background buffer, up to 20 MB / 64 segments; writing and export remove segments older than seven days. Disabling preserves existing records for export or clearing.
-
-Export the current run, today or the last seven days as a folder containing events.jsonl, timeline.txt and metadata.json. Exports are retained independently of the local cap. Forced termination can lose buffered events; exports disclose dropped or unreadable records and incomplete session boundaries.
-
+**Privacy:** preferences, history, and logs stay on this Mac; there is no uploaded telemetry, cloud sync, or background folder scanning. Optional interaction recording is off by default and excludes input text, filenames, full URLs, and cookies. Browser authentication may request macOS permissions and create temporary browser database copies; Cookie contents are not stored in preferences, history, or logs. See [security and privacy details (中文)](SECURITY-AUDIT.md).
 
 ## Develop
 
-Build with `./build.command`; test with `./test.command`. Requires Xcode or Command Line Tools and Python 3.9+.
+Run `./build.command` to build and `./test.command` to test. Requires Xcode or Command Line Tools and Python 3.9+; the first run downloads and builds pinned media dependencies.
 
-[Development guide](CONTRIBUTING.md) · [Build & release (中文)](RELEASING.md) · [Design (中文)](DESIGN.md) · [Security notes (中文)](SECURITY-AUDIT.md) · [Media components (中文)](Resources/MediaComponents.md)
+[Development guide](CONTRIBUTING.md) · [Build & release (中文)](RELEASING.md) · [Design (中文)](DESIGN.md) · [CLI guide (中文)](CLI-README.md)
 
-## Acknowledgments
+## License & acknowledgments
 
-Folioak builds on the work of these open-source projects and their contributors:
+Project source: [MIT](LICENSE). Thanks to [yt-dlp](https://github.com/yt-dlp/yt-dlp), [FFmpeg](https://ffmpeg.org/), [QuickJS-NG](https://github.com/quickjs-ng/quickjs), and [CPython](https://github.com/python/cpython).
 
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — video site extraction and downloads.
-- [FFmpeg](https://ffmpeg.org/) and ffprobe — media inspection, merging, remuxing, and audio extraction.
-- [QuickJS-NG](https://github.com/quickjs-ng/quickjs) — the JavaScript engine used by yt-dlp's EJS solver.
-- [CPython](https://github.com/python/cpython) — the Python runtime bundled with yt-dlp.
-
-See [Media components](Resources/MediaComponents.md) for pinned versions, build details, and licensing notes. Third-party license texts and notices, including those for bundled dependencies, are included in `Folioak.app/Contents/Resources/media-tools/licenses/`.
-
-## License
-
-Project source: [MIT](LICENSE). Bundled third-party components retain their own licenses.
+Bundled components retain their own licenses. Versions and build details are in [Media components](Resources/MediaComponents.md); license texts ship in `Folioak.app/Contents/Resources/media-tools/licenses/`.

@@ -13,20 +13,13 @@ struct WorkspaceSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(Array(categories.enumerated()), id: \.offset) { index, category in
-                        Button { model.settingsTab = category; model.trace.user(.pageChanged, context: .settings, detail: index == 0 ? .general : index == 1 ? .naming : index == 2 ? .shortcuts : .authentication) } label: {
-                            Text(L(category)).font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(ThemePalette.color(model.settingsTab == category ? palette.text : palette.secondary))
-                                .padding(.horizontal, 14).frame(height: 34)
-                                .background(ThemePalette.color(palette.text).opacity(model.settingsTab == category ? 0.075 : 0),
-                                    in: RoundedRectangle(cornerRadius: 8))
-                                .contentShape(Rectangle())
-                        }.buttonStyle(.plain).accessibilityLabel(L(category))
-                            .accessibilityIdentifier("preferences-category-" + identifiers[index])
-                            .accessibilityAddTraits(model.settingsTab == category ? .isSelected : [])
-                    }
-                }
+                FilterTabs(options: categories, selection: Binding(get: { model.settingsTab }, set: { category in
+                    guard let index = categories.firstIndex(of: category), model.settingsTab != category else { return }
+                    model.settingsTab = category
+                    model.trace.user(.pageChanged, context: .settings, detail: index == 0 ? .general : index == 1 ? .naming : index == 2 ? .shortcuts : .authentication)
+                }), title: { L($0) }, palette: palette, accessibilityIdentifier: { category in
+                    "preferences-category-" + identifiers[categories.firstIndex(of: category) ?? 0]
+                })
             }.fixedSize(horizontal: false, vertical: true)
             // Keep each form mounted: leaving a category or workspace page must
             // preserve unfinished templates and browser profile input.
@@ -149,12 +142,13 @@ private struct WorkspaceGeneralSettings: View {
                     }
                     HStack(alignment: .top, spacing: 16) {
                         Text(L("主题")).font(.system(size: 12, weight: .medium))
-                            .frame(width: labelWidth, height: ThemeChoice.previewHeight, alignment: .leading)
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 16) {
-                            ForEach(AppTheme.allCases, id: \.self) { theme in
-                                ThemeChoice(theme: theme, selected: model.theme == theme) { model.theme = theme }
-                            }
-                        }
+                            .frame(width: labelWidth, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text(L("经典")).font(.system(size: 11, weight: .medium)).foregroundStyle(secondary)
+                            themeGrid(AppTheme.standardThemes)
+                            Text("Coding").font(.system(size: 11, weight: .medium)).foregroundStyle(secondary)
+                            themeGrid(AppTheme.codingThemes)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 if model.busy {
@@ -163,6 +157,13 @@ private struct WorkspaceGeneralSettings: View {
                 }
             }.font(.system(size: 12)).frame(maxWidth: 680, alignment: .leading)
                 .padding(.trailing, 16).padding(.bottom, 24).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    private func themeGrid(_ themes: [AppTheme]) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 16) {
+            ForEach(themes, id: \.self) { theme in
+                ThemeChoice(theme: theme, selected: model.theme == theme) { model.theme = theme }
+            }
         }
     }
     private func row<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {

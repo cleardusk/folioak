@@ -108,6 +108,7 @@ extension CoreTests {
             model.record(.info, "Focus fixture")
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
             var endEditingCount = 0
+            model.navigation = WorkspaceNavigation(page: page)
             let view = InteractionTestHost(rootView: DownloaderView(model: model, page: page, endTextEditing: { [weak window] in
                 endEditingCount += 1
                 if window?.firstResponder is NSTextView { window?.makeFirstResponder(nil) }
@@ -415,6 +416,7 @@ extension CoreTests {
         model.history.forEach { model.upsertPaper($0) }
         model.items = model.history
         model.record(.info, "下载中", item: model.history[1])
+        model.navigation = WorkspaceNavigation(page: .logs)
         let view = NSHostingView(rootView: DownloaderView(model: model, page: .logs))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view; window.orderFront(nil)

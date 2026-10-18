@@ -79,8 +79,13 @@ private final class PreferencesTestWindow: NSPanel {
             await settle()
             if try location(title, sidebar: sidebar) == nil, let scroll, let document = scroll.documentView {
                 let bottom = max(0, document.bounds.height - scroll.contentView.bounds.height)
-                scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom)); scroll.reflectScrolledClipView(scroll.contentView)
-                await settle()
+                var offset: CGFloat = 0
+                while true {
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: offset)); scroll.reflectScrolledClipView(scroll.contentView)
+                    await settle()
+                    if try location(title, sidebar: sidebar) != nil || offset >= bottom { break }
+                    offset = min(bottom, offset + max(1, scroll.contentView.bounds.height * 0.7))
+                }
             }
             guard let point = try location(title, sidebar: sidebar) else {
                 throw TestFailure.failed("visible preferences control: " + title + "; actual " + (try labels().map(\.0).joined(separator: " | ")))
@@ -141,6 +146,7 @@ private final class PreferencesTestWindow: NSPanel {
         try await pdfDirectorySettings(model, preferences: preferences, root: root, surface: surface, snapshots: snapshots)
         try await namingAndSettings(model, preferences: preferences, surface: surface, snapshots: snapshots)
         try await layouts(model, surface: surface, snapshots: snapshots)
+        try await codingThemeSettings(model, preferences: preferences, surface: surface, snapshots: snapshots)
         try await delegateRoutes(model)
         try expect(model.papers.map(\.id) == originalIDs && model.papers.map(\.file) == originalPaths && model.input == "keep this draft",
             "workspace preferences preserve library IDs, file paths and the working draft")
@@ -396,6 +402,29 @@ private final class PreferencesTestWindow: NSPanel {
         try surface.save("naming-saved", enabled: snapshots)
     }
 
+    private static func codingThemeSettings(_ model: DownloadModel, preferences: UserDefaults, surface: Surface, snapshots: Bool) async throws {
+        let oldTheme = model.theme, oldLanguage = model.language, oldAppearance = model.appearance
+        defer { model.theme = oldTheme; model.language = oldLanguage; model.appearance = oldAppearance }
+        model.preferencesPage = .settings; model.settingsTab = "通用"; model.language = .english
+        await surface.settle()
+        guard let popup = surface.descendants.compactMap({ $0 as? NSPopUpButton }).first(where: { $0.isEnabled }),
+              let scroll = popup.enclosingScrollView else { throw TestFailure.failed("theme settings scroll view") }
+        for appearance in [AppAppearance.light, .dark] {
+            model.appearance = appearance; NSApp.appearance = appearance.native
+            surface.window.appearance = appearance.native; surface.host.appearance = appearance.native
+            for theme in AppTheme.codingThemes {
+                try await surface.press(theme.label, scroll: scroll)
+                try expect(model.theme == theme && preferences.string(forKey: "theme") == theme.rawValue,
+                    "visible coding theme applies and persists: " + theme.label)
+                try await Task.sleep(nanoseconds: 350_000_000)
+                await surface.settle()
+                try surface.save("coding-\(theme.rawValue)-\(appearance.rawValue)", enabled: snapshots)
+            }
+        }
+        surface.host.appearance = nil; surface.window.appearance = nil
+        print("PASS coding themes: all six choices reachable, clickable and persisted in light/dark settings")
+    }
+
     private static func delegateRoutes(_ model: DownloadModel) async throws {
         let originalMenu = NSApp.mainMenu
         let originalPolicy = NSApp.activationPolicy()
@@ -523,6 +552,9 @@ private final class PreferencesTestWindow: NSPanel {
                         try surface.save("general-bottom-\(suffix)-\(theme)", enabled: snapshots)
                         try expect(bottom > 0 && abs(scroll.contentView.bounds.origin.y - bottom) < 2,
                             "the full theme palette remains reachable by scrolling at minimum height")
+                        let themeLabels = try surface.labels().map(\.0)
+                        try expect(themeLabels.contains { $0.contains(L("经典")) } && themeLabels.contains { $0.contains("Coding") },
+                            "Classic and Coding have equally visible group headings in both languages")
                     }
                     if category == "快捷键" {
                         let recorders = surface.descendants.compactMap { $0 as? ShortcutRecorder.Recorder }

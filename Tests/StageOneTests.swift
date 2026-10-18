@@ -168,5 +168,6 @@ extension CoreTests {
         let recoveredDisk = try LibraryStore.read(state.deletingLastPathComponent().appendingPathComponent("library.json"))!
         try expect(!recoveredDisk[0].missing && recoveredDisk[1].read, "merged recovery is persisted")
         print(String(format: "BENCH 20k library: cold title query %.2f ms; cached progress/query %.4f ms; async remove %.2f ms; UI pulses %d; longest pulse %.2f ms", cold, cached, duration, gaps.count, gaps.max() ?? 0))
+        try largeLibraryFileRefreshTests(root: root, pdf: pdf)
     }
 }

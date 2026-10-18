@@ -123,6 +123,9 @@ extension CoreTests {
         model.persistWorkspace()
         let files = records.compactMap(\.savedURL)
         let originalBytes = try files.map { try Data(contentsOf: $0) }
+        // Mount the intended fixture directly, without retaining a retiring
+        // download-list keyboard while the initial library route animates in.
+        model.navigation = WorkspaceNavigation(page: page)
         let view = LibrarySelectionHost(rootView: DownloaderView(model: model, page: page)
             .environment(\.colorScheme, scheme))
         let window = LibrarySelectionWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),

@@ -37,6 +37,49 @@ import Foundation
 }
 
 extension CoreTests {
+    @MainActor static func largeLibraryFileRefreshTests(root: URL, pdf: URL) throws {
+        let suite = "folioak-large-file-refresh-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let folder = root.appendingPathComponent("large-file-refresh")
+        let real = folder.appendingPathComponent("real"), alias = folder.appendingPathComponent("alias")
+        let other = folder.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+        let file = real.appendingPathComponent("shared.pdf"), aliasFile = alias.appendingPathComponent("shared.pdf")
+        let unrelated = other.appendingPathComponent("shared.pdf")
+        try FileManager.default.copyItem(at: pdf, to: file)
+        try FileManager.default.copyItem(at: pdf, to: unrelated)
+        let model = DownloadModel(preferences: preferences, recycleFile: LibraryManagementFixture.recycle)
+        model.papers = (0..<20_000).map { index in
+            let url = index < 100 ? (index.isMultiple(of: 2) ? file : aliasFile)
+                : index == 100 ? unrelated : real.appendingPathComponent("document-\(index).pdf")
+            return LibraryPaper(DownloadItem(original: "document-\(index)", state: .saved, savedURL: url))
+        }
+        model.items = [model.papers[0].downloadItem, model.papers[1].downloadItem, model.papers[100].downloadItem]
+        model.history = model.items
+        model.previewURL = aliasFile
+        var paperPublications = 0, itemPublications = 0, historyPublications = 0
+        let observations = [model.$papers.dropFirst().sink { _ in paperPublications += 1 },
+                            model.$items.dropFirst().sink { _ in itemPublications += 1 },
+                            model.$history.dropFirst().sink { _ in historyPublications += 1 }]
+        defer { observations.forEach { $0.cancel() } }
+        let request = try LibraryManagementFixture.request(model, ids: [model.papers[0].id], in: .documents)
+        let start = Date()
+        try expect(model.confirmFileTrash(request), "large-library file removal succeeds")
+        let elapsed = Date().timeIntervalSince(start) * 1000
+        try expect(model.papers.prefix(100).allSatisfy(\.missing) && model.papers.dropFirst(100).allSatisfy { !$0.missing } &&
+                   model.items.prefix(2).allSatisfy { $0.state == .missing } && model.items[2].state == .saved &&
+                   model.history.prefix(2).allSatisfy { $0.state == .missing } && model.previewURL == nil &&
+                   FileManager.default.fileExists(atPath: unrelated.path),
+                   "20k refresh updates shared and aliased references while preserving same-name files in other folders")
+        try expect(model.fileRefreshPathResolutions == 3 && paperPublications == 1 && itemPublications == 1 && historyPublications == 1,
+                   "file refresh resolves only three relevant parents and publishes each affected collection once")
+        print(String(format: "BENCH 20k file refresh: %.2f ms; path resolutions %d; collection publications %d", elapsed,
+                     model.fileRefreshPathResolutions, paperPublications + itemPublications + historyPublications))
+    }
+
     @MainActor static func libraryManagementTests(root: URL, pdf: URL) async throws {
         let suite = "folioak-library-management-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!

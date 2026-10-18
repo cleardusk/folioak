@@ -13,6 +13,7 @@ extension CoreTests {
         _ = NSApplication.shared
         for page in [WorkspacePage.library, .media] {
             for mode in [LibraryDisplayMode.list, .grid] {
+              for scrollerStyle in [NSScroller.Style.overlay, .legacy] {
                 let suite = "folioak-blank-selection-" + UUID().uuidString
                 let preferences = UserDefaults(suiteName: suite)!
                 defer { preferences.removePersistentDomain(forName: suite) }
@@ -50,24 +51,43 @@ extension CoreTests {
                         windowNumber: window.windowNumber, context: nil, characters: text, charactersIgnoringModifiers: text,
                         isARepeat: false, keyCode: code)!)
                 }
-                func click(_ point: NSPoint, tracksMouse: Bool = false) async throws {
+                func click(_ point: NSPoint, modifiers: NSEvent.ModifierFlags = [], tracksMouse: Bool = false) async throws {
                     window.makeKeyAndOrderFront(nil)
+                    func send(_ event: NSEvent) throws {
+                        // The normal event-loop dequeue updates NSApp.currentEvent.
+                        // Calling sendEvent directly leaves it stale, so a SwiftUI
+                        // tap would lose this click's Command/Shift modifiers.
+                        NSApp.postEvent(event, atStart: true)
+                        guard let queued = NSApp.nextEvent(matching: NSEvent.EventTypeMask(rawValue: 1 << event.type.rawValue),
+                            until: Date(timeIntervalSinceNow: 0.1), inMode: .default, dequeue: true),
+                              queued.windowNumber == window.windowNumber else {
+                            throw TestFailure.failed("library click dequeues its own native event")
+                        }
+                        NSApp.sendEvent(queued)
+                    }
                     if tracksMouse {
                         // NSTextView tracks synchronously inside mouseDown. Queue
                         // its release before entering that native tracking loop.
                         let location = host.convert(point, to: nil)
-                        let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: [],
+                        let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: modifiers,
                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                             context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!
                         NSApp.postEvent(up, atStart: true)
-                        NSApp.sendEvent(NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
+                        try send(NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: modifiers,
                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                        // Disabled scrollbars need not enter tracking. Deliver
+                        // any release still queued rather than leaking it into
+                        // the next independent click/menu scenario.
+                        if let release = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) {
+                            try expect(release.windowNumber == window.windowNumber, "tracked click releases its own test window")
+                            NSApp.sendEvent(release)
+                        }
                         await settle()
                         return
                     }
                     for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                        NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: host.convert(point, to: nil), modifierFlags: [],
+                        try send(NSEvent.mouseEvent(with: type, location: host.convert(point, to: nil), modifierFlags: modifiers,
                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                             context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!)
                         try await Task.sleep(nanoseconds: 15_000_000)
@@ -80,7 +100,24 @@ extension CoreTests {
                     try key(36, "\r")
                     try expect(opened == before + 1, message)
                 }
+                func separateClickSequence() async throws {
+                    // Independent selection scenarios must not become a double
+                    // click in the row's native recognizer on the hosting root.
+                    try await Task.sleep(nanoseconds: UInt64((NSEvent.doubleClickInterval + 0.1) * 1_000_000_000))
+                }
                 await settle()
+                guard let scroll = descendants(host).compactMap({ $0 as? FileRowClickRegion.Region })
+                    .first(where: { !$0.isControls })?.enclosingScrollView else {
+                    throw TestFailure.failed("library rows belong to a native scroll view")
+                }
+                // Exercise the persistent-scrollbar hit-testing regression
+                // without modifying the user's global scrollbar preference.
+                scroll.scrollerStyle = scrollerStyle
+                scroll.autohidesScrollers = scrollerStyle == .overlay
+                scroll.hasVerticalScroller = true
+                scroll.tile()
+                await settle()
+                try expect(scroll.scrollerStyle == scrollerStyle, "library fixture uses the requested scrollbar style")
                 let regions = descendants(host).compactMap { $0 as? FileRowClickRegion.Region }
                 let rowRegions = regions.filter { !$0.isControls }
                 let rowFrames: [CGRect] = rowRegions.map { $0.convert($0.bounds, to: host) }
@@ -94,9 +131,37 @@ extension CoreTests {
                     throw TestFailure.failed("polish fixture mounts two file rows and controls")
                 }
                 let rowPoint = NSPoint(x: row.minX + 40, y: row.midY)
+                func assertSelectionCount(_ count: Int) async throws {
+                    var titles: [String] = []
+                    let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { note in
+                        guard let menu = note.object as? NSMenu else { return }
+                        titles = menu.items.filter(\.isEnabled).map(\.title)
+                        let cancel = Timer(timeInterval: 0, repeats: false) { _ in menu.cancelTrackingWithoutAnimation() }
+                        RunLoop.main.add(cancel, forMode: .eventTracking)
+                    }
+                    defer { NotificationCenter.default.removeObserver(observer) }
+                    try await click(NSPoint(x: host.bounds.width - 40, y: host.isFlipped ? 38 : host.bounds.height - 38))
+                    try expect(titles.contains(L("移出所选 \(count) 项")),
+                        "native pointer modifiers keep \(count) selected rows in \(page.rawValue) \(mode) \(scrollerStyle): \(titles)")
+                }
+                let secondPoint = NSPoint(x: rows[1].minX + 40, y: rows[1].midY)
                 try await click(rowPoint)
+                try await click(secondPoint, modifiers: .command)
+                try await assertSelectionCount(2)
+                try await click(secondPoint, modifiers: .command)
+                try await assertSelectionCount(1)
+                try await separateClickSequence()
+                try await click(rowPoint)
+                try await click(secondPoint, modifiers: .shift)
+                try await assertSelectionCount(2)
+                try await separateClickSequence()
+                let beforeRowClick = opened
+                try await click(rowPoint)
+                try expect(opened == beforeRowClick,
+                    "an isolated row click selects without opening in \(page.rawValue) \(mode): before=\(beforeRowClick), opened=\(opened)")
                 try key(36, "\r")
-                try expect(opened == 1, "row click selects without the background clearing it in \(page.rawValue) \(mode)")
+                try expect(opened == beforeRowClick + 1,
+                    "row click selects without the background clearing it in \(page.rawValue) \(mode): before=\(beforeRowClick), opened=\(opened)")
                 try key(49, " ")
                 try expect(model.previewURL != nil, "Space still previews a pointer-selected file")
                 model.previewURL = nil; await settle()
@@ -110,7 +175,7 @@ extension CoreTests {
                     host.cacheDisplay(in: host.bounds, to: bitmap)
                     let folder = URL(fileURLWithPath: "build/qa/library-polish")
                     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                    let name = (page == .library ? "documents" : "media") + "-" + mode.rawValue + ".png"
+                    let name = (page == .library ? "documents" : "media") + "-" + mode.rawValue + "-" + (scrollerStyle == .legacy ? "legacy" : "overlay") + ".png"
                     try bitmap.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent(name))
                 }
                 let fromTop: (CGFloat, CGFloat) -> NSPoint = { x, y in
@@ -146,29 +211,50 @@ extension CoreTests {
                     try expect(!menuTitles.contains(L(title)), "healthy library row omits secondary \(title)")
                 }
                 let viewport = keyboard.convert(keyboard.bounds, to: host)
+                let clip = scroll.contentView.convert(scroll.contentView.bounds.intersection(scroll.contentView.visibleRect), to: host)
+                let scrollerFrame = scroll.verticalScroller.map { $0.convert($0.bounds.intersection($0.visibleRect), to: host) }
+                func hitsVerticalScroller(_ point: NSPoint) -> Bool {
+                    guard let scroller = scroll.verticalScroller, !scroller.isHiddenOrHasHiddenAncestor,
+                          scrollerFrame?.contains(point) == true, let hit = host.hitTest(point) else { return false }
+                    return hit === scroller || hit.isDescendant(of: scroller)
+                }
                 let bottomY = host.isFlipped ? viewport.maxY - 12 : viewport.minY + 12
                 var blankPoints = [NSPoint(x: viewport.minX + 40, y: bottomY),
                     NSPoint(x: viewport.maxX - 4, y: row.midY),
                     NSPoint(x: viewport.minX - 12, y: row.midY),
                     NSPoint(x: viewport.maxX + 12, y: row.midY)]
+                // A persistent scrollbar consumes part of the right margin.
+                // Keep an explicit canvas sample immediately inside its clip.
+                let rightCanvas = NSPoint(x: clip.maxX - 4, y: row.midY)
+                if !blankPoints.contains(rightCanvas) { blankPoints.append(rightCanvas) }
                 if mode == .grid {
                     try expect(rows[1].minX > row.maxX, "grid fixture has a real inter-card gap")
                     blankPoints.append(NSPoint(x: (row.maxX + rows[1].minX) / 2, y: row.midY))
                 }
                 for blank in blankPoints {
+                    try await separateClickSequence()
                     try await click(rowPoint)
                     let before = opened
+                    let location = "\(page.rawValue) \(mode) style=\(scrollerStyle) point=\(blank) clip=\(clip) scroller=\(String(describing: scrollerFrame)) hit=\(String(describing: host.hitTest(blank)))"
+                    if hitsVerticalScroller(blank) {
+                        try await click(blank, tracksMouse: true)
+                        try key(36, "\r")
+                        try expect(opened == before + 1, "actual scrollbar click preserves selection: \(location)")
+                        continue
+                    }
+                    try expect(clip.contains(blank), "blank selection test samples the actual scroll canvas: \(location)")
                     try await click(blank)
                     try key(36, "\r"); try key(49, " ")
                     try expect(opened == before && model.previewURL == nil,
-                        "content bottom/gutter/outer margins/grid gap clears selection before Return or Space: \(page.rawValue) \(mode) \(blank)")
+                        "content bottom/gutter/outer margins/grid gap clears selection before Return or Space: \(location)")
                     try key(125, "\u{F701}"); try key(36, "\r")
                     try expect(opened == before + 1, "arrow navigation selects again after blank click")
                 }
                 window.close()
+              }
             }
         }
-        print("PASS library blank selection UI: native list/grid row, button, menu, toolbar, sidebar, search, bottom, gutter, outer margins, grid gap and keyboard recovery")
+        print("PASS library blank selection UI: overlay/persistent scrollbars, native Command/Shift selection, list/grid row, button, menu, toolbar, sidebar, search, bottom, gutter, outer margins, grid gap and keyboard recovery")
     }
 }
 

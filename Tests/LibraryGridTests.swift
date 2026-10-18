@@ -136,6 +136,10 @@ extension CoreTests {
                     }
                     if page == .library { model.papers = records.map(LibraryPaper.init); model.documentDisplayMode = .grid }
                     else { model.mediaLibrary = records; model.mediaDisplayMode = .grid }
+                    // Each window is an independent fixture. Establish its
+                    // route before mounting so the preceding page cannot leave
+                    // a retiring keyboard view during the initial transition.
+                    model.navigation = WorkspaceNavigation(page: page)
                     let host = GridPickerHost(rootView: DownloaderView(model: model, page: page).environment(\.colorScheme, dark ? .dark : .light))
                     let window = GridTestWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
                     window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
@@ -197,6 +201,7 @@ extension CoreTests {
             }
             if page == .library { model.papers = records.map(LibraryPaper.init); model.documentDisplayMode = .grid }
             else { model.mediaLibrary = records; model.mediaDisplayMode = .grid }
+            model.navigation = WorkspaceNavigation(page: page)
             let baseline = MediaThumbnailCache.loadCount, start = Date()
             let host = GridPickerHost(rootView: DownloaderView(model: model, page: page))
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)

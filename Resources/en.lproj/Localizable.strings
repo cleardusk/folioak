@@ -372,6 +372,7 @@
 "arXiv 使用所选命名，年月取首次提交日期；其他 PDF 使用标题或原文件名。" = "arXiv uses this format and the first submission date. Other PDFs use their title or original file name.";
 "外观" = "Appearance";
 "主题" = "Theme";
+"经典" = "Classic";
 "下载结束后可更改目录和命名。" = "Change the folder and naming after downloads finish.";
 "仍有文件正在下载" = "Downloads Are Still Running";
 "已保存的文件会保留。退出将停止当前下载和等待中的任务。" = "Saved files will be kept. Quitting stops current and queued downloads.";
