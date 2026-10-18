@@ -793,3 +793,5 @@
 "操作轨迹清除失败，请检查文件访问权限。" = "Could not clear interaction history. Please check file permissions.";
 
 "清除" = "Clear";
+
+"成功移到废纸篓后，同时清除对应下载记录。资料库条目会保留并标记文件缺失，可从 Finder 废纸篓找回文件。" = "After the files are moved to Trash, the selected download records will also be cleared. Library entries will be kept and marked as missing. You can recover the files from Trash in Finder.";

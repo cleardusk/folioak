@@ -147,6 +147,11 @@ struct FileTrashRequest: Identifiable {
     let ids: Set<UUID>
     let files: [URL]
     var existingFiles: [URL] { files.filter { FileManager.default.fileExists(atPath: $0.path) } }
+    var confirmationMessage: String {
+        collection == .downloads
+            ? "成功移到废纸篓后，同时清除对应下载记录。资料库条目会保留并标记文件缺失，可从 Finder 废纸篓找回文件。"
+            : "下载记录和资料库条目会保留，并更新文件状态。恢复库条目不会恢复文件，可从 Finder 废纸篓找回文件。"
+    }
 }
 
 @MainActor
@@ -618,6 +623,20 @@ final class DownloadModel: ObservableObject {
             }
             for file in existing { try recycleFile(file) }
             refreshMissingFiles(files)
+            if request.collection == .downloads {
+                let clearedIDs = Set(downloads.filter { request.ids.contains($0.id) }.map(\.id))
+                // Save updated libraries before atomically replacing download
+                // records; a failed save keeps the recovery rows visible.
+                guard replaceDownloadRecords(items: items.filter { !clearedIDs.contains($0.id) },
+                                             history: history.filter { !clearedIDs.contains($0.id) }) else { return false }
+                recordAnimation = UUID()
+                if let diagnosticItem, clearedIDs.contains(diagnosticItem.id) { self.diagnosticItem = nil }
+                for id in clearedIDs {
+                    trace.record(.historyCleared, context: .downloads, outcome: .succeeded, item: id, operation: operation, count: 1)
+                }
+                succeeded = true
+                return true
+            }
             persistWorkspace()
             if persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil { notice = nil }
             succeeded = persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil

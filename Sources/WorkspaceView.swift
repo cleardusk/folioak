@@ -237,7 +237,7 @@ struct DownloaderView: View {
                 }
                 Text(L("\(files.count) 个文件") + "\n" + names.joined(separator: "\n") +
                      (files.count > 3 ? "\n…" : "") + "\n\n" +
-                     L("下载记录和资料库条目会保留，并更新文件状态。恢复库条目不会恢复文件，可从 Finder 废纸篓找回文件。"))
+                     L(request.confirmationMessage))
             }
         }
         .sheet(item: $model.diagnosticItem, onDismiss: {

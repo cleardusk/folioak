@@ -45,6 +45,7 @@ extension CoreTests {
         try await libraryReplayTests(root: root, preferences: preferences)
         try await libraryRemovalFailureTests(root: root, pdf: pdf, preferences: preferences)
         try await libraryFileTrashTests(root: root, pdf: pdf, preferences: preferences)
+        try downloadFileTrashClearsRecordTests(root: root, pdf: pdf, preferences: preferences)
         try libraryFileTrashFailureTests(root: root, preferences: preferences)
         print("PASS library management: asynchronous remove/restore/undo, legacy migration, replay tombstones, bulk retention, shared-file trash, stale confirmations and failure recovery")
     }
@@ -187,8 +188,8 @@ extension CoreTests {
         let request = try LibraryManagementFixture.request(deleting, ids: [recent.id], in: .downloads)
         try expect(Set(request.files) == Set([first, second]), "download deletion confirmation expands the unique retained saved copy")
         try expect(deleting.confirmFileTrash(request) && Set(moves) == Set([first, second]) && moves.count == 2 &&
-                   deleting.downloads.contains { $0.id == recent.id } && deleting.mediaLibrary.first { $0.id == original.id }?.isLibraryRemoved == true &&
-                   FileManager.default.fileExists(atPath: unrelatedFile.path), "independent trash preserves tombstones and history and never expands a different same-source save")
+                   !deleting.downloads.contains { $0.id == recent.id } && deleting.mediaLibrary.first { $0.id == original.id }?.isLibraryRemoved == true &&
+                   FileManager.default.fileExists(atPath: unrelatedFile.path), "download trash clears only its record, preserves library tombstones and never expands a different same-source save")
     }
 
     @MainActor private static func libraryRemovalFailureTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
@@ -308,6 +309,57 @@ extension CoreTests {
                    FileManager.default.fileExists(atPath: replacement.path), "batch file deletion retains every record and leaves unselected files usable")
     }
 
+    @MainActor private static func downloadFileTrashClearsRecordTests(root: URL, pdf: URL, preferences: UserDefaults) throws {
+        let state = try LibraryManagementFixture.state(root, "download-trash-clear")
+        let first = try LibraryManagementFixture.file(state, "first.png"), second = try LibraryManagementFixture.file(state, "second.png")
+        let untouched = try LibraryManagementFixture.file(state, "untouched.png")
+        var group = LibraryManagementFixture.media(first); group.additionalURLs = [second, first]
+        let shared = LibraryManagementFixture.media(first, name: "shared"), other = LibraryManagementFixture.media(untouched, name: "other")
+        var moves: [URL] = []
+        let model = LibraryManagementFixture.model(state, preferences, recycle: { moves.append($0); try LibraryManagementFixture.recycle($0) })
+        model.items = [group, shared, other]; model.history = [group, shared]
+        model.mediaLibrary = [group, shared, other]
+        model.input = "unfinished draft"; model.duplicateCount = 3
+        model.previewURL = first; model.diagnosticItem = group
+        model.record(.info, "Keep logs", item: group); model.persistWorkspace()
+        let logs = model.logs.map(\.id), batch = model.batchID, animation = model.recordAnimation
+        let request = try LibraryManagementFixture.request(model, ids: [group.id], in: .downloads)
+        try expect(request.confirmationMessage.contains("同时清除对应下载记录"), "download Trash confirmation discloses record clearing")
+        let language = AppLocalization.shared.language
+        AppLocalization.shared.language = .english
+        try expect(L(request.confirmationMessage).contains("download records will also be cleared"), "English confirmation discloses record clearing")
+        AppLocalization.shared.language = language
+        try expect(model.confirmFileTrash(request) && Set(moves) == Set([first, second]) && moves.count == 2 &&
+                   model.items.map(\.id) == [shared.id, other.id] && model.history.map(\.id) == [shared.id],
+                   "successful file Trash clears the selected ID from both current and historical records")
+        try expect(model.items[0].state == .missing && model.items[1].state == .saved &&
+                   model.mediaLibrary.count == 3 && model.mediaLibrary[0].state == .missing &&
+                   model.mediaLibrary[0].localURLs == group.localURLs && FileManager.default.fileExists(atPath: untouched.path),
+                   "shared references remain as missing, complete library paths and unrelated files are preserved")
+        try expect(model.previewURL == nil && model.diagnosticItem == nil && model.recordAnimation != animation &&
+                   model.input == "unfinished draft" && model.logs.map(\.id) == logs && model.batchID == batch && model.duplicateCount == 3,
+                   "combined removal closes deleted content and animates without clearing drafts, logs or list context")
+        let restarted = LibraryManagementFixture.model(state, preferences)
+        try expect(!restarted.downloads.contains { $0.id == group.id } && restarted.downloads.count == 2 && restarted.mediaLibrary.count == 3,
+                   "cleared download records stay cleared across restart while library entries remain")
+
+        let paperState = try LibraryManagementFixture.state(root, "download-trash-clear-paper")
+        let paperFile = paperState.deletingLastPathComponent().appendingPathComponent("paper.pdf")
+        try FileManager.default.copyItem(at: pdf, to: paperFile)
+        let paperDownload = DownloadItem(original: "1706.03762", reference: try ArxivReference.parse("1706.03762"), state: .saved, savedURL: paperFile)
+        let papers = LibraryManagementFixture.model(paperState, preferences, recycle: LibraryManagementFixture.recycle)
+        papers.items = [paperDownload]; papers.history = [paperDownload]; papers.upsertPaper(paperDownload)
+        papers.changePaper(paperDownload.id) { $0.favorite = true; $0.read = true; $0.tags = ["keep"] }
+        let paperRequest = try LibraryManagementFixture.request(papers, ids: [paperDownload.id], in: .downloads)
+        try expect(papers.confirmFileTrash(paperRequest) && papers.downloads.isEmpty && papers.papers.count == 1 &&
+                   papers.papers[0].missing && papers.papers[0].favorite && papers.papers[0].read && papers.papers[0].tags == ["keep"],
+                   "trashing a downloaded PDF clears its download row and preserves library organization")
+        let restoredPapers = LibraryManagementFixture.model(paperState, preferences)
+        try expect(restoredPapers.downloads.isEmpty && restoredPapers.papers.count == 1 && restoredPapers.papers[0].missing,
+                   "PDF record clearing and missing library state survive restart")
+        print("PASS download Trash: successful clear, shared references, retained libraries, confirmation copy and restart")
+    }
+
     @MainActor private static func libraryFileTrashFailureTests(root: URL, preferences: UserDefaults) throws {
         for blockedName in ["workspace.json", "library.json", "media-library.json"] {
             let state = try LibraryManagementFixture.state(root, "trash-blocked-" + blockedName)
@@ -334,7 +386,7 @@ extension CoreTests {
             try LibraryManagementFixture.recycle(file)
         })
         model.items = [group]; model.history = [group]; model.upsertMedia(group)
-        let request = try LibraryManagementFixture.request(model, ids: [group.id], in: .media)
+        let request = try LibraryManagementFixture.request(model, ids: [group.id], in: .downloads)
         model.busy = true
         try expect(!model.confirmFileTrash(request) && calls == 0, "download activity invalidates a previously opened deletion confirmation")
         model.busy = false
@@ -345,9 +397,9 @@ extension CoreTests {
         let restarted = LibraryManagementFixture.model(state, preferences, recycle: LibraryManagementFixture.recycle)
         try expect(restarted.downloads.count == 1 && restarted.mediaLibrary[0].localURLs == group.localURLs && restarted.mediaLibrary[0].state == .missing,
                    "partial deletion recovery survives restart")
-        let retry = try LibraryManagementFixture.request(restarted, ids: [group.id], in: .media)
-        try expect(restarted.confirmFileTrash(retry) && restarted.downloads.count == 1 && !FileManager.default.fileExists(atPath: second.path),
-                   "retry skips already-missing files and never clears catalog or download records")
+        let retry = try LibraryManagementFixture.request(restarted, ids: [group.id], in: .downloads)
+        try expect(restarted.confirmFileTrash(retry) && restarted.downloads.isEmpty && restarted.mediaLibrary.count == 1 && !FileManager.default.fileExists(atPath: second.path),
+                   "successful retry skips missing files, clears the download record and keeps the catalog entry")
 
         let unsafeState = try LibraryManagementFixture.state(root, "trash-unsafe")
         let safe = try LibraryManagementFixture.file(unsafeState, "a-safe.png")
