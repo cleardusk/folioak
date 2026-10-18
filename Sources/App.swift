@@ -239,6 +239,7 @@ final class DownloadModel: ObservableObject {
     let browserAuthentication: BrowserAuthenticationSettings
     let updates: UpdateChecker
     @Published var settingsTab = "通用"
+    @Published var preferencesPage: WorkspacePreferencesPage?
     private(set) var editTarget = ""
     let engine: DownloadEngine
     private let preferences: UserDefaults
@@ -1773,112 +1774,6 @@ struct SlidingSegments<Selection: Hashable>: View {
     }
 }
 
-struct SettingsView: View {
-    @ViewState private var showsNamingRules = false
-    @ObservedObject private var localization = AppLocalization.shared
-    @ObservedObject var model: DownloadModel
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.colorSchemeContrast) private var contrast
-    private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private var labelWidth: CGFloat { L10n.language.code() == "en" ? 88 : 48 }
-
-    var body: some View {
-        VStack(spacing: 16) {
-            SlidingSegments(selection: $model.settingsTab, options: ["通用", "快捷键", "浏览器认证"], title: { L($0) }, segmentWidth: (422 - 4) / 3, palette: palette)
-            Group {
-                if model.settingsTab == "通用" { general }
-                else if model.settingsTab == "快捷键" { ShortcutSettingsView(shortcuts: model.shortcuts, palette: palette) }
-                else { BrowserAuthenticationSettingsView(settings: model.browserAuthentication, palette: palette) }
-            }.frame(width: 422, height: 512, alignment: .top)
-        }.padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 24)
-            .frame(width: 470, height: 588, alignment: .top)
-            .environment(\.locale, L10n.locale)
-            .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))
-            .background(ThemePalette.color(palette.canvas).ignoresSafeArea())
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
-    }
-    private var general: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 16) {
-                settingLabel(L("保存位置"))
-                HStack(spacing: 12) {
-                    Text(model.directoryLabel).font(.system(size: 12)).lineLimit(1)
-                        .truncationMode(.middle).help(model.directory.path).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Button(L("更改…"), action: model.chooseDirectory).controlSize(.small).fixedSize().disabled(model.busy)
-                        .accessibilityLabel(L("更改保存位置"))
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(height: 28)
-                .help(L("按类型归入 Papers、Documents、Archives、Videos、Audio、Images；首次下载时创建。"))
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 16) {
-                    settingLabel(L("文件命名"))
-                    Text(L("按资产类型设置")).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
-                    Button(L("设置…")) { showsNamingRules = true }.controlSize(.small).accessibilityLabel(L("文件命名规则"))
-                }.frame(height: 28)
-                Text(L("自定义论文、文档、视频、音频、图片与压缩文件的命名。"))
-                    .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
-                    .fixedSize(horizontal: false, vertical: true).padding(.leading, labelWidth + 16)
-            }.sheet(isPresented: $showsNamingRules) { AssetNamingSettings(model: model, palette: palette) }
-            Divider()
-            HStack(spacing: 16) {
-                settingLabel(L("语言"))
-                Picker(L("语言"), selection: $model.language) {
-                    ForEach(AppLanguage.allCases, id: \.self) { Text($0.label).tag($0) }
-                }.id(localization.language).labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(height: 28)
-            HStack(spacing: 16) {
-                settingLabel(L("菜单栏"))
-                Toggle(L("显示 Folioak 图标"), isOn: $model.showsMenuBarIcon).toggleStyle(.checkbox)
-                    .font(.system(size: 12)).help(L("关闭主窗口后继续在菜单栏运行。"))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(height: 28)
-            HStack(spacing: 16) {
-                settingLabel(L("更新"))
-                UpdateSettingsControls(checker: model.updates)
-            }.frame(height: 28)
-            Divider()
-            HStack(spacing: 16) {
-                settingLabel(L("外观"))
-                SlidingSegments(selection: $model.appearance, options: AppAppearance.allCases, title: { L($0.label) },
-                                segmentWidth: (422 - labelWidth - 20) / 3, accessibilityName: L("外观"), palette: palette)
-            }
-            HStack(alignment: .top, spacing: 16) {
-                settingLabel(L("主题")).frame(height: ThemeChoice.previewHeight)
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 12) {
-                    ForEach(AppTheme.allCases, id: \.self) { theme in
-                        ThemeChoice(theme: theme, selected: model.theme == theme) { model.theme = theme }
-                    }
-                }.frame(width: 422 - labelWidth - 16)
-            }
-            Text(model.busy ? L("下载结束后可更改目录。") : "")
-                .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(height: 14).padding(.leading, labelWidth + 16)
-        }
-        .frame(maxHeight: .infinity, alignment: .top)
-    }
-
-    private func settingLabel(_ text: String) -> some View {
-        Text(text).font(.system(size: 12, weight: .medium)).frame(width: labelWidth, alignment: .leading)
-    }
-}
-
-private struct UpdateSettingsControls: View {
-    @ObservedObject private var localization = AppLocalization.shared
-    @ObservedObject var checker: UpdateChecker
-    var body: some View {
-        HStack {
-            Toggle(L("自动检查更新"), isOn: $checker.automaticallyChecks).toggleStyle(.checkbox)
-                .font(.system(size: 12)).help(L("运行期间每天检查一次正式版，有新版时提醒。"))
-            Spacer(minLength: 8)
-            Button(checker.isChecking ? L("检查中…") : L("检查…")) {
-                NSApp.sendAction(#selector(AppDelegate.checkForUpdates), to: NSApp.delegate, from: nil)
-            }.controlSize(.small).disabled(checker.isChecking).accessibilityLabel(L("检查更新…"))
-        }
-    }
-}
-
 // A decorative toolbar label lets mouse events reach the native title bar.
 final class WindowTitleField: NSTextField {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -1980,119 +1875,9 @@ enum AboutInformation {
 }
 
 @MainActor
-final class AboutWindowController: NSWindowController {
-    private var links: [NSButton: URL] = [:]
-    private var languageObservation: AnyCancellable?
-
-    init() {
-        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
-                             styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        panel.isReleasedWhenClosed = false
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        super.init(window: panel)
-        rebuild()
-        panel.center()
-        languageObservation = AppLocalization.shared.$language.dropFirst().sink { [weak self] _ in
-            DispatchQueue.main.async { self?.rebuild() }
-        }
-    }
-    required init?(coder: NSCoder) { return nil }
-
-    private func label(_ text: String, size: CGFloat = 12, weight: NSFont.Weight = .regular,
-                       secondary: Bool = false) -> NSTextField {
-        let field = NSTextField(labelWithString: text)
-        field.font = .systemFont(ofSize: size, weight: weight)
-        field.textColor = secondary ? .secondaryLabelColor : .labelColor
-        field.setContentCompressionResistancePriority(.required, for: .horizontal)
-        return field
-    }
-    private func link(_ title: String, url: URL, identifier: String) -> NSButton {
-        let button = NSButton(title: title, target: self, action: #selector(openLink(_:)))
-        button.isBordered = false
-        button.font = .systemFont(ofSize: 12)
-        button.contentTintColor = .linkColor
-        button.alignment = .left
-        button.image = url.isFileURL ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil) : nil
-        button.imagePosition = .imageTrailing
-        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
-        button.toolTip = url.isFileURL ? url.path : url.absoluteString
-        button.identifier = NSUserInterfaceItemIdentifier(identifier)
-        button.setAccessibilityLabel(title)
-        links[button] = url
-        return button
-    }
-    private func vertical(_ views: [NSView], spacing: CGFloat = 8) -> NSStackView {
-        let stack = NSStackView(views: views)
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = spacing
-        return stack
-    }
-    private func rebuild() {
-        guard let window else { return }
-        links.removeAll()
-        window.title = L("关于 Folioak")
-        let icon = NSImageView()
-        icon.image = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap { NSImage(contentsOf: $0) }
-            ?? NSImage(contentsOfFile: "Resources/AppIcon.icns")
-        icon.setAccessibilityLabel("Folioak")
-        icon.widthAnchor.constraint(equalToConstant: 64).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 64).isActive = true
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "QA"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
-        let identity = vertical([label("Folioak", size: 24, weight: .semibold),
-                                 label(String(format: L("版本 %@（%@）"), version, build), secondary: true),
-                                 label("Jianzhu Guo & Codex (GPT)", secondary: true)], spacing: 4)
-        let header = NSStackView(views: [icon, identity]); header.spacing = 16; header.alignment = .centerY
-
-        var componentViews: [NSView] = [label(L("开源组件"), size: 13, weight: .semibold)]
-        if let tools = try? MediaTools.installed() {
-            let rows = AboutInformation.components(in: tools).map { component -> [NSView] in
-                let version = label(component.version)
-                version.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-                return [link(component.name, url: component.url, identifier: "about.component." + component.name),
-                        version, label(component.license, size: 11, secondary: true)]
-            }
-            if !rows.isEmpty {
-                let grid = NSGridView(views: rows)
-                grid.columnSpacing = 18; grid.rowSpacing = 10
-                grid.xPlacement = .leading; grid.rowAlignment = .firstBaseline
-                componentViews.append(grid)
-            } else { componentViews.append(label(L("组件版本信息不可用"), secondary: true)) }
-            componentViews.append(link(L("许可证与第三方声明"), url: tools.directory.appendingPathComponent("licenses", isDirectory: true), identifier: "about.licenses"))
-        } else { componentViews.append(label(L("组件版本信息不可用"), secondary: true)) }
-        let components = vertical(componentViews, spacing: 12)
-        let divider = NSBox(); divider.boxType = .separator
-        let footer = NSStackView(views: [label("© 2026 Jianzhu Guo", size: 11, secondary: true), NSView(),
-                                       link(L("项目主页"), url: AboutInformation.repository, identifier: "about.repository")])
-        let stack = vertical([header, components, divider, footer], spacing: 22)
-        let content = NSView()
-        window.contentView = content
-        content.addSubview(stack)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            stack.widthAnchor.constraint(equalToConstant: 412),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
-            divider.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            footer.widthAnchor.constraint(equalTo: stack.widthAnchor)
-        ])
-        window.setContentSize(NSSize(width: 460, height: stack.fittingSize.height + 48))
-        content.layoutSubtreeIfNeeded()
-    }
-    @objc private func openLink(_ sender: NSButton) {
-        if let url = links[sender] { NSWorkspace.shared.open(url) }
-    }
-}
-
-@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var window: NSWindow!
-    private var settingsWindow: NSWindow?
-    private var aboutController: AboutWindowController?
     private var windowChrome: WindowChrome?
-    private var settingsChrome: WindowChrome?
     private let model: DownloadModel
     private var menuBar: MenuBarController?
     private var terminationPending = false
@@ -2119,23 +1904,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         languageObservation = model.$language.dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async {
                 self?.makeMenu()
-                self?.settingsWindow?.title = L("Folioak 设置")
             }
         }
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Folioak"
-        window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow")
-        windowChrome = WindowChrome(window: window, model: model, title: "Folioak", workspace: true)
-        window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }, endTextEditing: { [weak window] in
-            // End editing only in this workspace, leaving list navigation intact.
-            if window?.firstResponder is NSTextView { window?.makeFirstResponder(nil) }
-        }))
-        window.minSize = NSSize(width: 820, height: 600)
-        if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
-            var frame = window.frame
-            frame.size = NSSize(width: max(frame.width, window.minSize.width), height: max(frame.height, window.minSize.height))
-            window.setFrame(frame, display: false)
-        }
+        createMainWindow()
         menuBar = MenuBarController(model: model, openWindow: { [weak self] in self?.showMainWindow() },
                                     openSettings: { [weak self] in self?.showSettings() }, quit: { NSApp.terminate(nil) }, disabled: { [weak self] in
             if self?.window?.isVisible == false { self?.showMainWindow() }
@@ -2154,6 +1925,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                           selector: #selector(checkUpdatesAutomatically), userInfo: nil, repeats: true)
         checkUpdatesAutomatically()
     }
+
+    private func createMainWindow(restoresFrame: Bool = true) {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Folioak"
+        if restoresFrame { window.setFrameAutosaveName("ArxivDownloaderWorkspaceWindow") }
+        windowChrome = WindowChrome(window: window, model: model, title: "Folioak", workspace: true)
+        window.contentView = NSHostingView(rootView: DownloaderView(model: model, showSettings: { [weak self] in self?.showSettings() }, endTextEditing: { [weak window] in
+            // End editing only in this workspace, leaving list navigation intact.
+            if window?.firstResponder is NSTextView { window?.makeFirstResponder(nil) }
+        }))
+        window.minSize = NSSize(width: 820, height: 600)
+        if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
+            var frame = window.frame
+            frame.size = NSSize(width: max(frame.width, window.minSize.width), height: max(frame.height, window.minSize.height))
+            window.setFrame(frame, display: false)
+        }
+        window.delegate = self
+    }
+
+    #if TESTING
+    func prepareWorkspaceForTesting() -> NSWindow {
+        createMainWindow(restoresFrame: false)
+        window.animationBehavior = .none
+        return window
+    }
+    #endif
 
     func applicationDidBecomeActive(_ notification: Notification) {
         guard window != nil else { return }
@@ -2177,7 +1975,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func checkForUpdates() {
         guard !presentingUpdate else { return }
         model.updates.dismiss()
-        if settingsWindow?.isKeyWindow != true { showMainWindow() }
+        showMainWindow()
         Task { [weak self] in await self?.model.updates.check(manual: true) }
     }
 
@@ -2188,9 +1986,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func presentUpdateIfPossible() {
         guard !presentingUpdate, NSApp.isActive, NSApp.modalWindow == nil,
               let notice = model.updates.notice, let window = window,
-              window.attachedSheet == nil, settingsWindow?.attachedSheet == nil else { return }
+              window.attachedSheet == nil else { return }
         // Background results wait until Folioak is active; they never bring it to the front.
-        let parent = settingsWindow?.isKeyWindow == true ? settingsWindow! : window
+        let parent = window
         guard parent.isVisible else { return }
         presentingUpdate = true
         let alert = UpdatePresentation.alert(for: notice, currentVersion: model.updates.currentVersion)
@@ -2262,32 +2060,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model.searchRequest = UUID()
     }
     @objc private func startDownload() {
-        guard NSApp.keyWindow === window, window.attachedSheet == nil, !model.busy else { return }
+        guard model.preferencesPage == nil, NSApp.keyWindow === window, window.attachedSheet == nil, !model.busy else { return }
         model.start()
     }
 
-    @objc private func showAbout() {
-        if aboutController == nil { aboutController = AboutWindowController() }
-        aboutController?.showWindow(nil)
+    func showPreferences(_ destination: WorkspacePreferencesPage) {
+        guard let window else { return }
+        if window.attachedSheet == nil { model.preferencesPage = destination }
+        showMainWindow()
     }
-
-    @objc private func showSettings() {
-        if settingsWindow == nil {
-            let view = NSHostingView(rootView: SettingsView(model: model))
-            let contentSize = view.fittingSize
-            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            panel.title = L("Folioak 设置")
-            settingsChrome = WindowChrome(window: panel, model: model, title: L("设置"), workspace: true)
-            panel.contentView = view
-            panel.setContentSize(NSSize(width: contentSize.width, height: contentSize.height + panel.frame.height - panel.contentLayoutRect.height))
-            panel.isReleasedWhenClosed = false
-            panel.delegate = self
-            panel.center()
-            settingsWindow = panel
-        }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
+    @objc private func showAbout() { showPreferences(.about) }
+    @objc private func showSettings() { showPreferences(.settings) }
 
     func makeMenu() {
         let menu = NSMenu()

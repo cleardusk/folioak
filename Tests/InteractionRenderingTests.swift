@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Vision
 
 private final class InteractionTestHost<Content: View>: NSHostingView<Content> {
     // Exercise canvas gestures without activating the test process on the user's desktop.
@@ -367,8 +368,8 @@ extension CoreTests {
         let originalTab = model.settingsTab
         defer { model.settingsTab = originalTab }
         model.settingsTab = "通用"
-        let view = NSHostingView(rootView: SettingsView(model: model))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 588), styleMask: [.borderless], backing: .buffered, defer: false)
+        let view = NSHostingView(rootView: WorkspaceSettingsView(model: model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         defer { window.orderOut(nil) }
         func header(_ tab: String) async throws -> [Bool] {
@@ -378,7 +379,7 @@ extension CoreTests {
             view.layoutSubtreeIfNeeded()
             guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("settings bitmap") }
             view.cacheDisplay(in: view.bounds, to: bitmap)
-            let scale = CGFloat(bitmap.pixelsWide) / 470
+            let scale = CGFloat(bitmap.pixelsWide) / 680
             let background = bitmap.colorAt(x: 0, y: 0)!
             // Selection changes the fill, but never the control's occupied rows.
             return (0..<Int(50 * scale)).map { y in
@@ -876,53 +877,39 @@ extension CoreTests {
         try expect(components.count == 4, "About reads all bundled tool and Python versions")
         let originalAppearance = NSApp.appearance
         defer { NSApp.appearance = originalAppearance; AppLocalization.shared.language = .chinese }
-        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let aboutSuite = "folioak-about-workspace-" + UUID().uuidString
+        let aboutPreferences = UserDefaults(suiteName: aboutSuite)!
+        defer { aboutPreferences.removePersistentDomain(forName: aboutSuite) }
+        let aboutModel = DownloadModel(preferences: aboutPreferences)
         for (language, suffix) in [(AppLanguage.chinese, "zh"), (.english, "en")] {
             AppLocalization.shared.language = language
             for (appearance, theme) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
                 NSApp.appearance = NSAppearance(named: appearance)
-                let controller = AboutWindowController()
-                controller.showWindow(nil)
-                guard let panel = controller.window, let content = panel.contentView else { throw TestFailure.failed("About window") }
-                defer { panel.orderOut(nil) }
+                let content = NSHostingView(rootView: WorkspaceAboutView(model: aboutModel)
+                    .environment(\.colorScheme, theme == "light" ? .light : .dark))
+                let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
+                    styleMask: [.borderless], backing: .buffered, defer: false)
+                panel.isReleasedWhenClosed = false; panel.contentView = content; panel.orderFront(nil)
+                defer { panel.close() }
+                try await Task.sleep(nanoseconds: 160_000_000)
                 content.layoutSubtreeIfNeeded(); panel.displayIfNeeded()
-                let views = descendants(content)
-                let labels = views.compactMap { $0 as? NSTextField }
-                let buttons = views.compactMap { $0 as? NSButton }
-                try expect(labels.contains { $0.stringValue == "Jianzhu Guo & Codex (GPT)" }, "About displays the licensed authors")
-                try expect(!views.contains { $0 is NSScrollView } && panel.contentLayoutRect.height < 600,
-                           "complete About content fits a compact window without a hidden credits scroll area")
-                for view in labels.map({ $0 as NSView }) + buttons.map({ $0 as NSView }) {
-                    let bounds = view.convert(view.bounds, to: content)
-                    try expect(content.bounds.insetBy(dx: -0.5, dy: -0.5).contains(bounds) && bounds.height > 0,
-                               "every About label and link is visible without scrolling: \(view)")
-                    try expect(view.bounds.width + 1 >= view.fittingSize.width, "About text and links are not truncated")
-                }
+                guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { throw TestFailure.failed("About workspace bitmap") }
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                guard let image = bitmap.cgImage else { throw TestFailure.failed("About workspace image") }
+                let recognition = VNRecognizeTextRequest()
+                recognition.recognitionLanguages = ["zh-Hans", "en-US"]; recognition.recognitionLevel = .accurate
+                try VNImageRequestHandler(cgImage: image).perform([recognition])
+                let visible = (recognition.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+                try expect(visible.contains("Folioak") && visible.contains("Jianzhu") && visible.contains("Codex"),
+                    "workspace About displays product and licensed authors: \(visible)")
                 for component in components {
-                    try expect(labels.contains { $0.stringValue == component.version } && buttons.contains {
-                        $0.identifier?.rawValue == "about.component." + component.name && $0.toolTip == component.url.absoluteString
-                    }, "About displays every actual bundled version with its upstream link")
+                    try expect(visible.contains(component.version), "workspace About displays the bundled \(component.name) version")
                 }
-                try expect(!buttons.contains { $0.identifier?.rawValue == "about.reference" } &&
-                           buttons.filter { !($0.toolTip ?? "").hasPrefix("/") }.allSatisfy { $0.image == nil },
-                           "About keeps implementation references and decorative outbound arrows out of the interface")
-                try expect(buttons.contains { $0.identifier?.rawValue == "about.repository" && $0.toolTip == AboutInformation.repository.absoluteString } &&
-                           buttons.contains { $0.identifier?.rawValue == "about.licenses" && FileManager.default.fileExists(atPath: $0.toolTip ?? "") },
-                           "project and bundled license links remain accessible")
+                try expect(visible.replacingOccurrences(of: " ", with: "").contains(L("项目主页").replacingOccurrences(of: " ", with: "")),
+                    "workspace About keeps the project link visible")
                 if CommandLine.arguments.contains("--snapshots") {
-                    let frame = content.superview ?? content
-                    guard let bitmap = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { throw TestFailure.failed("About snapshot") }
-                    frame.cacheDisplay(in: frame.bounds, to: bitmap)
                     try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/about-\(suffix)-\(theme).png"))
                 }
-                // One retained controller reopens the same window and updates its
-                // localized content even when the user changed language after closing.
-                panel.close(); controller.showWindow(nil)
-                try expect(controller.window === panel && panel.isVisible, "About reopens its retained window")
-                AppLocalization.shared.language = language == .chinese ? .english : .chinese
-                try await Task.sleep(nanoseconds: 50_000_000)
-                try expect(panel.title == L("关于 Folioak"), "About immediately follows language changes")
-                AppLocalization.shared.language = language
             }
         }
         let suite = "folioak-menu-bar-\(UUID().uuidString)", preferences = UserDefaults(suiteName: suite)!

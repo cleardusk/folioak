@@ -5,6 +5,11 @@ import UniformTypeIdentifiers
 
 typealias WorkspaceViewState<Value> = SwiftUI.State<Value>
 
+enum WorkspacePreferencesPage: String, CaseIterable {
+    case settings = "设置", about = "关于"
+    var icon: String { self == .settings ? "gearshape" : "info.circle" }
+}
+
 enum WorkspacePage: String, CaseIterable {
     case downloads = "下载", library = "文档库", media = "媒体库", logs = "日志"
     static let navigation: [Self] = [.downloads, .library, .media]
@@ -92,6 +97,10 @@ struct DownloaderView: View {
     var showSettings: () -> Void = {}
     var endTextEditing: () -> Void = {}
     @WorkspaceViewState private var collapsed = false
+    @WorkspaceViewState private var hasOpenedSettings = false
+    @WorkspaceViewState private var previousPreferencesPage: WorkspacePreferencesPage?
+    @WorkspaceViewState private var restoreListFocus = false
+    private var workspaceActive: Bool { model.preferencesPage == nil }
     @WorkspaceViewState private var inputFocused = false
     @WorkspaceViewState private var query = ""
     @WorkspaceViewState private var searchExpanded = false
@@ -154,14 +163,30 @@ struct DownloaderView: View {
             sidebar
             Rectangle().fill(ThemePalette.color(palette.border).opacity(0.55)).frame(width: 1)
             VStack(alignment: .leading, spacing: 0) {
-                header
-                VStack(alignment: .leading, spacing: 16) {
-                    if page == .downloads { composer }
-                    if page == .logs { logContent } else {
-                        papers.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.recordAnimation)
+                Group {
+                    if let destination = model.preferencesPage {
+                        HStack {
+                            Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.page)
+                            Spacer()
+                        }.frame(height: WorkspaceMetrics.headerHeight)
+                    } else { header }
+                }
+                ZStack(alignment: .topLeading) {
+                    workspaceContent
+                        .opacity(workspaceActive ? 1 : 0)
+                        .disabled(!workspaceActive)
+                        .allowsHitTesting(workspaceActive)
+                        .accessibilityHidden(!workspaceActive)
+                    if hasOpenedSettings || model.preferencesPage == .settings {
+                        WorkspaceSettingsView(model: model)
+                            .opacity(model.preferencesPage == .settings ? 1 : 0)
+                            .disabled(model.preferencesPage != .settings)
+                            .allowsHitTesting(model.preferencesPage == .settings)
+                            .accessibilityHidden(model.preferencesPage != .settings)
                     }
+                    if model.preferencesPage == .about { WorkspaceAboutView(model: model) }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                footer.padding(.top, 12).padding(.bottom, 16)
+                    .animation(nil, value: model.preferencesPage)
             }.padding(.horizontal, 24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -174,13 +199,28 @@ struct DownloaderView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
         .ignoresSafeArea(.container, edges: .top)
         .onReceive(model.$listRequest.dropFirst()) { _ in
+            model.preferencesPage = nil
             if page == .logs { focusListOnArrival = true; page = .downloads }
             else { focusList() }
         }
         .onReceive(model.$editRequest.dropFirst()) { _ in
+            model.preferencesPage = nil
             listFocus = nil; focusListOnArrival = false; page = .downloads; inputFocused = true
         }
         .onReceive(model.$searchRequest.dropFirst()) { openSearch($0) }
+        .onAppear { if model.preferencesPage == .settings { hasOpenedSettings = true } }
+        .onChange(of: model.preferencesPage) { destination in
+            if destination == .settings { hasOpenedSettings = true }
+            if destination != nil {
+                if previousPreferencesPage == nil { restoreListFocus = listFocused || selectedID != nil }
+                searchFocusRequest = nil; searchFocused = false; inputFocused = false; listFocus = nil
+                endTextEditing()
+            } else if restoreListFocus {
+                restoreListFocus = false
+                listFocus = UUID()
+            }
+            previousPreferencesPage = destination
+        }
         .onChange(of: searchFocused) { focused in
             if !focused && query.isEmpty { searchExpanded = false }
         }
@@ -241,7 +281,19 @@ struct DownloaderView: View {
             AssetRenameView(model: model, request: request)
         }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
-        .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
+        .onReceive(model.$batchID.dropFirst()) { _ in model.preferencesPage = nil; page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
+    }
+
+    private var workspaceContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 16) {
+                if page == .downloads { composer }
+                if page == .logs { logContent } else {
+                    papers.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.recordAnimation)
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            footer.padding(.top, 12).padding(.bottom, 16)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func focusList() {
@@ -275,7 +327,7 @@ struct DownloaderView: View {
     }
 
     private func openSearch(_ request: UUID) {
-        guard hasSearchContent else { return }
+        guard workspaceActive, hasSearchContent else { return }
         listFocus = nil; focusListOnArrival = false; inputFocused = false
         searchFocusRequest = (request, model.editRequest, model.listRequest, page)
         searchExpanded = true
@@ -297,9 +349,9 @@ struct DownloaderView: View {
             }.padding(.top, 34).padding(.bottom, 10)
             VStack(spacing: 6) {
                 ForEach(WorkspacePage.navigation, id: \.self) { destination in
-                    Button { page = destination } label: {
+                    Button { model.preferencesPage = nil; page = destination } label: {
                         HStack(spacing: 13) {
-                            SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: destination == page)
+                            SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: workspaceActive && destination == page)
                                 .font(.system(size: 17, weight: .regular)).frame(width: 24, height: 24)
                             HStack {
                                 Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
@@ -312,18 +364,19 @@ struct DownloaderView: View {
                         .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped()
                         .contentShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .buttonStyle(SidebarButtonStyle(palette: palette, selected: destination == page))
+                    .buttonStyle(SidebarButtonStyle(palette: palette, selected: workspaceActive && destination == page))
                     .help(L(destination.rawValue)).accessibilityLabel(L(destination.rawValue))
-                    .accessibilityAddTraits(destination == page ? .isSelected : [])
+                    .accessibilityAddTraits(workspaceActive && destination == page ? .isSelected : [])
                 }
             }
             .overlay(alignment: .topLeading) {
-                if let index = WorkspacePage.navigation.firstIndex(of: page) {
+                if workspaceActive, let index = WorkspacePage.navigation.firstIndex(of: page) {
                     SidebarSelectionIndicator(index: index, color: accent)
                 }
             }
             Spacer()
-            Button { logItem = nil; page = .logs } label: {
+            VStack(alignment: .leading, spacing: 6) {
+            Button { model.preferencesPage = nil; logItem = nil; page = .logs } label: {
                 HStack(spacing: WorkspaceMetrics.Space.regular) {
                     Image(systemName: WorkspacePage.logs.icon).font(.system(size: 17)).frame(width: 24)
                     Text(L("日志")).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
@@ -331,21 +384,33 @@ struct DownloaderView: View {
                     Spacer(minLength: 0)
                 }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
                     .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
-            }.buttonStyle(SidebarButtonStyle(palette: palette, selected: page == .logs))
-                .overlay(alignment: .topLeading) {
-                    if page == .logs { SidebarSelectionIndicator(index: 0, color: accent) }
-                }
+            }.buttonStyle(SidebarButtonStyle(palette: palette, selected: workspaceActive && page == .logs))
                 .foregroundStyle(secondary).help(L("查看日志")).accessibilityLabel(L("日志"))
-                .accessibilityAddTraits(page == .logs ? .isSelected : [])
-            Button(action: showSettings) {
-                HStack(spacing: 13) {
-                    Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 24)
-                    Text(L("设置")).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
-                        .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
-                    Spacer(minLength: 0)
-                }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
-                    .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
-            }.buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary).help(L("设置（⌘,）")).accessibilityLabel(L("设置"))
+                .accessibilityAddTraits(workspaceActive && page == .logs ? .isSelected : [])
+            ForEach(WorkspacePreferencesPage.allCases, id: \.self) { destination in
+                Button {
+                    model.preferencesPage = destination
+                    if destination == .settings { showSettings() }
+                } label: {
+                    HStack(spacing: 13) {
+                        Image(systemName: destination.icon).font(.system(size: 17)).frame(width: 24)
+                        Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.body)
+                            .foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                            .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
+                        Spacer(minLength: 0)
+                    }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
+                        .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
+                }.buttonStyle(SidebarButtonStyle(palette: palette, selected: model.preferencesPage == destination))
+                    .foregroundStyle(secondary)
+                    .help(L(destination == .settings ? "设置（⌘,）" : "关于 Folioak"))
+                    .accessibilityLabel(L(destination.rawValue))
+                    .accessibilityAddTraits(model.preferencesPage == destination ? .isSelected : [])
+            }
+            }.overlay(alignment: .topLeading) {
+                if model.preferencesPage != nil || page == .logs {
+                    SidebarSelectionIndicator(index: model.preferencesPage == .about ? 2 : model.preferencesPage == .settings ? 1 : 0, color: accent)
+                }
+            }
         }.padding(.horizontal, 12).padding(.bottom, 16).frame(width: collapsed ? 74 : 190)
             .background(ThemePalette.color(palette.sidebar))
             .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
@@ -638,7 +703,7 @@ struct DownloaderView: View {
                     .background(PaperListKeyboard(request: listFocus, detailsShortcut: model.shortcuts[.details], allowsHorizontalNavigation: displayMode == .grid, allowsMultipleSelection: libraryCollection != nil, focusChanged: { if page == listPage { listFocused = $0 } }, didFocus: { request in
                         if listFocus == request { listFocus = nil }
                     }) { action in
-                        guard !rows.isEmpty else { return }
+                        guard workspaceActive, !rows.isEmpty else { return }
                         if action == .selectAll {
                             selection.selectAll(rows.map(\.id))
                         } else if let offset = LibraryGridLayout.offset(action, columns: displayMode == .grid ? LibraryGridLayout.columns(width: viewport.size.width) : 1) {
@@ -677,7 +742,7 @@ struct DownloaderView: View {
                 LibraryRow(paper: paper, model: model, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, grid: displayMode == .grid, select: { selectItem(item.id) })
                     .id(item.id).transition(recordTransition)
             } else {
-            DownloadRow(item: item, model: model, inMediaLibrary: page == .media, grid: displayMode == .grid, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectItem(item.id) })
+            DownloadRow(item: item, model: model, inMediaLibrary: page == .media, grid: displayMode == .grid, selected: selection.ids.contains(item.id), selectionActive: listSelectionActive, authenticate: { model.settingsTab = "浏览器认证"; model.preferencesPage = .settings; showSettings() }, showLogs: { logItem = item; logLevel = nil; query = ""; page = .logs }, select: { selectItem(item.id) })
                 .contentShape(Rectangle())
                 .onTapGesture { selectItem(item.id) }
                 .id(item.id).transition(recordTransition)

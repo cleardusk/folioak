@@ -747,3 +747,19 @@
 "重命名未完成：%@" = "Rename failed: %@";
 
 "保存失败，恢复原状态时发生错误：%@" = "Saving failed and the original state could not be restored: %@";
+
+"命名规则" = "Naming Rules";
+
+"组件" = "Component";
+
+"版本" = "Version";
+
+"许可证" = "License";
+
+"放弃更改" = "Discard Changes";
+
+"更改尚未保存" = "Unsaved changes";
+
+"恢复当前资产类型的默认命名规则" = "Restore the default naming rule for this asset type";
+
+"关于" = "About";

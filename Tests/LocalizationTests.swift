@@ -30,8 +30,8 @@ extension CoreTests {
         view.layoutSubtreeIfNeeded()
         guard let input = editor(in: view) else { throw TestFailure.failed("localized input view") }
         input.setSelectedRange(NSRange(location: 2, length: 3))
-        let settings = NSHostingView(rootView: SettingsView(model: model))
-        let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 588), styleMask: [.borderless], backing: .buffered, defer: false)
+        let settings = NSHostingView(rootView: WorkspaceSettingsView(model: model))
+        let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520), styleMask: [.borderless], backing: .buffered, defer: false)
         settingsWindow.contentView = settings
         let namingSettings = NSHostingView(rootView: AssetNamingSettings(model: model, palette: model.theme.palette(dark: false)))
         let namingWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 470), styleMask: [.borderless], backing: .buffered, defer: false)

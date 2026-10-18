@@ -612,7 +612,7 @@ extension CoreTests {
                 model.settingsTab = "浏览器认证"
                 for state in [BrowserAuthenticationReadState.read, .empty, .failed, .rejected] {
                     model.browserAuthentication.receive(state, for: model.browserAuthentication.selection!, host: "v.douyin.com")
-                    try await capture(SettingsView(model: model), width: 470, height: 588, name: "settings-\(state)-\(suffix)", scheme: scheme)
+                    try await capture(WorkspaceSettingsView(model: model), width: 680, height: 520, name: "settings-\(state)-\(suffix)", scheme: scheme)
                 }
                 try await capture(DownloaderView(model: model, page: .logs, logItem: item), width: 780, height: 540, name: "task-logs-\(suffix)", scheme: scheme)
                 try await capture(DownloaderView(model: model), width: 780, height: 540, name: "recovery-\(suffix)", scheme: scheme)

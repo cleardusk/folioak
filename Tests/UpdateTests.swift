@@ -326,8 +326,8 @@ extension CoreTests {
                 let model = DownloadModel(preferences: preferences)
                 model.language = language
                 let suffix = "\(language)-\(scheme == .light ? "light" : "dark")"
-                let host = NSHostingView(rootView: SettingsView(model: model).environment(\.colorScheme, scheme))
-                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 588), styleMask: [.borderless], backing: .buffered, defer: false)
+                let host = NSHostingView(rootView: WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520), styleMask: [.borderless], backing: .buffered, defer: false)
                 window.contentView = host
                 window.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
                 try capture(host, name: "settings-" + suffix)

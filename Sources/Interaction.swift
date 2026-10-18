@@ -12,11 +12,13 @@ import SwiftUI
 }
 
 struct FileRowClickRegion: NSViewRepresentable {
+    @Environment(\.isEnabled) private var enabled
     let target: FileRowClickTarget
     var controls = false
     var open: () -> Void = {}
     func makeNSView(context: Context) -> Region { Region() }
     func updateNSView(_ view: Region, context: Context) {
+        view.enabled = enabled
         view.target = target; view.open = open
         view.isControls = controls
         if controls { target.controls = view }
@@ -26,6 +28,7 @@ struct FileRowClickRegion: NSViewRepresentable {
     final class Region: NSView, NSGestureRecognizerDelegate {
         weak var target: FileRowClickTarget?
         var open: () -> Void = {}
+        var enabled = true
         var isControls = false
         private var click: NSClickGestureRecognizer?
         #if TESTING
@@ -34,7 +37,7 @@ struct FileRowClickRegion: NSViewRepresentable {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); configure() }
         func configure() {
-            if isControls || window == nil || target?.active != true {
+            if !enabled || isControls || window == nil || target?.active != true {
                 if let click { click.view?.removeGestureRecognizer(click); self.click = nil }
                 return
             }
@@ -64,7 +67,7 @@ struct FileRowClickRegion: NSViewRepresentable {
         private func allowsClick(at point: NSPoint) -> Bool {
             // The recognizer is on the hosting root. Cached offscreen rows must
             // not respond to clicks in the header or outside the scroll clip.
-            guard target?.active == true, !isHiddenOrHasHiddenAncestor,
+            guard enabled, target?.active == true, !isHiddenOrHasHiddenAncestor,
                   bounds.intersection(visibleRect).contains(point) else { return false }
             if let controls = target?.controls, controls.window === window,
                controls.bounds.intersection(controls.visibleRect).contains(controls.convert(point, from: self)) { return false }
@@ -241,6 +244,7 @@ struct FileListSelection {
 }
 
 struct PaperListKeyboard: NSViewRepresentable {
+    @Environment(\.isEnabled) private var enabled
     @ObservedObject private var localization = AppLocalization.shared
     enum Action {
         case up, down, left, right, extendUp, extendDown, extendLeft, extendRight, selectAll, preview, open, diagnostics
@@ -255,12 +259,15 @@ struct PaperListKeyboard: NSViewRepresentable {
     let action: (Action) -> Void
     func makeNSView(context: Context) -> KeyView {
         let view = KeyView(request: request, didFocus: didFocus, action: action)
+        view.enabled = enabled
         view.focusChanged = focusChanged
         view.allowsHorizontalNavigation = allowsHorizontalNavigation
         view.allowsMultipleSelection = allowsMultipleSelection
         return view
     }
     func updateNSView(_ view: KeyView, context: Context) {
+        view.enabled = enabled
+        if !enabled, view.window?.firstResponder === view { view.window?.makeFirstResponder(nil) }
         view.setAccessibilityLabel(L(allowsMultipleSelection ?
             "文件列表，方向键选择，Shift 方向键连续选择，Command A 全选，空格预览，Return 打开，Command I 查看详情" :
             "文件列表，方向键选择，空格预览，Return 打开，Command I 查看详情"))
@@ -275,6 +282,7 @@ struct PaperListKeyboard: NSViewRepresentable {
         view.focusIfRequested()
     }
     final class KeyView: NSView {
+        var enabled = true
         var request: UUID?
         var detailsShortcut = AppShortcut(key: "i")
         var allowsHorizontalNavigation = false
@@ -321,17 +329,18 @@ struct PaperListKeyboard: NSViewRepresentable {
             return accepted
         }
         func focusIfRequested() {
-            guard let request, request != fulfilledRequest else { return }
+            guard enabled, let request, request != fulfilledRequest else { return }
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.request == request, self.fulfilledRequest != request,
+                guard let self, self.enabled, self.request == request, self.fulfilledRequest != request,
                       let window = self.window, window.makeFirstResponder(self) else { return }
                 self.fulfilledRequest = request
                 self.didFocus(request)
             }
         }
-        override var acceptsFirstResponder: Bool { true }
+        override var acceptsFirstResponder: Bool { enabled }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func keyDown(with event: NSEvent) {
+            guard enabled else { super.keyDown(with: event); return }
             let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
             if detailsShortcut.matches(event) { action(.diagnostics); return }
             if allowsMultipleSelection {

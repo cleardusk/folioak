@@ -61,12 +61,15 @@ struct AppShortcut: Codable, Equatable {
 }
 
 struct ShortcutRecorder: NSViewRepresentable {
+    @Environment(\.isEnabled) private var enabled
     @ObservedObject private var localization = AppLocalization.shared
     let shortcut: AppShortcut
     let changed: (AppShortcut) -> String?
     let report: (String?) -> Void
     func makeNSView(context: Context) -> Recorder { Recorder() }
     func updateNSView(_ view: Recorder, context: Context) {
+        view.isEnabled = enabled
+        if !enabled { view.stop(); if view.window?.firstResponder === view { view.window?.makeFirstResponder(nil) } }
         view.setAccessibilityLabel(L("修改快捷键"))
         view.shortcut = shortcut; view.changed = changed; view.report = report
         if !view.recording { view.title = shortcut.label; view.setAccessibilityValue(shortcut.label) }
@@ -83,8 +86,9 @@ struct ShortcutRecorder: NSViewRepresentable {
             setAccessibilityLabel(L("修改快捷键"))
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
-        override var acceptsFirstResponder: Bool { true }
+        override var acceptsFirstResponder: Bool { isEnabled }
         @objc private func beginRecording() {
+            guard isEnabled else { return }
             window?.makeFirstResponder(self); recording = true; title = L("请按组合键…"); setAccessibilityValue(title); report?(nil)
             if monitor == nil {
                 monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
@@ -100,7 +104,7 @@ struct ShortcutRecorder: NSViewRepresentable {
                 observer = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in self?.stop() }
             }
         }
-        private func stop() {
+        func stop() {
             if recording { report?(nil) }
             recording = false; title = shortcut.label; setAccessibilityValue(shortcut.label)
             if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }

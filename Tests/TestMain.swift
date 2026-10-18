@@ -110,6 +110,14 @@ struct CoreTests {
         defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--preferences-only") {
+                try await WorkspacePreferencesTests.run(snapshots: CommandLine.arguments.contains("--snapshots"))
+                try await settingsLayoutTests()
+                try await sidebarIndicatorUITests()
+                try await localizationTests()
+                try await aboutAndMenuBarTests()
+                return
+            }
             if CommandLine.arguments.contains("--library-polish-only") || CommandLine.arguments.contains("--library-details-only") {
                 let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-polish-" + UUID().uuidString)
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1086,11 +1094,11 @@ struct CoreTests {
                     }
                 }
                 model.settingsTab = "通用"
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-\(suffix)", title: "设置")
+                try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "settings-\(suffix)", title: "设置")
                 model.settingsTab = "快捷键"
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "shortcuts-\(suffix)", title: "设置")
+                try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "shortcuts-\(suffix)", title: "设置")
                 model.settingsTab = "浏览器认证"
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "browser-authentication-\(suffix)", title: "设置")
+                try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "browser-authentication-\(suffix)", title: "设置")
                 model.settingsTab = "通用"
             }
         }
@@ -1101,10 +1109,10 @@ struct CoreTests {
             app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
             for naming in NamingStyle.allCases {
                 model.naming = naming
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-long-\(naming.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
+                try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "settings-long-\(naming.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
             }
             model.busy = true
-            try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-busy-\(scheme == .light ? "light" : "dark")", title: "设置")
+            try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "settings-busy-\(scheme == .light ? "light" : "dark")", title: "设置")
             model.busy = false
         }
         model.directory = directory
@@ -1126,7 +1134,7 @@ struct CoreTests {
         for scheme in [ColorScheme.light, .dark] {
             app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
             try capture(DownloaderView(model: model).environment(\.colorScheme, scheme), width: 820, height: 600, name: "generic-pdf-\(scheme == .light ? "light" : "dark")")
-            try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "generic-settings-\(scheme == .light ? "light" : "dark")", title: "设置")
+            try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "generic-settings-\(scheme == .light ? "light" : "dark")", title: "设置")
         }
         let savedLanguage = model.language
         for language in [AppLanguage.chinese, .english] {
@@ -1134,13 +1142,13 @@ struct CoreTests {
             for scheme in [ColorScheme.light, .dark] {
                 app.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
                 model.busy = true
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "settings-records-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
+                try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "settings-records-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
                 model.busy = false
                 model.settingsTab = "浏览器认证"
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "authentication-anonymous-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
+                try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "authentication-anonymous-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
                 model.browserAuthentication.select(.chrome)
                 model.browserAuthentication.setEnabled(true)
-                try capture(SettingsView(model: model).environment(\.colorScheme, scheme), width: 470, name: "authentication-enabled-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
+                try capture(WorkspaceSettingsView(model: model).environment(\.colorScheme, scheme), width: 680, name: "authentication-enabled-\(language.rawValue)-\(scheme == .light ? "light" : "dark")", title: "设置")
                 model.browserAuthentication.clear()
                 model.settingsTab = "通用"
             }
