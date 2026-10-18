@@ -36,6 +36,7 @@ extension CoreTests {
                 let window = LibraryPolishWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),
                     styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false; window.hidesOnDeactivate = false
+                window.animationBehavior = .none
                 window.contentView = host; window.makeKeyAndOrderFront(nil)
                 defer { window.close() }
                 func settle() async {
@@ -53,15 +54,34 @@ extension CoreTests {
                 }
                 func click(_ point: NSPoint, modifiers: NSEvent.ModifierFlags = [], tracksMouse: Bool = false) async throws {
                     window.makeKeyAndOrderFront(nil)
+                    func describe(_ event: NSEvent) -> String {
+                        "type=\(event.type.rawValue) window=\(event.windowNumber) eventNumber=\(event.eventNumber) location=\(event.locationInWindow) modifiers=\(event.modifierFlags.rawValue) timestamp=\(event.timestamp)"
+                    }
+                    func dequeueOwn(_ expected: NSEvent, waits: Bool) -> (event: NSEvent?, seen: String) {
+                        var deferred: [NSEvent] = []
+                        // Preserve unrelated events in their original order. Posting
+                        // them back does not replace NSApp.currentEvent.
+                        defer { for event in deferred.reversed() { NSApp.postEvent(event, atStart: true) } }
+                        let deadline = Date(timeIntervalSinceNow: 1)
+                        repeat {
+                            if let queued = NSApp.nextEvent(matching: NSEvent.EventTypeMask(rawValue: 1 << expected.type.rawValue),
+                                until: waits ? deadline : .distantPast, inMode: .default, dequeue: true) {
+                                if queued.type == expected.type && queued.windowNumber == expected.windowNumber {
+                                    return (queued, deferred.suffix(12).map(describe).joined(separator: " | "))
+                                }
+                                deferred.append(queued)
+                            } else if !waits { break }
+                        } while Date() < deadline
+                        return (nil, deferred.suffix(12).map(describe).joined(separator: " | "))
+                    }
                     func send(_ event: NSEvent) throws {
                         // The normal event-loop dequeue updates NSApp.currentEvent.
                         // Calling sendEvent directly leaves it stale, so a SwiftUI
                         // tap would lose this click's Command/Shift modifiers.
                         NSApp.postEvent(event, atStart: true)
-                        guard let queued = NSApp.nextEvent(matching: NSEvent.EventTypeMask(rawValue: 1 << event.type.rawValue),
-                            until: Date(timeIntervalSinceNow: 0.1), inMode: .default, dequeue: true),
-                              queued.windowNumber == window.windowNumber else {
-                            throw TestFailure.failed("library click dequeues its own native event")
+                        let result = dequeueOwn(event, waits: true)
+                        guard let queued = result.event else {
+                            throw TestFailure.failed("library click dequeues its own native event within 1s: page=\(page.rawValue) mode=\(mode) style=\(scrollerStyle) target=\(point) hit=\(String(describing: host.hitTest(point))) expected={\(describe(event))} encountered={\(result.seen)}")
                         }
                         NSApp.sendEvent(queued)
                     }
@@ -79,8 +99,7 @@ extension CoreTests {
                         // Disabled scrollbars need not enter tracking. Deliver
                         // any release still queued rather than leaking it into
                         // the next independent click/menu scenario.
-                        if let release = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) {
-                            try expect(release.windowNumber == window.windowNumber, "tracked click releases its own test window")
+                        if let release = dequeueOwn(up, waits: false).event {
                             NSApp.sendEvent(release)
                         }
                         await settle()
