@@ -108,7 +108,9 @@ struct CoreTests {
 
     @MainActor static func runTests() async {
         defer { print("PASS core test suite completed") }
+        // Localized assertions use this baseline; fixtures that change it must restore it.
         AppLocalization.shared.language = .chinese
+        print("TEST language: system=\(AppLanguage.system.code()), suite=\(L10n.language.rawValue)")
         do {
             if CommandLine.arguments.contains("--trace-only") {
                 try await interactionTraceTests()
@@ -257,7 +259,10 @@ struct CoreTests {
             if CommandLine.arguments.contains("--progress-only") { return }
             try await assetRenameTests(root: root, pdf: pdf)
             try await libraryBlankSelectionUITests(root: root, pdf: pdf)
+            let languageBeforeSidebar = AppLocalization.shared.language
             try await sidebarIndicatorUITests()
+            try expect(AppLocalization.shared.language == languageBeforeSidebar && L10n.language == languageBeforeSidebar,
+                "sidebar fixture restores the shared language before later localized assertions")
             try await libraryDetailsPolishTests(root: root, pdf: pdf)
             try await libraryGridTests(root: root, pdf: pdf)
             if CommandLine.arguments.contains("--grid-only") { return }

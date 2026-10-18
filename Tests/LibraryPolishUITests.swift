@@ -262,7 +262,9 @@ extension CoreTests {
     @MainActor static func sidebarIndicatorUITests() async throws {
         let suite = "folioak-sidebar-indicator-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
-        defer { preferences.removePersistentDomain(forName: suite) }
+        let originalLanguage = AppLocalization.shared.language
+        // AppDelegate applies the fresh model's .system language to the singleton.
+        defer { preferences.removePersistentDomain(forName: suite); AppLocalization.shared.language = originalLanguage }
         let model = DownloadModel(preferences: preferences)
         model.theme = .graphite
         let previousMenu = NSApp.mainMenu

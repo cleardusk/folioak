@@ -90,6 +90,9 @@ extension CoreTests {
     }
 
     @MainActor static func browserAuthenticationTests(root: URL) throws {
+        let originalLanguage = AppLocalization.shared.language
+        AppLocalization.shared.language = .chinese
+        defer { AppLocalization.shared.language = originalLanguage }
         let suite = "folioak-browser-auth-tests-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
@@ -452,6 +455,9 @@ private actor AnonymousFallbackProbe {
 
 extension CoreTests {
     @MainActor static func anonymousFallbackTests(root: URL, image: URL) async throws {
+        let originalLanguage = AppLocalization.shared.language
+        AppLocalization.shared.language = .chinese
+        defer { AppLocalization.shared.language = originalLanguage }
         let selection = try BrowserAuthenticationSelection(browser: .chrome, profile: "Private Fixture Profile")
         let url = URL(string: "https://youtu.be/anonymous-fallback-fixture")!
         let anonymousKey = MediaDownloader.stagingKey(url, directory: root, format: .automatic, authentication: nil)
