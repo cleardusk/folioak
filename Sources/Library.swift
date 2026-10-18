@@ -156,7 +156,7 @@ extension DownloadModel {
         change(&papers[index])
     }
     func importPDFs() {
-        guard !importingPDFs, canChangeLibrary() else { return }
+        guard !importingPDFs, !assetRenameInProgress, canChangeLibrary() else { return }
         let panel = NSOpenPanel(); panel.title = L("导入 PDF"); panel.allowedContentTypes = [.pdf]; panel.allowsMultipleSelection = true
         present(panel) { [weak self] response in
             guard response == .OK, let self else { return }
@@ -164,7 +164,7 @@ extension DownloadModel {
         }
     }
     func importPDFs(_ urls: [URL]) {
-        guard !importingPDFs, canChangeLibrary() else { return }
+        guard !importingPDFs, !assetRenameInProgress, canChangeLibrary() else { return }
         notice = nil
         guard urls.count <= ResourceLimits.batchCount else { notice = "每次最多导入 200 篇。"; return }
         importingPDFs = true
@@ -185,7 +185,7 @@ extension DownloadModel {
         }
     }
     func relinkPaper(_ id: UUID) {
-        guard canChangeLibrary() else { return }
+        guard !assetRenameInProgress, canChangeLibrary() else { return }
         guard let paper = papers.first(where: { $0.id == id }) else { return }
         let ext = paper.file?.pathExtension.lowercased() ?? "pdf"
         let panel = NSOpenPanel(); panel.title = L("重新关联文件")
@@ -200,7 +200,7 @@ extension DownloadModel {
         }
     }
     func relinkPaper(_ id: UUID, to url: URL) async throws {
-        guard canChangeLibrary(), let paper = papers.first(where: { $0.id == id }) else { return }
+        guard !assetRenameInProgress, canChangeLibrary(), let paper = papers.first(where: { $0.id == id }) else { return }
         let ext = paper.file?.pathExtension.lowercased() ?? "pdf"
         let imported = try await Task.detached(priority: .userInitiated) { () -> LibraryPaper in
             if ext == "pdf" { return try LibraryStore.imported(url) }
@@ -208,6 +208,7 @@ extension DownloadModel {
             try await GenericFileStorage.validate(url, extension: ext)
             return LibraryPaper(DownloadItem(original: url.lastPathComponent, state: .saved, savedURL: url.standardizedFileURL))
         }.value
+        guard !assetRenameInProgress, papers.first(where: { $0.id == id })?.file == paper.file else { return }
         changePaper(id) { $0.file = imported.file; $0.pages = imported.pages; $0.missing = false }
         let related = Set([paper.id, paper.taskID].compactMap { $0 })
         func relinked(_ item: DownloadItem) -> DownloadItem {
@@ -225,7 +226,7 @@ extension DownloadModel {
         saveWorkspace()
     }
     func checkPaperVersions(_ ids: [UUID]) {
-        guard versionWorker == nil, canChangeLibrary() else { return }
+        guard versionWorker == nil, !assetRenameInProgress, canChangeLibrary() else { return }
         let wanted = Set(ids)
         let selected = papers.filter { wanted.contains($0.id) && !$0.removed && $0.reference != nil }
         guard !selected.isEmpty else { return }
@@ -265,6 +266,7 @@ extension DownloadModel {
         diagnosticItem = paper.downloadItem
     }
     func openPaper(_ paper: LibraryPaper, preview: Bool = false) {
+        guard !assetRenameInProgress else { return }
         guard let file = localFile(paper.downloadItem), FileManager.default.isReadableFile(atPath: file.path) else {
             changePaper(paper.id) { $0.missing = true }; notice = "文件已移动或不可读，请重新关联。"; return
         }
@@ -274,29 +276,6 @@ extension DownloadModel {
             changePaper(paper.id) { $0.read = true; $0.missing = false }
         }
         if libraryWritable { notice = nil }
-    }
-}
-
-struct LibraryEditView: View {
-    @ObservedObject private var localization = AppLocalization.shared
-    @ObservedObject var model: DownloadModel
-    let paper: LibraryPaper
-    @LibraryViewState private var title = ""
-    @LibraryViewState private var tags = ""
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text(L("整理文档")).font(.system(size: 18, weight: .medium))
-            VStack(alignment: .leading, spacing: 8) { Text(L("标题")); TextField(L("标题"), text: $title) }
-            VStack(alignment: .leading, spacing: 8) { Text(L("标签")); TextField(L("用逗号分隔"), text: $tags) }
-            HStack { Spacer(); Button(L("取消")) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(L("完成")) {
-                    model.changePaper(paper.id) { $0.title = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(ResourceLimits.titleCharacters)); $0.tags = LibraryPaper.cleanTags(tags) }
-                    dismiss()
-                }.keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }.font(.system(size: 12)).padding(24).frame(width: 440)
-            .onAppear { title = paper.title; tags = paper.tags.joined(separator: ", ") }
     }
 }
 
@@ -387,32 +366,30 @@ struct LibraryRow: View {
     @ViewBuilder private var actions: some View {
         if !paper.removed {
             Button(L("快速预览")) { select(); model.openPaper(paper, preview: true) }.disabled(paper.missing)
+            Button(L("重命名…")) { select(); model.requestAssetRename(paper.id, in: .documents) }
+                .disabled(!model.canRenameAsset(paper.id, in: .documents))
+            if let file = paper.file {
+                Button(L("在 Finder 中显示")) { NSWorkspace.shared.activateFileViewerSelecting([file]) }.disabled(paper.missing)
+            }
+            Divider()
             Button(paper.favorite ? L("取消收藏") : L("收藏")) { model.changePaper(paper.id) { $0.favorite.toggle() } }
             Button(paper.read ? L("标为未读") : L("标为已读")) { model.changePaper(paper.id) { $0.read.toggle() } }
-            Button(L("整理文档…")) { select(); model.editingPaper = paper }
-            Divider()
-            if paper.reference != nil {
-                Button(L("检查新版本")) { model.checkPaperVersions([paper.id]) }.disabled(!model.checkingVersions.isEmpty)
-                if paper.hasUpdate { Button(L("下载 v\(paper.latest!.version!)")) { model.downloadLatest(paper) }.disabled(model.busy) }
-                if let date = paper.checkedAt { Text(L("上次检查：\(L10n.date(date, time: .shortened))")) }
-            }
-            if let source = paper.source {
-                Button(L("打开来源页面")) { model.openSource(paper.downloadItem) }
-                Button(L("复制来源链接")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.webURL.absoluteString, forType: .string) }
-                if paper.missing { Button(L("重新下载")) { model.retryFromLibrary(paper.downloadItem) }.disabled(model.busy) }
-            }
-            if let file = paper.file { Button(L("在 Finder 中显示")) { NSWorkspace.shared.activateFileViewerSelecting([file]) } }
-            Button(L("重新关联文件…")) { model.relinkPaper(paper.id) }
             Button(L("详情…")) { select(); model.showPaperDetails(paper) }
+            if paper.hasUpdate {
+                Button(L("下载 v\(paper.latest!.version!)")) { model.downloadLatest(paper) }.disabled(model.busy)
+            }
+            if paper.missing {
+                Button(L("重新关联文件…")) { model.relinkPaper(paper.id) }
+                if paper.source != nil { Button(L("重新下载")) { model.retryFromLibrary(paper.downloadItem) }.disabled(model.busy) }
+            }
             Divider()
-            Button(L("移出文档库")) { Task { _ = await model.setLibraryRemoved([paper.id], in: .documents, removed: true) } }
+            Button(L("从文档库移除")) { Task { _ = await model.setLibraryRemoved([paper.id], in: .documents, removed: true) } }
                 .help(L("保留文件，可从已移除的文档中恢复")).disabled(!model.canManageLibrary(.documents))
         } else {
             Button(L("恢复到文档库")) { Task { _ = await model.setLibraryRemoved([paper.id], in: .documents, removed: false) } }
                 .disabled(!model.canManageLibrary(.documents))
         }
-        Divider()
-        Button(L("将文件移到废纸篓…"), role: .destructive) { model.requestFileTrash([paper.id], in: .documents) }
+        Button(L("移到废纸篓…"), role: .destructive) { model.requestFileTrash([paper.id], in: .documents) }
             .disabled(!model.canTrashFiles([paper.id], in: .documents))
     }
 }

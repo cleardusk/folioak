@@ -33,19 +33,21 @@ private struct SidebarToggleOutline: Shape {
 // Using the current geometry as the origin keeps quick reversals continuous.
 struct SelectionIndicatorMotion {
     static let duration = 0.320
+    static let sidebarDuration = 0.220
     static let height: CGFloat = 16
     let axis: Axis
+    let duration: TimeInterval
     var origin: CGRect
     var target: CGRect
     var startedAt: Date
 
     init(index: Int, stride: CGFloat = 50) {
         let rect = Self.restingRect(index: index, stride: stride)
-        self.init(rect: rect, axis: .vertical)
+        self.init(rect: rect, axis: .vertical, duration: Self.sidebarDuration)
     }
 
-    init(rect: CGRect, axis: Axis) {
-        self.axis = axis
+    init(rect: CGRect, axis: Axis, duration: TimeInterval = Self.duration) {
+        self.axis = axis; self.duration = duration
         origin = rect; target = rect; startedAt = .distantPast
     }
 
@@ -64,7 +66,7 @@ struct SelectionIndicatorMotion {
     }
 
     func rect(at date: Date) -> CGRect {
-        let t = min(1, max(0, date.timeIntervalSince(startedAt) / Self.duration))
+        let t = min(1, max(0, date.timeIntervalSince(startedAt) / duration))
         if t >= 1 { return target }
         let lead = Self.bezier(min(1, t / 0.6), 0.215, 0.61, 0.355, 1)
         let trail = Self.bezier(max(0, (t - 0.35) / 0.65), 0.645, 0.045, 0.355, 1)
@@ -100,7 +102,7 @@ struct SidebarSelectionIndicator: View {
     let index: Int
     let color: Color
     var body: some View {
-        AnimatedSelectionIndicator(target: SelectionIndicatorMotion.restingRect(index: index, stride: 50), axis: .vertical, color: color)
+        AnimatedSelectionIndicator(target: SelectionIndicatorMotion.restingRect(index: index, stride: 50), axis: .vertical, color: color, duration: SelectionIndicatorMotion.sidebarDuration)
     }
 }
 
@@ -111,9 +113,9 @@ private struct AnimatedSelectionIndicator: View {
     @WorkspaceViewState private var moving = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(target: CGRect, axis: Axis, color: Color) {
+    init(target: CGRect, axis: Axis, color: Color, duration: TimeInterval = SelectionIndicatorMotion.duration) {
         self.target = target; self.color = color
-        _motion = WorkspaceViewState(initialValue: SelectionIndicatorMotion(rect: target, axis: axis))
+        _motion = WorkspaceViewState(initialValue: SelectionIndicatorMotion(rect: target, axis: axis, duration: duration))
     }
 
     var body: some View {
@@ -133,7 +135,7 @@ private struct AnimatedSelectionIndicator: View {
         .onChange(of: reduceMotion) { reduced in if reduced { moving = false } }
         .task(id: motion.startedAt) {
             guard moving else { return }
-            do { try await Task.sleep(nanoseconds: 320_000_000) } catch { return }
+            do { try await Task.sleep(nanoseconds: UInt64(motion.duration * 1_000_000_000)) } catch { return }
             moving = false
         }
     }

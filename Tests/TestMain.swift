@@ -110,6 +110,25 @@ struct CoreTests {
         defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--library-polish-only") || CommandLine.arguments.contains("--library-details-only") {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-polish-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let pdf = root.appendingPathComponent("fixture.pdf")
+                try createPDF(at: pdf)
+                if !CommandLine.arguments.contains("--library-details-only") {
+                    try await assetRenameTests(root: root, pdf: pdf)
+                    try sidebarMotionTests()
+                    try fileListSelectionTests()
+                    try await libraryBlankSelectionUITests(root: root, pdf: pdf)
+                    try await sidebarIndicatorUITests()
+                    try await detailInteractionTests()
+                    try await downloadOriginTests(root: root, pdf: pdf)
+                }
+                try await libraryDetailsPolishTests(root: root, pdf: pdf)
+                try await largeLibraryRegressionTests(root: root, pdf: pdf)
+                return
+            }
             if CommandLine.arguments.contains("--details-only") {
                 let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-details-" + UUID().uuidString)
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -196,6 +215,10 @@ struct CoreTests {
             }
             try await downloadProgressTests(root: root, pdf: pdf)
             if CommandLine.arguments.contains("--progress-only") { return }
+            try await assetRenameTests(root: root, pdf: pdf)
+            try await libraryBlankSelectionUITests(root: root, pdf: pdf)
+            try await sidebarIndicatorUITests()
+            try await libraryDetailsPolishTests(root: root, pdf: pdf)
             try await libraryGridTests(root: root, pdf: pdf)
             if CommandLine.arguments.contains("--grid-only") { return }
             try await namingTests(root: root, pdf: pdf)

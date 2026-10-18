@@ -88,6 +88,7 @@ struct DownloaderView: View {
     @ObservedObject var model: DownloadModel
     @WorkspaceViewState var page: WorkspacePage = .downloads
     @WorkspaceViewState var logItem: DownloadItem?
+    @WorkspaceViewState private var pendingDetailLogs: DownloadItem?
     var showSettings: () -> Void = {}
     var endTextEditing: () -> Void = {}
     @WorkspaceViewState private var collapsed = false
@@ -228,8 +229,17 @@ struct DownloaderView: View {
                      L("下载记录和资料库条目会保留，并更新文件状态。恢复库条目不会恢复文件，可从 Finder 废纸篓找回文件。"))
             }
         }
-        .sheet(item: $model.diagnosticItem, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { item in TaskDiagnosticView(model: model, item: item, libraryPaperID: page == .library ? item.id : nil, fromMediaLibrary: page == .media) }
-        .sheet(item: $model.editingPaper, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { paper in LibraryEditView(model: model, paper: paper) }
+        .sheet(item: $model.diagnosticItem, onDismiss: {
+            if let requested = pendingDetailLogs {
+                pendingDetailLogs = nil; logItem = requested; logLevel = nil; query = ""; page = .logs
+            } else if selectedID != nil { listFocus = UUID() }
+        }) { item in
+            TaskDiagnosticView(model: model, item: item, libraryPaperID: page == .library ? item.id : nil, fromMediaLibrary: page == .media,
+                               showTaskLogs: { pendingDetailLogs = $0 })
+        }
+        .sheet(item: $model.renamingAsset, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { request in
+            AssetRenameView(model: model, request: request)
+        }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
         .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
     }
@@ -307,6 +317,11 @@ struct DownloaderView: View {
                     .accessibilityAddTraits(destination == page ? .isSelected : [])
                 }
             }
+            .overlay(alignment: .topLeading) {
+                if let index = WorkspacePage.navigation.firstIndex(of: page) {
+                    SidebarSelectionIndicator(index: index, color: accent)
+                }
+            }
             Spacer()
             Button { logItem = nil; page = .logs } label: {
                 HStack(spacing: WorkspaceMetrics.Space.regular) {
@@ -317,6 +332,9 @@ struct DownloaderView: View {
                 }.frame(width: 140, height: 44, alignment: .leading).padding(.horizontal, 13)
                     .frame(width: collapsed ? 50 : 166, alignment: .leading).clipped().contentShape(Rectangle())
             }.buttonStyle(SidebarButtonStyle(palette: palette, selected: page == .logs))
+                .overlay(alignment: .topLeading) {
+                    if page == .logs { SidebarSelectionIndicator(index: 0, color: accent) }
+                }
                 .foregroundStyle(secondary).help(L("查看日志")).accessibilityLabel(L("日志"))
                 .accessibilityAddTraits(page == .logs ? .isSelected : [])
             Button(action: showSettings) {
@@ -604,13 +622,16 @@ struct DownloaderView: View {
                             } else {
                                 LazyVStack(spacing: 0) { libraryRows(rows) }
                             }
-                        }.padding(1).padding(.trailing, 16)
-                            .frame(minHeight: viewport.size.height, alignment: .top)
+                        }.padding(1).padding(.trailing, 16).padding(.horizontal, 24)
+                            // Keep rows inset while the scroll canvas spans the
+                            // content column, including its outer margins and gaps.
+                            .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .top)
                             .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture {
                                 selection.clear(); listFocus = nil
                                 dismissEditing()
                             })
                     }
+                    .padding(.horizontal, -24)
                     .onChange(of: displayMode) { _ in
                         if let id = selectedID { scroll.scrollTo(id, anchor: .center) }
                     }
@@ -931,13 +952,29 @@ struct DownloadRow: View {
             }.padding(.top, 1).background(FileRowClickRegion(target: clickTarget, controls: true))
     }
     @ViewBuilder private var actions: some View {
-        if inMediaLibrary && item.isLibraryRemoved {
-            Button(L("恢复到媒体库")) { Task { _ = await model.setLibraryRemoved([item.id], in: .media, removed: false) } }
-                .disabled(!model.canManageLibrary(.media))
-            Divider()
-            Button(L("将文件移到废纸篓…"), role: .destructive) { model.requestFileTrash([item.id], in: .media) }
+        if inMediaLibrary {
+            if item.isLibraryRemoved {
+                Button(L("恢复到媒体库")) { Task { _ = await model.setLibraryRemoved([item.id], in: .media, removed: false) } }
+                    .disabled(!model.canManageLibrary(.media))
+            } else {
+                Button(L("快速预览")) { select(); model.preview(item) }.disabled(item.localURLs.isEmpty)
+                Button(L("重命名…")) { select(); model.requestAssetRename(item.id, in: .media) }
+                    .disabled(!model.canRenameAsset(item.id, in: .media))
+                Button(L("在 Finder 中显示")) { model.openFile(item, reveal: true) }.disabled(item.localURLs.isEmpty)
+                Divider()
+                Button(L("详情…")) { select(); model.diagnosticItem = item }
+                if item.canRetry { Button(L("重新下载缺失文件"), action: retry).disabled(busy) }
+                Divider()
+                Button(L("从媒体库移除")) { Task { _ = await model.setLibraryRemoved([item.id], in: .media, removed: true) } }
+                    .help(L("保留文件，可从已移除的媒体中恢复")).disabled(!model.canManageLibrary(.media))
+            }
+            Button(L("移到废纸篓…"), role: .destructive) { model.requestFileTrash([item.id], in: .media) }
                 .disabled(!model.canTrashFiles([item.id], in: .media))
         } else {
+            downloadActions
+        }
+    }
+    @ViewBuilder private var downloadActions: some View {
         if !item.localURLs.isEmpty {
             Button(L("快速预览")) { select(); model.preview(item) }.help(L("选中文件后按空格"))
             Button(L("在 Finder 中显示")) { model.openFile(item, reveal: true) }
@@ -952,31 +989,21 @@ struct DownloadRow: View {
         if item.canRetry && item.savedURL != nil {
             Button(L("重新下载缺失文件"), action: retry).disabled(busy)
         }
-        if let source = item.source {
-            Button(L("打开来源页面")) { model.openSource(item) }
+        if let source = item.provenance {
+            if source.browserURL != nil { Button(L("打开来源页面")) { model.openOriginalSource(item) } }
             Button(L("复制来源链接")) {
-                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.webURL.absoluteString, forType: .string)
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(source.input, forType: .string)
             }
         }
         if let url = item.savedURL {
             Button(L("复制文件名")) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.lastPathComponent, forType: .string) }
         }
         Divider()
-        if inMediaLibrary {
-            Button(L(item.isLibraryRemoved ? "恢复到媒体库" : "移出媒体库")) {
-                Task { _ = await model.setLibraryRemoved([item.id], in: .media, removed: !item.isLibraryRemoved) }
-            }.disabled(!model.canManageLibrary(.media))
-        }
         Button(L("将文件移到废纸篓…"), role: .destructive) {
-            model.requestFileTrash([item.id], in: inMediaLibrary ? .media : .downloads)
-        }.disabled(!model.canTrashFiles([item.id], in: inMediaLibrary ? .media : .downloads))
-        if !inMediaLibrary {
-            Divider()
-            Button(L("清除这条记录"), role: .destructive) {
-                model.clearDownloadRecord(item.id)
-            }.disabled(busy)
-        }
-        }
+            model.requestFileTrash([item.id], in: .downloads)
+        }.disabled(!model.canTrashFiles([item.id], in: .downloads))
+        Divider()
+        Button(L("清除这条记录"), role: .destructive) { model.clearDownloadRecord(item.id) }.disabled(busy)
     }
 
     private func retry() {

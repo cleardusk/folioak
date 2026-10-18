@@ -68,6 +68,44 @@ import Foundation
         }
     }
 
+    // File and every persisted reference are committed on the same serial writer.
+    // Back up exact bytes so a failed catalog/workspace write can restore the prior state.
+    func commitAssetRename(from old: URL, to new: URL, snapshot: WorkspaceSnapshot,
+                           papers: [LibraryPaper]?, media: [DownloadItem]?) async throws {
+        let state = stateURL, library = libraryURL, mediaURL = self.mediaURL
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                continuation.resume(with: Result {
+                    let manager = FileManager.default
+                    let targets = (papers == nil ? [] : [library]) + (media == nil ? [] : [mediaURL]) + [state]
+                    let backups: [(URL, Data?)] = try targets.map { url in
+                        (url, manager.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil)
+                    }
+                    let moved = old.standardizedFileURL != new.standardizedFileURL
+                    if moved { try AssetRename.move(old, to: new) }
+                    var written: [URL] = []
+                    do {
+                        if let papers { written.append(library); try LibraryStore.write(papers, to: library) }
+                        if let media { written.append(mediaURL); try MediaLibraryStore.write(media, to: mediaURL) }
+                        written.append(state); _ = try WorkspaceStore.write(snapshot, to: state)
+                    } catch {
+                        let originalError = error
+                        var rollbackError: Error?
+                        for (url, data) in backups.reversed() where written.contains(url) {
+                            do {
+                                if let data { try data.write(to: url, options: .atomic) }
+                                else if manager.fileExists(atPath: url.path) { try manager.removeItem(at: url) }
+                            } catch { rollbackError = error }
+                        }
+                        if moved { do { try AssetRename.move(new, to: old) } catch { rollbackError = error } }
+                        if let rollbackError { throw DownloadError.storage("保存失败，恢复原状态时发生错误：\(rollbackError.localizedDescription)") }
+                        throw originalError
+                    }
+                })
+            }
+        }
+    }
+
     func save(_ request: Request, completion: @escaping @MainActor (WriteResult) -> Void) {
         queue.async {
             let result = Self.write(request)

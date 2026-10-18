@@ -64,7 +64,7 @@ enum L10n {
         guard let expression = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators) else { return nil }
         return Template(prefix: parts[0], suffix: parts.last!, expression: expression, translation: value.components(separatedBy: "%@"),
                         nested: ["未能移除全部文件，记录已保留：%@", "保存失败：%@", "版本检查已停止：%@", "下载记录未能清空：%@", "媒体库无法读取，原文件已保留：%@",
-                                 "资料库修改未能保存，原记录已保留：%@", "媒体库未能保存：%@", "文档库无法读取，原文件已保留：%@", "文档库未能保存：%@", "导出失败：%@",
+                                 "资料库修改未能保存，原记录已保留：%@", "重命名未完成：%@", "保存失败，恢复原状态时发生错误：%@", "媒体库未能保存：%@", "文档库无法读取，原文件已保留：%@", "文档库未能保存：%@", "导出失败：%@",
                                  "历史记录未能保存：%@", "网络连接失败：%@", "已用于“%@”。", "暂无%@任务", "下载状态：%@",
                                  "本次耗时 %@ · 重试 %@ 次", "本次耗时 %@ · 重试 1 次"].contains(key))
     }.sorted { $0.prefix.count == $1.prefix.count ? $0.suffix.count > $1.suffix.count : $0.prefix.count > $1.prefix.count }

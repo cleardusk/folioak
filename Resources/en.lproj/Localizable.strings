@@ -720,3 +720,30 @@
 
 "原始输入" = "Original input";
 "复制内容" = "Copy Input";
+
+"重命名…" = "Rename…";
+"重命名" = "Rename";
+"从文档库移除" = "Remove from Document Library";
+"从媒体库移除" = "Remove from Media Library";
+"移到废纸篓…" = "Move to Trash…";
+"保留文件，可从已移除的媒体中恢复" = "Keep files; restore from removed media.";
+"编辑文档信息…" = "Edit Document Information…";
+"编辑文档信息" = "Edit Document Information";
+"显示标题" = "Display title";
+"显示标题不会修改文件名。" = "Changing the display title does not rename the file.";
+"检查论文更新" = "Check for Paper Updates";
+"正在检查…" = "Checking…";
+
+"请输入有效的文件名，不能包含 /、\\、冒号或控制字符。" = "Enter a valid file name without reserved characters or control characters.";
+
+"文件名过长，请缩短至 250 字节以内（含扩展名）。" = "The file name is too long. Use at most 250 bytes including its extension.";
+
+"当前无法重命名，请确认文件存在且资料库可写。" = "Unable to rename. Make sure the file exists and the library is writable.";
+
+"文件位置已改变，请重新打开重命名。" = "The file location changed. Open Rename again.";
+
+"同名文件已存在，请使用其他名称。" = "A file with this name already exists. Choose another name.";
+
+"重命名未完成：%@" = "Rename failed: %@";
+
+"保存失败，恢复原状态时发生错误：%@" = "Saving failed and the original state could not be restored: %@";

@@ -206,6 +206,9 @@ final class DownloadModel: ObservableObject {
     @Published private(set) var libraryUndo: LibraryRemovalUndo?
     @Published private(set) var recordAnimation = UUID()
     @Published var pendingFileTrash: FileTrashRequest?
+    @Published var renamingAsset: AssetRenameRequest?
+    @Published var assetRenameError: String?
+    @Published private(set) var assetRenameInProgress = false
     @Published var items: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
     @Published var mediaFormat: MediaFormat = .automatic
     @Published var history: [DownloadItem] = [] { didSet { workspaceRevision += 1 } }
@@ -217,7 +220,6 @@ final class DownloadModel: ObservableObject {
     @Published var libraryNotice: String?
     @Published var importingPDFs = false
     @Published var checkingVersions = Set<UUID>()
-    @Published var editingPaper: LibraryPaper?
     var versionWorker: Task<Void, Never>?
     @Published var logs: [ActivityEntry] = [] { didSet { workspaceRevision += 1 } }
     @Published var persistenceNotice: String?
@@ -325,6 +327,83 @@ final class DownloadModel: ObservableObject {
 
     func canManageLibrary(_ collection: LibraryCollection) -> Bool {
         !busy && !libraryMutationInProgress && (collection == .documents ? libraryWritable && !importingPDFs : mediaLibraryWritable)
+    }
+
+    func canRenameAsset(_ id: UUID, in collection: LibraryCollection) -> Bool {
+        guard canManageLibrary(collection), !importingPDFs, checkingVersions.isEmpty, versionWorker == nil else { return false }
+        let files: [URL]
+        switch collection {
+        case .documents:
+            guard let paper = papers.first(where: { $0.id == id }), !paper.removed, !paper.missing,
+                  let file = paper.file else { return false }
+            files = [file]
+        case .media:
+            guard let item = mediaLibrary.first(where: { $0.id == id }), !item.isLibraryRemoved,
+                  item.state != .missing, item.incompleteFileList != true else { return false }
+            files = item.localURLs
+        }
+        guard !files.isEmpty, files.allSatisfy(AssetRename.writableFile) else { return false }
+        // A shared file can be referenced from either catalog; neither may be read-only.
+        if !libraryWritable || !mediaLibraryWritable {
+            let matches = files.map(AssetRenamePaths.init)
+            if !libraryWritable, papers.contains(where: { $0.file.map { file in matches.contains { $0.contains(file) } } == true }) { return false }
+            if !mediaLibraryWritable, mediaLibrary.contains(where: { $0.localURLs.contains { file in matches.contains { $0.contains(file) } } }) { return false }
+        }
+        return true
+    }
+
+    func requestAssetRename(_ id: UUID, in collection: LibraryCollection) {
+        guard canRenameAsset(id, in: collection) else { return }
+        let files = collection == .documents ? papers.first(where: { $0.id == id })?.file.map { [$0] } ?? [] : mediaLibrary.first(where: { $0.id == id })?.localURLs ?? []
+        assetRenameError = nil
+        renamingAsset = AssetRenameRequest(id: id, collection: collection, files: files)
+    }
+
+    @discardableResult
+    func renameAsset(_ request: AssetRenameRequest, file: URL, to basename: String) async -> Bool {
+        guard canRenameAsset(request.id, in: request.collection) else {
+            assetRenameError = "当前无法重命名，请确认文件存在且资料库可写。"; return false
+        }
+        let currentFiles = request.collection == .documents ? papers.first(where: { $0.id == request.id })?.file.map { [$0] } ?? [] : mediaLibrary.first(where: { $0.id == request.id })?.localURLs ?? []
+        guard request.files.contains(file), currentFiles.contains(file) else { assetRenameError = "文件位置已改变，请重新打开重命名。"; return false }
+        libraryMutationInProgress = true; assetRenameInProgress = true
+        saveWork?.cancel(); saveWork = nil
+        defer {
+            libraryMutationInProgress = false; assetRenameInProgress = false
+            let waiters = libraryMutationWaiters; libraryMutationWaiters.removeAll(); waiters.forEach { $0.resume() }
+            saveWorkspace()
+        }
+        do {
+            let destination = try AssetRename.destination(for: file, basename: basename)
+            let paths = AssetRenamePaths(file)
+            let renamedItems = items.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            let renamedHistory = history.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            let renamedPapers = papers.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            let renamedMedia = mediaLibrary.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            if let persistence {
+                try persistence.prepareForSaving()
+                let snapshot = WorkspaceSnapshot(input: input, items: renamedItems, history: renamedHistory, logs: logs)
+                try await persistence.commitAssetRename(from: file, to: destination, snapshot: snapshot,
+                    papers: libraryWritable ? renamedPapers : nil, media: mediaLibraryWritable ? renamedMedia : nil)
+                // Invalidate completions from saves queued before this transaction.
+                persistenceSequence += 1; appliedPersistenceSequence = persistenceSequence
+            } else {
+                if file.standardizedFileURL != destination.standardizedFileURL { try AssetRename.move(file, to: destination) }
+            }
+            // Merge paths into the latest values so unrelated input, logs and metadata survive the await.
+            items = items.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            history = history.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            papers = papers.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            mediaLibrary = mediaLibrary.map { AssetRename.replacing($0, paths: paths, new: destination) }
+            if previewURL.map(paths.contains) == true { previewURL = destination }
+            if let diagnosticItem { self.diagnosticItem = AssetRename.replacing(diagnosticItem, paths: paths, new: destination) }
+            assetRenameError = nil; notice = nil; fileRefreshRevision += 1
+            renamingAsset = nil
+            return true
+        } catch {
+            assetRenameError = "重命名未完成：\(error.localizedDescription)"
+            return false
+        }
     }
 
     @discardableResult
@@ -1025,6 +1104,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func localFile(_ item: DownloadItem) -> URL? {
+        guard !assetRenameInProgress else { return nil }
         fileRefreshRevision += 1
         // Older history can contain a pruned collection. Prefer the retained
         // library's complete paths; absence never destroys recovery information.
@@ -1102,11 +1182,13 @@ final class DownloadModel: ObservableObject {
     }
 
     func preview(_ item: DownloadItem) {
+        guard !assetRenameInProgress else { return }
         previewURL = localFile(item)
         if let file = previewURL { markRead(file) }
     }
 
     func openFile(_ item: DownloadItem, reveal: Bool = false) {
+        guard !assetRenameInProgress else { return }
         guard let url = localFile(item) else { return }
         if reveal {
             let current = downloads.first { $0.id == item.id } ?? mediaLibrary.first { $0.id == item.id } ?? item
@@ -2228,6 +2310,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         app.item(withTitle: L("关于 Folioak"))?.target = self
         app.item(withTitle: L("检查更新…"))?.target = self
         app.item(withTitle: L("设置…"))?.target = self
+        for (title, symbol) in [(L("关于 Folioak"), "info.circle"), (L("检查更新…"), "arrow.triangle.2.circlepath")] {
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 14, weight: .regular))
+            image?.size = NSSize(width: 16, height: 16)
+            image?.isTemplate = true
+            app.item(withTitle: title)?.image = image
+        }
         let edit = add(L("编辑"), [
             (L("撤销"), Selector(("undo:")), "z"), (L("重做"), Selector(("redo:")), "z"), ("", nil, ""),
             (L("剪切"), #selector(NSText.cut(_:)), "x"), (L("复制"), #selector(NSText.copy(_:)), "c"),

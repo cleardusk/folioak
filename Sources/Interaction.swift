@@ -388,6 +388,7 @@ struct TaskDiagnosticView: View {
     let item: DownloadItem
     var libraryPaperID: UUID? = nil
     var fromMediaLibrary = false
+    var showTaskLogs: ((DownloadItem) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @WorkspaceViewState private var files: [FileInformation] = []
@@ -395,6 +396,11 @@ struct TaskDiagnosticView: View {
     @WorkspaceViewState var showingDiagnostics = false
     @WorkspaceViewState private var copiedSource = false
     @WorkspaceViewState private var sourceActionError: String?
+    @WorkspaceViewState private var editingMetadata = false
+    @WorkspaceViewState private var titleDraft = ""
+    @WorkspaceViewState private var tagsDraft = ""
+    @WorkspaceViewState private var copiedFilename: URL?
+    @WorkspaceViewState private var attemptedMaintenance = false
     private var paper: LibraryPaper? { libraryPaperID.flatMap { id in model.papers.first { $0.id == id } } }
     var current: DownloadItem {
         if let paper {
@@ -437,7 +443,8 @@ struct TaskDiagnosticView: View {
                     Divider()
                     sourceContent
                     Divider()
-                    informationGroup("记录信息", fields: recordFields)
+                    recordContent
+                    if let paper, paper.reference != nil, !paper.removed { paperVersionContent(paper) }
                     ForEach(Array(files.enumerated()), id: \.offset) { index, information in
                         Divider()
                         if files.count > 1 {
@@ -447,15 +454,28 @@ struct TaskDiagnosticView: View {
                         ForEach(Array(information.groups.enumerated()), id: \.offset) { _, group in
                             informationGroup(group.title, fields: group.fields)
                         }
+                        Button(L(copiedFilename == information.url ? "已复制" : "复制文件名")) {
+                            let board = NSPasteboard.general
+                            board.clearContents()
+                            if board.setString(information.url.lastPathComponent, forType: .string) { copiedFilename = information.url }
+                        }.buttonStyle(QuietButtonStyle(palette: palette))
                         if let issue = information.issue {
                             Text(L(issue)).font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
                         }
+                    }
+                    if let paper, !paper.removed {
+                        Button(L("重新关联文件…")) { attemptedMaintenance = true; model.notice = nil; model.relinkPaper(paper.id) }
+                            .buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.documents))
+                    }
+                    if attemptedMaintenance, let notice = model.notice {
+                        Text(L(notice)).font(.system(size: 12)).foregroundStyle(UIColors.error)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if loading {
                         HStack(spacing: 8) { ProgressView().controlSize(.small); Text(L("正在读取文件信息…")).font(.system(size: 12)) }
                             .foregroundStyle(ThemePalette.color(palette.secondary))
                     }
-                    if hasDiagnostics {
+                    if hasDiagnostics || taskLogItem != nil {
                         if current.localURLs.isEmpty { diagnosticContent }
                         else {
                             Divider()
@@ -483,7 +503,7 @@ struct TaskDiagnosticView: View {
         }.padding(24).frame(width: 560, height: 620)
             .foregroundStyle(ThemePalette.color(palette.text))
             .background(ThemePalette.color(palette.canvas))
-            .task(id: current.localURLs.map(\.absoluteString).joined(separator: "\n") + L10n.locale.identifier) {
+            .task(id: current.localURLs.map(\.absoluteString).joined(separator: "\n") + current.title + (paper?.authors ?? "") + L10n.locale.identifier) {
                 files = []; loading = !current.localURLs.isEmpty
                 let record = current, author = paper?.authors ?? current.metadata?.authors?.joined(separator: ", ")
                 do {
@@ -563,6 +583,66 @@ struct TaskDiagnosticView: View {
             }
         }
     }
+    var taskLogItem: DownloadItem? {
+        guard showTaskLogs != nil else { return nil }
+        var record = current
+        if libraryPaperID != nil {
+            guard let taskID = paper?.taskID else { return nil }
+            record.id = taskID
+        }
+        return record
+    }
+    private var recordContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if editingMetadata, let paper {
+                Text(L("编辑文档信息")).font(.system(size: 12, weight: .medium))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L("显示标题")).foregroundStyle(ThemePalette.color(palette.secondary))
+                    TextField(L("显示标题"), text: $titleDraft).textFieldStyle(.roundedBorder)
+                    Text(L("显示标题不会修改文件名。")).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L("标签")).foregroundStyle(ThemePalette.color(palette.secondary))
+                    TextField(L("用逗号分隔"), text: $tagsDraft).textFieldStyle(.roundedBorder)
+                }
+                HStack {
+                    Button(L("取消")) { editingMetadata = false }.buttonStyle(QuietButtonStyle(palette: palette))
+                    Button(L("保存")) {
+                        model.changePaper(paper.id) {
+                            $0.title = String(titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).prefix(ResourceLimits.titleCharacters))
+                            $0.tags = LibraryPaper.cleanTags(tagsDraft)
+                        }
+                        model.saveWorkspace(); editingMetadata = false
+                    }.buttonStyle(QuietButtonStyle(palette: palette))
+                        .disabled(titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.canManageLibrary(.documents))
+                }
+            } else {
+                informationGroup("记录信息", fields: recordFields)
+                if let paper, !paper.removed {
+                    Button(L("编辑文档信息…")) {
+                        titleDraft = paper.title; tagsDraft = paper.tags.joined(separator: ", "); editingMetadata = true
+                    }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.documents))
+                }
+            }
+        }.font(.system(size: 12))
+    }
+    private func paperVersionContent(_ paper: LibraryPaper) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button(L(model.checkingVersions.contains(paper.id) ? "正在检查…" : "检查论文更新")) { attemptedMaintenance = true; model.checkPaperVersions([paper.id]) }
+                    .buttonStyle(QuietButtonStyle(palette: palette))
+                    .disabled(!model.checkingVersions.isEmpty || !model.canManageLibrary(.documents))
+                if paper.hasUpdate {
+                    Button(L("下载 v\(paper.latest!.version!)")) { model.downloadLatest(paper); dismiss() }
+                        .buttonStyle(QuietButtonStyle(palette: palette)).disabled(model.busy)
+                }
+            }
+            if let date = paper.checkedAt {
+                Text(L("上次检查：\(L10n.date(date, time: .shortened))"))
+                    .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+            }
+        }
+    }
     private var diagnosticContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let trace = diagnosticTask?.diagnostics, trace.finishedAt != nil {
@@ -574,6 +654,15 @@ struct TaskDiagnosticView: View {
             }
             if let error = diagnosticTask?.localizedError {
                 Text(ActivityEntry.redacted(error)).font(.system(size: 12)).foregroundStyle(UIColors.error).textSelection(.enabled)
+            }
+            HStack {
+                if let task = taskLogItem {
+                    Button(L("查看任务日志")) { showTaskLogs?(task); dismiss() }.buttonStyle(QuietButtonStyle(palette: palette))
+                }
+                if BrowserAuthenticationIssue.matches(current.errorMessage) && model.browserAuthentication.selection != nil {
+                    Button(L("在认证浏览器中打开")) { model.openAuthenticationSource(current) }
+                        .buttonStyle(QuietButtonStyle(palette: palette))
+                }
             }
             if !entries.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
