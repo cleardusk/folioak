@@ -39,6 +39,14 @@ File naming rules in Settings → General cover arXiv papers, documents/PDFs, vi
 
 Document and media libraries each remember their list/grid view. Grid view supports arrow navigation, Shift ranges, Command selection, Space previews, double-click opening and the existing management actions. Thumbnails load near the visible viewport and fall back to file icons when unavailable.
 
+
+### Local interaction history
+
+Settings → General offers opt-in interaction recording, off by default. Events stay on this Mac and are never uploaded. Fixed fields describe actions and outcomes without input text, file names, tag text, full URLs or cookies. Recording uses a bounded background buffer, up to 20 MB / 64 segments; writing and export remove segments older than seven days. Disabling preserves existing records for export or clearing.
+
+Export the current run, today or the last seven days as a folder containing events.jsonl, timeline.txt and metadata.json. Exports are retained independently of the local cap. Forced termination can lose buffered events; exports disclose dropped or unreadable records and incomplete session boundaries.
+
+
 ## Develop
 
 Build with `./build.command`; test with `./test.command`. Requires Xcode or Command Line Tools and Python 3.9+.

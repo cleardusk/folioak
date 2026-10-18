@@ -758,6 +758,9 @@ struct LogScrollObserver: NSViewRepresentable {
         private var observing: [NSObjectProtocol] = []
         private var queued = false
         private var transition: ScrollTransition?
+        // Lazy rows can refine their heights after an animated jump completes.
+        // Keep the requested top anchored until the user takes over scrolling.
+        private var keepsTopAligned = false
         private var generation = 0
         private final class ScrollTransition: NSAnimation {
             var apply: ((CGFloat) -> Void)?
@@ -782,6 +785,7 @@ struct LogScrollObserver: NSViewRepresentable {
                 observing.append(NotificationCenter.default.addObserver(forName: name, object: enclosingScrollView, queue: .main) { [weak self] _ in
                     guard let self, let scroll = self.scroll else { return }
                     self.stopTransition()
+                    self.keepsTopAligned = false
                     let metrics = LogScrollPosition(scroll: scroll)
                     self.followingLatest = metrics.atBottom
                     self.userScrolled?(metrics); self.report()
@@ -809,6 +813,7 @@ struct LogScrollObserver: NSViewRepresentable {
         func jump(toBottom: Bool, animated: Bool) {
             stopTransition()
             followingLatest = toBottom
+            keepsTopAligned = !toBottom
             guard let scroll else { return }
             let start = scroll.contentView.bounds.minY
             guard animated, abs(endpoint(toBottom, in: scroll) - start) > 2 else {
@@ -831,8 +836,13 @@ struct LogScrollObserver: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }; self.queued = false
                 if let scroll = self.scroll {
-                    if self.followingLatest && self.transition == nil && !LogScrollPosition(scroll: scroll).atBottom {
-                        self.move(to: self.endpoint(true, in: scroll), in: scroll)
+                    if self.transition == nil {
+                        let metrics = LogScrollPosition(scroll: scroll)
+                        if self.followingLatest && !metrics.atBottom {
+                            self.move(to: self.endpoint(true, in: scroll), in: scroll)
+                        } else if self.keepsTopAligned && !metrics.atTop {
+                            self.move(to: self.endpoint(false, in: scroll), in: scroll)
+                        }
                     }
                     self.changed?(LogScrollPosition(scroll: scroll))
                 }

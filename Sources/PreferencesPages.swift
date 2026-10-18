@@ -15,7 +15,7 @@ struct WorkspaceSettingsView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     ForEach(Array(categories.enumerated()), id: \.offset) { index, category in
-                        Button { model.settingsTab = category } label: {
+                        Button { model.settingsTab = category; model.trace.user(.pageChanged, context: .settings, detail: index == 0 ? .general : index == 1 ? .naming : index == 2 ? .shortcuts : .authentication) } label: {
                             Text(L(category)).font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(ThemePalette.color(model.settingsTab == category ? palette.text : palette.secondary))
                                 .padding(.horizontal, 14).frame(height: 34)
@@ -52,6 +52,7 @@ struct WorkspaceSettingsView: View {
             .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))
             .environment(\.locale, L10n.locale)
             .background(PreferencesFocusBoundary(category: model.settingsTab))
+            .onReceive(model.browserAuthentication.$enabled.dropFirst().removeDuplicates()) { _ in model.traceSetting(.authentication) }
             .onAppear { if !categories.contains(model.settingsTab) { model.settingsTab = "通用" } }
     }
 }
@@ -120,6 +121,9 @@ private struct WorkspaceGeneralSettings: View {
                     }
                     row("更新") { WorkspaceUpdateControls(checker: model.updates) }
                 }
+                Divider()
+                InteractionTraceControls(settings: model.traceSettings, palette: palette)
+                    .padding(.leading, labelWidth + 16)
                 Divider()
                 VStack(alignment: .leading, spacing: 18) {
                     row("外观") {

@@ -153,7 +153,10 @@ extension DownloadModel {
     func changePaper(_ id: UUID, _ change: (inout LibraryPaper) -> Void) {
         guard canChangeLibrary() else { return }
         guard let index = papers.firstIndex(where: { $0.id == id }) else { return }
+        let favorite = papers[index].favorite, tags = papers[index].tags
         change(&papers[index])
+        if favorite != papers[index].favorite { trace.user(.favoriteChanged, context: .documents, item: id, detail: papers[index].favorite ? .enabled : .disabled) }
+        if tags != papers[index].tags { trace.user(.tagsChanged, context: .documents, item: id, count: papers[index].tags.count) }
     }
     func importPDFs() {
         guard !importingPDFs, !assetRenameInProgress, canChangeLibrary() else { return }
@@ -180,6 +183,7 @@ extension DownloadModel {
                 self.papers.append(paper)
             }
             self.importingPDFs = false
+            self.trace.record(.libraryImported, context: .documents, outcome: result.1 == 0 ? .succeeded : .failed, count: result.0.count)
             if result.1 > 0 { self.notice = "\(result.1) 个文件无法读取。" }
             self.saveWorkspace()
         }
@@ -200,6 +204,10 @@ extension DownloadModel {
         }
     }
     func relinkPaper(_ id: UUID, to url: URL) async throws {
+        let operation = trace.isEnabled ? UUID() : nil
+        var succeeded = false
+        trace.user(.fileRelinked, context: .documents, outcome: .requested, item: id, operation: operation)
+        defer { trace.record(.fileRelinked, context: .documents, outcome: succeeded ? .succeeded : .failed, item: id, operation: operation) }
         guard !assetRenameInProgress, canChangeLibrary(), let paper = papers.first(where: { $0.id == id }) else { return }
         let ext = paper.file?.pathExtension.lowercased() ?? "pdf"
         let imported = try await Task.detached(priority: .userInitiated) { () -> LibraryPaper in
@@ -222,6 +230,7 @@ extension DownloadModel {
         items = items.map(relinked); history = history.map(relinked)
         if let previous = paper.file, previewURL == previous { previewURL = imported.file }
         if let current = papers.first(where: { $0.id == id }) { _ = localFile(current.downloadItem) }
+        succeeded = true
         notice = nil
         saveWorkspace()
     }
@@ -266,6 +275,10 @@ extension DownloadModel {
         diagnosticItem = paper.downloadItem
     }
     func openPaper(_ paper: LibraryPaper, preview: Bool = false) {
+        let operation = trace.isEnabled ? UUID() : nil
+        var succeeded = false
+        trace.user(preview ? .previewRequested : .openRequested, context: .documents, outcome: .requested, item: paper.id, operation: operation)
+        defer { trace.record(preview ? .previewRequested : .openRequested, context: .documents, outcome: succeeded ? .succeeded : .failed, item: paper.id, operation: operation) }
         guard !assetRenameInProgress else { return }
         guard let file = localFile(paper.downloadItem), FileManager.default.isReadableFile(atPath: file.path) else {
             changePaper(paper.id) { $0.missing = true }; notice = "文件已移动或不可读，请重新关联。"; return
@@ -276,6 +289,7 @@ extension DownloadModel {
             changePaper(paper.id) { $0.read = true; $0.missing = false }
         }
         if libraryWritable { notice = nil }
+        succeeded = true
     }
 }
 

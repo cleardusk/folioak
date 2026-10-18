@@ -763,3 +763,33 @@
 "恢复当前资产类型的默认命名规则" = "Restore the default naming rule for this asset type";
 
 "关于" = "About";
+
+"记录操作轨迹" = "Record interaction history";
+
+"仅保存在本机，最多 20 MB，保留最近 7 天。不记录输入内容、文件名或完整链接。" = "Stored only on this Mac, up to 20 MB for the last 7 days. Input text, file names and full links are excluded.";
+
+"导出操作轨迹…" = "Export interaction history…";
+
+"导出操作轨迹" = "Export interaction history";
+
+"本次运行" = "This session";
+
+"今天" = "Today";
+
+"最近 7 天" = "Last 7 days";
+
+"清除记录…" = "Clear records…";
+
+"清除操作轨迹？" = "Clear interaction history?";
+
+"清除本机保存的操作轨迹；已导出的文件需自行删除。" = "Clear locally stored interaction history. Exported files must be deleted separately.";
+
+"操作轨迹写入失败，记录已暂停。可关闭后重新开启；下载不受影响。" = "Recording paused because writing failed. Turn recording off and on to retry. Downloads are unaffected.";
+
+"操作轨迹导出失败，请检查保存位置。" = "Export failed. Please check the destination.";
+
+"操作轨迹已清除。" = "Interaction history cleared.";
+
+"操作轨迹清除失败，请检查文件访问权限。" = "Could not clear interaction history. Please check file permissions.";
+
+"清除" = "Clear";

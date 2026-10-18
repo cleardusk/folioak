@@ -628,6 +628,8 @@ extension CoreTests {
         }
         let view = NSHostingView(rootView: LogRegressionView(probe: probe))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
         window.contentView = view
         window.orderFront(nil)
         defer { window.orderOut(nil) }
@@ -651,6 +653,53 @@ extension CoreTests {
             view.layoutSubtreeIfNeeded()
         }
         try expect(LogScrollPosition(scroll: scroll).canScroll && LogScrollPosition(scroll: scroll).atBottom, "long variable-height logs start at latest entry; clip=\(scroll.contentView.bounds), content=\(String(describing: scroll.documentView?.bounds))")
+        func clickJump(settles: Bool = true) async {
+            let point = NSPoint(x: view.bounds.maxX - 18, y: view.bounds.maxY - 18)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                window.sendEvent(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+            }
+            if settles { await settle() }
+        }
+        await clickJump(settles: false)
+        try await Task.sleep(nanoseconds: 90_000_000)
+        let upwardPosition = scroll.contentView.bounds.minY
+        try expect(!LogScrollPosition(scroll: scroll).atTop && !LogScrollPosition(scroll: scroll).atBottom,
+                   "upward log jump exposes an intermediate frame")
+        await clickJump(settles: false)
+        try await Task.sleep(nanoseconds: 90_000_000)
+        try expect(scroll.contentView.bounds.minY < upwardPosition, "repeated arrow click continues upward until arrival")
+        await settle()
+        try expect(LogScrollPosition(scroll: scroll).atTop, "real log button reaches earliest entry after lazy row reflow")
+        await clickJump(settles: false)
+        try await Task.sleep(nanoseconds: 90_000_000)
+        let downwardPosition = scroll.contentView.bounds.minY
+        try expect(!LogScrollPosition(scroll: scroll).atTop && !LogScrollPosition(scroll: scroll).atBottom,
+                   "downward log jump exposes an intermediate frame")
+        await clickJump(settles: false)
+        try await Task.sleep(nanoseconds: 90_000_000)
+        try expect(scroll.contentView.bounds.minY > downwardPosition, "repeated arrow click continues downward until arrival")
+        await settle()
+        try expect(LogScrollPosition(scroll: scroll).atBottom, "arrow switches destination only after reaching the endpoint")
+        await clickJump()
+        try expect(LogScrollPosition(scroll: scroll).atTop, "arrival enables the next upward jump")
+        // Deliver a real wheel event rather than synthesizing a live-scroll notification.
+        let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                            wheel1: -120, wheel2: 0, wheel3: 0)!
+        scroll.scrollWheel(with: NSEvent(cgEvent: wheel)!)
+        await settle()
+        let readingFromTop = scroll.contentView.bounds.minY
+        try expect(readingFromTop > 2, "manual wheel scrolling releases the requested top anchor")
+        probe.entries.append(ActivityEntry(level: .info, message: "顶部阅读位置不被新增日志打断", subject: nil, itemID: nil))
+        await settle()
+        try expect(abs(scroll.contentView.bounds.minY - readingFromTop) < 2, "appending logs preserves manual reading after jumping to top")
+        await clickJump()
+        try expect(LogScrollPosition(scroll: scroll).atBottom, "real log button returns to latest entry after manual scrolling")
+        await clickJump()
+        try expect(LogScrollPosition(scroll: scroll).atTop, "repeated log button click reaches exact top")
+        await clickJump()
+        try expect(LogScrollPosition(scroll: scroll).atBottom, "repeated log button click reaches exact bottom")
         window.setContentSize(NSSize(width: 420, height: 400))
         await settle()
         try expect(LogScrollPosition(scroll: scroll).atBottom, "tail stays aligned when wrapping changes row heights")
@@ -709,7 +758,7 @@ extension CoreTests {
         try await Task.sleep(nanoseconds: 80_000_000)
         driver.finishTransition(toBottom: true)
         try expect(LogScrollPosition(scroll: native).atBottom, "enabling reduced motion settles an in-flight jump immediately")
-        print("PASS logs: 1500 variable-height rows, tail following, manual reading, empty-search/filter restoration, animation reversal/cancellation and reduced motion")
+        print("PASS logs: 1500 variable-height rows, arrow direction during repeated clicks, real button endpoints, wheel takeover, tail following, manual reading, empty-search/filter restoration, animation reversal/cancellation and reduced motion")
     }
 
     @MainActor static func inputColorTransitionTests() async throws {
@@ -999,7 +1048,19 @@ extension CoreTests {
                 view.cacheDisplay(in: view.bounds, to: bitmap)
                 try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/workspace-input-\(scheme == .light ? "light" : "dark")-\(reducedMotion ? "reduced" : "motion").png"))
             }
-            await clickFromTop(40, view.bounds.height - 88)
+            // Settings/About now share the sidebar footer. Locate the rendered
+            // Logs label instead of assuming its old distance from the bottom.
+            guard let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("sidebar log bitmap") }
+            view.cacheDisplay(in: view.bounds, to: image)
+            guard let cgImage = image.cgImage else { throw TestFailure.failed("sidebar log image") }
+            let labels = VNRecognizeTextRequest()
+            labels.recognitionLanguages = ["zh-Hans", "en-US"]; labels.recognitionLevel = .accurate
+            try VNImageRequestHandler(cgImage: cgImage).perform([labels])
+            guard let label = labels.results?.first(where: {
+                $0.boundingBox.midX * view.bounds.width < 190 &&
+                ($0.topCandidates(1).first?.string.replacingOccurrences(of: " ", with: "").hasSuffix(L("日志")) ?? false)
+            }) else { throw TestFailure.failed("visible sidebar log label: " + (labels.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " | ")) }
+            await clickFromTop(label.boundingBox.midX * view.bounds.width, (1 - label.boundingBox.midY) * view.bounds.height)
             try expect(editor.window == nil, "the visible sidebar log entry navigates away from downloads")
             try expect(model.history.count == 1, "layout and navigation preserve every attempt record")
         }
@@ -1032,6 +1093,9 @@ extension CoreTests {
             try? await Task.sleep(nanoseconds: 100_000_000); authenticationView.layoutSubtreeIfNeeded()
         }
         for language in [AppLanguage.chinese, .english] {
+            // Settings is now a retained page in this window. Return to the
+            // download row before testing the second language's recovery action.
+            authenticationModel.preferencesPage = nil
             let originalLanguage = AppLocalization.shared.language
             AppLocalization.shared.language = language
             defer { AppLocalization.shared.language = originalLanguage }
@@ -1042,9 +1106,10 @@ extension CoreTests {
             }
             authenticationModel.settingsTab = "通用"
             await clickAuthenticationAction()
-            try expect(settingsOpened == (language == .chinese ? 1 : 2) && authenticationModel.settingsTab == "浏览器认证" && authenticationModel.history.count == 1,
+            try expect(settingsOpened == (language == .chinese ? 1 : 2) && authenticationModel.preferencesPage == .settings && authenticationModel.settingsTab == "浏览器认证" && authenticationModel.history.count == 1,
                        "rendered media recovery button opens authentication settings in both languages without retrying or replacing history")
         }
+        authenticationModel.preferencesPage = nil
         let pdfURL = URL(string: "https://example.com/paper.pdf")!
         authenticationModel.history = [DownloadItem(original: pdfURL.absoluteString, directURL: pdfURL, state: .failed,
                                                    error: message.fallback, errorMessage: message, documentTitle: "PDF fixture")]

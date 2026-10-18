@@ -30,6 +30,7 @@ import Combine
     }
 
     func inputTooLarge() {
+        model.trace.user(.inputRejected, context: .quickPanel, outcome: .failed)
         message = "输入超过 64 KB，请分批粘贴。"
         failed = true
     }
@@ -74,7 +75,7 @@ struct QuickDownloadView: View {
                     .accessibilityLabel(L("更多操作"))
             }
             ZStack(alignment: .topLeading) {
-                QuickLinkEditor(text: $state.draft, focusRequest: state.focusRequest, submit: state.submit, close: close, rejected: state.inputTooLarge)
+                QuickLinkEditor(text: $state.draft, focusRequest: state.focusRequest, submit: state.submit, close: close, rejected: state.inputTooLarge, captureTrace: { accepted in model.trace.user(accepted ? .inputCaptured : .inputRejected, context: .quickPanel, outcome: accepted ? .succeeded : .failed) })
                     .frame(height: 112)
                 if state.draft.isEmpty {
                     Text(L("粘贴链接，每行一条"))
@@ -117,7 +118,7 @@ struct QuickDownloadView: View {
                                     .accessibilityIdentifier("quick-reveal-" + item.id.uuidString)
                             }
                             if item.canRetry {
-                                Button(L("重试")) { model.retry(item.id) }
+                                Button(L("重试")) { model.retry(item.id, context: .quickPanel) }
                                     .buttonStyle(.plain).font(.system(size: 12)).disabled(model.busy || model.libraryMutationInProgress)
                             }
                         }
@@ -233,6 +234,7 @@ struct QuickLinkEditor: NSViewRepresentable {
     let submit: () -> Void
     let close: () -> Void
     let rejected: () -> Void
+    var captureTrace: ((Bool) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -252,7 +254,7 @@ struct QuickLinkEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? Editor else { return }
-        editor.submit = submit; editor.close = close
+        editor.submit = submit; editor.close = close; editor.captureTrace = captureTrace
         editor.textColor = .labelColor; editor.insertionPointColor = .labelColor
         editor.setAccessibilityLabel(L("下载链接"))
         if editor.string != text { editor.string = text; editor.undoManager?.removeAllActions() }
@@ -281,6 +283,7 @@ struct QuickLinkEditor: NSViewRepresentable {
         var submit: () -> Void = {}
         var close: () -> Void = {}
         var focusRequest: UUID?
+        var captureTrace: ((Bool) -> Void)?
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
             let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
             if (event.keyCode == 36 || event.keyCode == 76) && modifiers == .command { submit(); return true }
@@ -297,6 +300,7 @@ struct QuickLinkEditor: NSViewRepresentable {
                 super.paste(sender); return
             }
             insertText(captured, replacementRange: selectedRange())
+            captureTrace?(true)
         }
     }
 }
@@ -394,8 +398,8 @@ struct QuickLinkEditor: NSViewRepresentable {
         if button.state != state { button.state = state }
         if button.isHighlighted != selected { button.highlight(selected) }
     }
-    func popoverWillShow(_ notification: Notification) { setStatusSelected(true) }
-    func popoverDidClose(_ notification: Notification) { setStatusSelected(actionMenuIsOpen) }
+    func popoverWillShow(_ notification: Notification) { setStatusSelected(true); state.model.trace.record(.quickPanelShown, context: .quickPanel) }
+    func popoverDidClose(_ notification: Notification) { setStatusSelected(actionMenuIsOpen); state.model.trace.record(.quickPanelHidden, context: .quickPanel) }
     func menuWillOpen(_ menu: NSMenu) { actionMenuIsOpen = true; setStatusSelected(true) }
     func menuDidClose(_ menu: NSMenu) { actionMenuIsOpen = false; setStatusSelected(popover.isShown) }
 

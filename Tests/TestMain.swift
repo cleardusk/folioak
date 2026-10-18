@@ -110,6 +110,17 @@ struct CoreTests {
         defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--trace-only") {
+                try await interactionTraceTests()
+                if CommandLine.arguments.contains("--snapshots") { try await interactionTraceSnapshots() }
+                try await settingsLayoutTests()
+                return
+            }
+            if CommandLine.arguments.contains("--logs-only") {
+                try logGroupingTests()
+                try await logScrollTests()
+                return
+            }
             if CommandLine.arguments.contains("--preferences-only") {
                 try await WorkspacePreferencesTests.run(snapshots: CommandLine.arguments.contains("--snapshots"))
                 try await settingsLayoutTests()
@@ -218,6 +229,12 @@ struct CoreTests {
             defer { try? FileManager.default.removeItem(at: root) }
             let pdf = root.appendingPathComponent("sample.pdf")
             try createPDF(at: pdf)
+            if CommandLine.arguments.contains("--stress-only") {
+                try await resourceTests(root: root, pdf: pdf)
+                try workspaceBenchmark(root: root)
+                try await largeLibraryRegressionTests(root: root, pdf: pdf)
+                return
+            }
             if CommandLine.arguments.contains("--large-library-only") {
                 try await largeLibraryRegressionTests(root: root, pdf: pdf); return
             }
@@ -264,6 +281,7 @@ struct CoreTests {
             try await workspaceTests(root: root, pdf: pdf)
             try await quickDownloadTests()
             try await quickDownloadUITests()
+            try await interactionTraceTests()
             try await backgroundPersistenceTests(root: root, pdf: pdf)
             try await messagePersistenceTests(root: root, pdf: pdf)
             try await clearDownloadRecordsTests(root: root, pdf: pdf)

@@ -162,7 +162,7 @@ final class DownloadModel: ObservableObject {
         }
     }
     @Published var directory: URL {
-        didSet { preferences.set(directory.path, forKey: "downloadRootDirectory"); directoryNotice = nil }
+        didSet { preferences.set(directory.path, forKey: "downloadRootDirectory"); directoryNotice = nil; traceSetting(.directory) }
     }
     var directoryLabel: String { (directory.path as NSString).abbreviatingWithTildeInPath }
     var directoryExists: Bool {
@@ -180,28 +180,28 @@ final class DownloadModel: ObservableObject {
     }
 
     @Published var documentDisplayMode: LibraryDisplayMode {
-        didSet { preferences.set(documentDisplayMode.rawValue, forKey: "documentDisplayMode") }
+        didSet { preferences.set(documentDisplayMode.rawValue, forKey: "documentDisplayMode"); trace.user(.displayChanged, context: .documents, detail: documentDisplayMode == .grid ? .grid : .list) }
     }
     @Published var mediaDisplayMode: LibraryDisplayMode {
-        didSet { preferences.set(mediaDisplayMode.rawValue, forKey: "mediaDisplayMode") }
+        didSet { preferences.set(mediaDisplayMode.rawValue, forKey: "mediaDisplayMode"); trace.user(.displayChanged, context: .media, detail: mediaDisplayMode == .grid ? .grid : .list) }
     }
     @Published var namingRules: AssetNamingRules {
-        didSet { if namingRules.valid, let data = try? JSONEncoder().encode(namingRules) { preferences.set(data, forKey: AssetNamingRules.preferenceKey) } }
+        didSet { if namingRules.valid, let data = try? JSONEncoder().encode(namingRules) { preferences.set(data, forKey: AssetNamingRules.preferenceKey); traceSetting(.naming) } }
     }
     @Published var naming: NamingStyle {
-        didSet { preferences.set(naming.rawValue, forKey: "namingStyle") }
+        didSet { preferences.set(naming.rawValue, forKey: "namingStyle"); traceSetting(.naming) }
     }
     @Published var appearance: AppAppearance {
-        didSet { preferences.set(appearance.rawValue, forKey: "appearance"); applyAppearance() }
+        didSet { preferences.set(appearance.rawValue, forKey: "appearance"); applyAppearance(); traceSetting(.appearance) }
     }
     @Published var theme: AppTheme {
-        didSet { preferences.set(theme.rawValue, forKey: "theme") }
+        didSet { preferences.set(theme.rawValue, forKey: "theme"); traceSetting(.theme) }
     }
     @Published var language: AppLanguage {
-        didSet { preferences.set(language.rawValue, forKey: "language"); AppLocalization.shared.language = language }
+        didSet { preferences.set(language.rawValue, forKey: "language"); AppLocalization.shared.language = language; traceSetting(.language) }
     }
     @Published var showsMenuBarIcon: Bool {
-        didSet { preferences.set(showsMenuBarIcon, forKey: "showsMenuBarIcon") }
+        didSet { preferences.set(showsMenuBarIcon, forKey: "showsMenuBarIcon"); traceSetting(.menuBar) }
     }
     @Published private(set) var libraryUndo: LibraryRemovalUndo?
     @Published private(set) var recordAnimation = UUID()
@@ -238,6 +238,8 @@ final class DownloadModel: ObservableObject {
     let shortcuts: ShortcutSettings
     let browserAuthentication: BrowserAuthenticationSettings
     let updates: UpdateChecker
+    let traceSettings: InteractionTraceSettings
+    private var traceAttempts: [UUID: (id: UUID, start: UInt64)] = [:]
     @Published var settingsTab = "通用"
     @Published var preferencesPage: WorkspacePreferencesPage?
     private(set) var editTarget = ""
@@ -283,6 +285,7 @@ final class DownloadModel: ObservableObject {
         self.revealer = revealer
         self.recycleFile = recycleFile
         persistence = stateURL.map(WorkspacePersistence.init)
+        traceSettings = InteractionTraceSettings(preferences: preferences, recorder: InteractionTrace(directory: stateURL.map { $0.deletingLastPathComponent().appendingPathComponent("interaction-traces") }))
         let downloadPreferences = DownloadPreferences(preferences)
         documentDisplayMode = LibraryDisplayMode(rawValue: preferences.string(forKey: "documentDisplayMode") ?? "") ?? .list
         mediaDisplayMode = LibraryDisplayMode(rawValue: preferences.string(forKey: "mediaDisplayMode") ?? "") ?? .list
@@ -314,6 +317,7 @@ final class DownloadModel: ObservableObject {
 
     func clearDownloadRecords() {
         guard canClearDownloadRecords, replaceDownloadRecords(items: [], history: []) else { return }
+        trace.record(.historyCleared, context: .downloads, outcome: .succeeded)
         recordAnimation = UUID()
         duplicateCount = 0; batchID = UUID()
     }
@@ -322,6 +326,7 @@ final class DownloadModel: ObservableObject {
         guard !busy, !libraryMutationInProgress, downloads.contains(where: { $0.id == id }) else { return }
         if replaceDownloadRecords(items: items.filter { $0.id != id }, history: history.filter { $0.id != id }) {
             recordAnimation = UUID()
+            trace.record(.historyCleared, context: .downloads, outcome: .succeeded, item: id, count: 1)
             if diagnosticItem?.id == id { diagnosticItem = nil }
         }
     }
@@ -362,6 +367,10 @@ final class DownloadModel: ObservableObject {
 
     @discardableResult
     func renameAsset(_ request: AssetRenameRequest, file: URL, to basename: String) async -> Bool {
+        let operation = trace.isEnabled ? UUID() : nil
+        var succeeded = false
+        trace.user(.assetRenamed, outcome: .requested, item: request.id, operation: operation)
+        defer { trace.record(.assetRenamed, outcome: succeeded ? .succeeded : .failed, item: request.id, operation: operation) }
         guard canRenameAsset(request.id, in: request.collection) else {
             assetRenameError = "当前无法重命名，请确认文件存在且资料库可写。"; return false
         }
@@ -400,6 +409,7 @@ final class DownloadModel: ObservableObject {
             if let diagnosticItem { self.diagnosticItem = AssetRename.replacing(diagnosticItem, paths: paths, new: destination) }
             assetRenameError = nil; notice = nil; fileRefreshRevision += 1
             renamingAsset = nil
+            succeeded = true
             return true
         } catch {
             assetRenameError = "重命名未完成：\(error.localizedDescription)"
@@ -413,6 +423,11 @@ final class DownloadModel: ObservableObject {
     }
 
     private func changeLibraryRemoval(_ ids: Set<UUID>, in collection: LibraryCollection, removed: Bool, registerUndo: Bool) async -> Bool {
+        let operation = trace.isEnabled ? UUID() : nil
+        var succeeded = false
+        let context: InteractionEvent.Context = collection == .documents ? .documents : .media
+        trace.user(removed ? .libraryRemoved : .libraryRestored, context: context, outcome: .requested, operation: operation, count: ids.count)
+        defer { trace.record(removed ? .libraryRemoved : .libraryRestored, context: context, outcome: succeeded ? .succeeded : .failed, operation: operation, count: ids.count) }
         guard canManageLibrary(collection) else {
             notice = busy ? "下载结束后可整理资料库。" : "资料库当前无法修改，原记录已保留。"
             return false
@@ -511,6 +526,7 @@ final class DownloadModel: ObservableObject {
             }
             recordAnimation = UUID()
             if registerUndo { libraryUndo = LibraryRemovalUndo(collection: collection, ids: changed, removed: removed) }
+            succeeded = true
             notice = nil
             return true
         } catch {
@@ -571,6 +587,10 @@ final class DownloadModel: ObservableObject {
 
     @discardableResult
     func confirmFileTrash(_ request: FileTrashRequest) -> Bool {
+        let operation = trace.isEnabled ? UUID() : nil
+        var succeeded = false
+        trace.user(.filesTrashed, outcome: .requested, operation: operation, count: request.files.count)
+        defer { trace.record(.filesTrashed, outcome: succeeded ? .succeeded : .failed, operation: operation, count: request.files.count) }
         guard !busy, !libraryMutationInProgress, pendingFileTrash?.id == request.id else { return false }
         defer { if pendingFileTrash?.id == request.id { pendingFileTrash = nil } }
         let files = Set(request.files)
@@ -600,7 +620,8 @@ final class DownloadModel: ObservableObject {
             refreshMissingFiles(files)
             persistWorkspace()
             if persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil { notice = nil }
-            return persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil
+            succeeded = persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil
+            return succeeded
         } catch {
             refreshMissingFiles(files)
             persistWorkspace()
@@ -785,6 +806,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func retryFromLibrary(_ item: DownloadItem) {
+        trace.user(.retryRequested, context: .documents, outcome: .requested, item: item.id)
         guard !busy, !libraryMutationInProgress, let source = item.source else { return }
         // Restore the exact version, even when the original request used “latest”.
         let original = item.metadata?.reference.identifier ?? source.webURL.absoluteString
@@ -1011,6 +1033,21 @@ final class DownloadModel: ObservableObject {
     }
 
     private func submitDownload(_ text: String, quick: Bool) throws -> Int {
+        let operation = trace.isEnabled ? UUID() : nil
+        let context: InteractionEvent.Context = quick ? .quickPanel : .mainWindow
+        trace.user(.downloadSubmitted, context: context, outcome: .requested, operation: operation)
+        do {
+            let count = try performSubmitDownload(text, quick: quick, operation: operation)
+            trace.record(.downloadAccepted, context: context, outcome: .succeeded, operation: operation, count: count)
+            return count
+        } catch {
+            trace.record(.downloadRejected, context: context, outcome: .failed, operation: operation,
+                diagnostic: DiagnosticMessage.ID(rawValue: DiagnosticMessage.downloadFailure(error).id))
+            throw error
+        }
+    }
+
+    private func performSubmitDownload(_ text: String, quick: Bool, operation: UUID?) throws -> Int {
         guard !libraryMutationInProgress else { throw DownloadError.limit("正在保存资料库，请稍后添加任务。") }
         guard !cancelling, quick || !busy else { throw DownloadError.limit("正在停止，请稍后添加任务。") }
         let batch = try BatchInput(text)
@@ -1042,6 +1079,15 @@ final class DownloadModel: ObservableObject {
             persistenceSequence += 1; appliedPersistenceSequence = persistenceSequence
         }
         items = updatedItems; history = updatedHistory
+        if trace.isEnabled {
+            for item in added {
+                let detail: InteractionEvent.Detail
+                switch item.source { case .arxiv?: detail = .arxiv; case .pdf?: detail = .pdf; case .file?: detail = .file; case .media?: detail = .media; case nil: detail = .unknown }
+                trace.record(.taskQueued, context: quick ? .quickPanel : .mainWindow,
+                    outcome: item.source == nil ? .failed : .succeeded, item: item.id, operation: operation, detail: detail,
+                    diagnostic: item.errorMessage.flatMap { DiagnosticMessage.ID(rawValue: $0.id) })
+            }
+        }
         duplicateCount = batch.duplicates + batch.entries.count - entries.count
         notice = nil; persistenceNotice = nil
         if !quick { batchID = UUID() }
@@ -1054,7 +1100,7 @@ final class DownloadModel: ObservableObject {
         return added.count
     }
 
-    func retry(_ single: UUID? = nil) {
+    func retry(_ single: UUID? = nil, context: InteractionEvent.Context = .downloads) {
         guard !busy, !libraryMutationInProgress else { return }
         if single == nil, history.contains(where: { old in old.canRetry && !items.contains(where: { $0.id == old.id }) }) {
             let candidates = Array(downloads.filter(\.canRetry).prefix(ResourceLimits.batchCount))
@@ -1068,6 +1114,7 @@ final class DownloadModel: ObservableObject {
         }
         let ids = items.filter { $0.canRetry && (single == nil || $0.id == single) }.map(\.id)
         guard !ids.isEmpty else { return }
+        trace.user(.retryRequested, context: context, item: single, count: ids.count)
         record(.info, DiagnosticMessage(.retry, String(ids.count)))
         for id in ids { update(id) { $0.state = .queued; $0.error = nil; $0.progress = nil; $0.finishedAt = nil; $0.diagnostics = nil; $0.bytesPerSecond = nil; $0.transferSample = nil } }
         execute(ids)
@@ -1076,6 +1123,7 @@ final class DownloadModel: ObservableObject {
     func cancel() {
         guard busy else { return }
         cancelling = true
+        trace.user(.cancelRequested, context: .downloads, outcome: .requested)
         record(.warning, DiagnosticMessage(.cancelling))
         worker?.cancel()
     }
@@ -1183,20 +1231,29 @@ final class DownloadModel: ObservableObject {
     }
 
     func preview(_ item: DownloadItem) {
+        let operation = trace.isEnabled ? UUID() : nil
+        var succeeded = false
+        trace.user(.previewRequested, outcome: .requested, item: item.id, operation: operation)
+        defer { trace.record(.previewRequested, outcome: succeeded ? .succeeded : .failed, item: item.id, operation: operation) }
         guard !assetRenameInProgress else { return }
         previewURL = localFile(item)
-        if let file = previewURL { markRead(file) }
+        if let file = previewURL { markRead(file); succeeded = true }
     }
 
     func openFile(_ item: DownloadItem, reveal: Bool = false) {
+        let operation = trace.isEnabled ? UUID() : nil
+        var succeeded = false
+        trace.user(reveal ? .revealRequested : .openRequested, outcome: .requested, item: item.id, operation: operation)
+        defer { trace.record(reveal ? .revealRequested : .openRequested, outcome: succeeded ? .succeeded : .failed, item: item.id, operation: operation) }
         guard !assetRenameInProgress else { return }
         guard let url = localFile(item) else { return }
         if reveal {
             let current = downloads.first { $0.id == item.id } ?? mediaLibrary.first { $0.id == item.id } ?? item
             revealer(current.localURLs.filter { FileManager.default.fileExists(atPath: $0.path) })
+            succeeded = true
         }
         else if !opener(url) { notice = "无法打开文件，请检查默认应用。文件仍保存在原位置。" }
-        else { notice = nil; if !reveal { markRead(url) } }
+        else { notice = nil; markRead(url); succeeded = true }
     }
 
     private func markRead(_ file: URL) {
@@ -1208,13 +1265,16 @@ final class DownloadModel: ObservableObject {
 
     func openSource(_ item: DownloadItem) {
         if let source = item.source {
-            notice = opener(source.webURL) ? nil : "无法打开来源页面，请检查默认浏览器。"
+            let opened = opener(source.webURL)
+            trace.user(.sourceOpened, outcome: opened ? .succeeded : .failed, item: item.id)
+            notice = opened ? nil : "无法打开来源页面，请检查默认浏览器。"
         }
     }
 
     @discardableResult func openOriginalSource(_ item: DownloadItem) -> Bool {
         guard let url = item.provenance?.browserURL else { return false }
         let opened = opener(url)
+        trace.record(.sourceOpened, outcome: opened ? .succeeded : .failed, item: item.id)
         notice = opened ? nil : "无法打开来源页面，请检查默认浏览器。"
         return opened
     }
@@ -1229,7 +1289,18 @@ final class DownloadModel: ObservableObject {
 
     private func update(_ id: UUID, _ transform: (inout DownloadItem) -> Void) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        let before = items[index].state
         transform(&items[index])
+        let attempt = traceAttempts[id]
+        if items[index].state.terminal { traceAttempts.removeValue(forKey: id) }
+        guard trace.isEnabled, before != items[index].state else { return }
+        let value = items[index]
+        let outcome: InteractionEvent.Outcome = value.state == .cancelled ? .cancelled :
+            value.state == .failed || value.state == .paused ? .failed : value.state.terminal ? .succeeded : .performed
+        trace.record(value.state.terminal ? .taskFinished : .taskPhase, context: .downloads, outcome: outcome,
+            item: id, attempt: attempt?.id,
+            diagnostic: DiagnosticMessage.ID(rawValue: (value.errorMessage ?? value.state.message).id),
+            durationMS: value.state.terminal ? attempt.map { Double(DispatchTime.now().uptimeNanoseconds - $0.start) / 1_000_000 } : nil)
     }
 
     private func receive(_ event: DownloadEvent, for id: UUID, run: UUID) {
@@ -1307,6 +1378,11 @@ final class DownloadModel: ObservableObject {
                 if let paused = items.first(where: { $0.id == id }) { record(.warning, paused.errorMessage ?? DiagnosticMessage(.metadata, paused.error ?? "站点限流"), item: paused) }
                 saveWorkspace()
                 continue
+            }
+            if trace.isEnabled {
+                let attempt = UUID()
+                traceAttempts[id] = (attempt, DispatchTime.now().uptimeNanoseconds)
+                trace.record(.taskStarted, context: .downloads, item: id, attempt: attempt)
             }
             let baseSnapshot = item.namingSnapshot ?? AssetNamingSnapshot(rules: namingRules, paperStyle: namingStyle, now: item.createdAt)
             let snapshot = item.localURLs.isEmpty ? baseSnapshot : baseSnapshot.saving(item.localURLs)
@@ -1494,8 +1570,8 @@ final class LinkTextView: NSTextView {
 
     override func paste(_ sender: Any?) {
         guard isEditable, let text = NSPasteboard.general.string(forType: .string) else { return }
-        do { insertText(try PaperInput.captured(text), replacementRange: selectedRange()) }
-        catch { captureFailure?(error.localizedDescription) }
+        do { insertText(try PaperInput.captured(text), replacementRange: selectedRange()); captureTrace?(true) }
+        catch { captureTrace?(false); captureFailure?(error.localizedDescription) }
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard isEditable, sender.draggingPasteboard.availableType(from: [.string, .URL]) != nil else { return [] }
@@ -1510,9 +1586,11 @@ final class LinkTextView: NSTextView {
             let captured = try PaperInput.captured(text)
             let prefix = string.isEmpty || string.hasSuffix("\n") ? "" : "\n"
             insertText(prefix + captured, replacementRange: NSRange(location: (string as NSString).length, length: 0))
+            captureTrace?(true)
             return true
-        } catch { captureFailure?(error.localizedDescription); return false }
+        } catch { captureTrace?(false); captureFailure?(error.localizedDescription); return false }
     }
+    var captureTrace: ((Bool) -> Void)?
     var captureFailure: ((String) -> Void)?
 
     func styleReferences(textColor: NSColor, accentColor: NSColor, underlineRecognized: Bool) {
@@ -1629,6 +1707,9 @@ struct LinkInput: NSViewRepresentable {
         editor.setAccessibilityLabel(L("下载链接，每行一个"))
         editor.delegate = context.coordinator
         editor.captureFailure = { [weak model] in model?.notice = $0 }
+        editor.captureTrace = { [weak model] accepted in
+            model?.trace.user(accepted ? .inputCaptured : .inputRejected, context: .mainWindow, outcome: accepted ? .succeeded : .failed)
+        }
         editor.focusChanged = { [weak editor, weak coordinator = context.coordinator] value in
             guard let coordinator else { return }
             let editRequest = coordinator.parent.model.editRequest, listRequest = coordinator.parent.model.listRequest
@@ -1914,6 +1995,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
+        model.trace.record(.windowShown, context: .mainWindow)
         NSApp.activate(ignoringOtherApps: true)
         updateObservation = model.updates.$notice.sink { [weak self] _ in
             DispatchQueue.main.async { self?.presentUpdateIfPossible() }
@@ -2009,6 +2091,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             terminationPending = true
             Task { [self] in
                 await model.persistWorkspaceAndWait()
+                await model.finishTrace()
                 sender.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater
@@ -2022,13 +2105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         terminationPending = true
         Task { [self] in
             await model.cancelAndWait()
+            await model.finishTrace()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === window {
-            if model.showsMenuBarIcon { sender.orderOut(nil); model.saveWorkspace() }
+            if model.showsMenuBarIcon { sender.orderOut(nil); model.trace.record(.windowHidden, context: .mainWindow); model.saveWorkspace() }
             else { NSApp.terminate(sender) }
             return false
         }
@@ -2039,6 +2123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
     private func showMainWindow() {
+        model.trace.record(.windowShown, context: .mainWindow)
         guard let window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)

@@ -101,8 +101,12 @@ struct DownloaderView: View {
     @WorkspaceViewState private var previousPreferencesPage: WorkspacePreferencesPage?
     @WorkspaceViewState private var restoreListFocus = false
     private var workspaceActive: Bool { model.preferencesPage == nil }
+    private var traceContext: InteractionEvent.Context {
+        switch page { case .downloads: return .downloads; case .library: return .documents; case .media: return .media; case .logs: return .logs }
+    }
     @WorkspaceViewState private var inputFocused = false
     @WorkspaceViewState private var query = ""
+    @WorkspaceViewState private var traceSearchTask: Task<Void, Never>?
     @WorkspaceViewState private var searchExpanded = false
     @WorkspaceViewState private var searchFocusRequest: (id: UUID, edit: UUID, list: UUID, page: WorkspacePage)?
     @FocusState private var searchFocused: Bool
@@ -159,45 +163,7 @@ struct DownloaderView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            Rectangle().fill(ThemePalette.color(palette.border).opacity(0.55)).frame(width: 1)
-            VStack(alignment: .leading, spacing: 0) {
-                Group {
-                    if let destination = model.preferencesPage {
-                        HStack {
-                            Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.page)
-                            Spacer()
-                        }.frame(height: WorkspaceMetrics.headerHeight)
-                    } else { header }
-                }
-                ZStack(alignment: .topLeading) {
-                    workspaceContent
-                        .opacity(workspaceActive ? 1 : 0)
-                        .disabled(!workspaceActive)
-                        .allowsHitTesting(workspaceActive)
-                        .accessibilityHidden(!workspaceActive)
-                    if hasOpenedSettings || model.preferencesPage == .settings {
-                        WorkspaceSettingsView(model: model)
-                            .opacity(model.preferencesPage == .settings ? 1 : 0)
-                            .disabled(model.preferencesPage != .settings)
-                            .allowsHitTesting(model.preferencesPage == .settings)
-                            .accessibilityHidden(model.preferencesPage != .settings)
-                    }
-                    if model.preferencesPage == .about { WorkspaceAboutView(model: model) }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .animation(nil, value: model.preferencesPage)
-            }.padding(.horizontal, 24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(minWidth: 780, minHeight: 540)
-        .environment(\.locale, L10n.locale)
-        .foregroundStyle(ThemePalette.color(palette.text))
-        .tint(accent)
-        .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture(perform: dismissEditing))
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
-        .ignoresSafeArea(.container, edges: .top)
+        tracedLayout
         .onReceive(model.$listRequest.dropFirst()) { _ in
             model.preferencesPage = nil
             if page == .logs { focusListOnArrival = true; page = .downloads }
@@ -210,6 +176,9 @@ struct DownloaderView: View {
         .onReceive(model.$searchRequest.dropFirst()) { openSearch($0) }
         .onAppear { if model.preferencesPage == .settings { hasOpenedSettings = true } }
         .onChange(of: model.preferencesPage) { destination in
+            traceSearchTask?.cancel()
+            model.trace.user(.pageChanged, context: destination == nil ? traceContext : .settings,
+                detail: destination == .about ? .about : destination == .settings ? .general : nil)
             if destination == .settings { hasOpenedSettings = true }
             if destination != nil {
                 if previousPreferencesPage == nil { restoreListFocus = listFocused || selectedID != nil }
@@ -225,6 +194,8 @@ struct DownloaderView: View {
             if !focused && query.isEmpty { searchExpanded = false }
         }
         .onChange(of: page) { _ in
+            traceSearchTask?.cancel()
+            model.trace.user(.pageChanged, context: traceContext)
             query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil
             if page != .logs { logItem = nil }
             if page != .downloads { inputFocused = false; endTextEditing() }
@@ -282,6 +253,99 @@ struct DownloaderView: View {
         }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
         .onReceive(model.$batchID.dropFirst()) { _ in model.preferencesPage = nil; page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
+    }
+
+    // Split the view expression at existing modifier boundaries so adding
+    // observers does not inflate SwiftUI's type-checking work or add UI layers.
+    private var tracedLayout: some View {
+        workspaceLayout
+            .onChange(of: query, perform: traceSearchChanged)
+            .onDisappear { traceSearchTask?.cancel() }
+            .onChange(of: libraryFilter, perform: traceLibraryFilterChanged)
+            .onChange(of: librarySort, perform: traceLibrarySortChanged)
+            .onChange(of: libraryTag) { _ in model.trace.user(.filterChanged, context: .documents, detail: .tag) }
+            .onChange(of: filter, perform: traceQueueFilterChanged)
+            .onChange(of: mediaRemoved) { value in
+                let detail: InteractionEvent.Detail = value ? .removed : .all
+                model.trace.user(.filterChanged, context: .media, detail: detail)
+            }
+    }
+
+    private func traceSearchChanged(_ value: String) {
+        traceSearchTask?.cancel()
+        guard workspaceActive, model.trace.isEnabled else { return }
+        let targetPage = page
+        traceSearchTask = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+            guard !Task.isCancelled, workspaceActive, page == targetPage else { return }
+            let count: Int
+            switch page {
+            case .library: count = libraryResult.items.count
+            case .logs: count = visibleLogs.count
+            default: count = visibleItems.count
+            }
+            model.trace.record(.searchCompleted, context: traceContext, detail: value.isEmpty ? .empty : .nonempty, count: count)
+        }
+    }
+
+    private func traceLibraryFilterChanged(_ value: LibraryFilter) {
+        let detail: InteractionEvent.Detail
+        switch value { case .all: detail = .all; case .favorites: detail = .favorites; case .unread: detail = .unread; case .removed: detail = .removed }
+        model.trace.user(.filterChanged, context: .documents, detail: detail)
+    }
+
+    private func traceLibrarySortChanged(_ value: LibrarySort) {
+        let detail: InteractionEvent.Detail
+        switch value { case .newest: detail = .newest; case .title: detail = .title; case .year: detail = .year }
+        model.trace.user(.filterChanged, context: .documents, detail: detail)
+    }
+
+    private func traceQueueFilterChanged(_ value: QueueFilter) {
+        let detail: InteractionEvent.Detail
+        switch value { case .all: detail = .all; case .active: detail = .active; case .saved: detail = .saved; case .failed: detail = .failed }
+        model.trace.user(.filterChanged, context: .downloads, detail: detail)
+    }
+
+    private var workspaceLayout: some View {
+        HStack(spacing: 0) {
+            sidebar
+            Rectangle().fill(ThemePalette.color(palette.border).opacity(0.55)).frame(width: 1)
+            VStack(alignment: .leading, spacing: 0) {
+                Group {
+                    if let destination = model.preferencesPage {
+                        HStack {
+                            Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.page)
+                            Spacer()
+                        }.frame(height: WorkspaceMetrics.headerHeight)
+                    } else { header }
+                }
+                ZStack(alignment: .topLeading) {
+                    workspaceContent
+                        .opacity(workspaceActive ? 1 : 0)
+                        .disabled(!workspaceActive)
+                        .allowsHitTesting(workspaceActive)
+                        .accessibilityHidden(!workspaceActive)
+                    if hasOpenedSettings || model.preferencesPage == .settings {
+                        WorkspaceSettingsView(model: model)
+                            .opacity(model.preferencesPage == .settings ? 1 : 0)
+                            .disabled(model.preferencesPage != .settings)
+                            .allowsHitTesting(model.preferencesPage == .settings)
+                            .accessibilityHidden(model.preferencesPage != .settings)
+                    }
+                    if model.preferencesPage == .about { WorkspaceAboutView(model: model) }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .animation(nil, value: model.preferencesPage)
+            }.padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 780, minHeight: 540)
+        .environment(\.locale, L10n.locale)
+        .foregroundStyle(ThemePalette.color(palette.text))
+        .tint(accent)
+        .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture(perform: dismissEditing))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
+        .ignoresSafeArea(.container, edges: .top)
     }
 
     private var workspaceContent: some View {
@@ -1137,7 +1201,9 @@ struct LogContent: View {
     @WorkspaceViewState private var scrollRequest = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var secondary: Color { ThemePalette.color(palette.secondary) }
-    private var pointsUp: Bool { requestedBottom ?? position.atBottom }
+    // Keep the arrow pointing toward the active destination until arrival.
+    // Repeated clicks during the jump must not reverse its direction.
+    private var pointsUp: Bool { requestedBottom.map { !$0 } ?? position.atBottom }
 
     var body: some View {
         let headers = LogHeading.headings(entries)
@@ -1148,9 +1214,8 @@ struct LogContent: View {
                     Spacer()
                     if position.canScroll && !entries.isEmpty {
                         Button { jump(toBottom: !pointsUp) } label: {
-                            Image(systemName: "arrow.down.to.line")
-                                .rotationEffect(.degrees(pointsUp ? 180 : 0))
-                                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: pointsUp)
+                            Image(systemName: pointsUp ? "arrow.up.to.line" : "arrow.down.to.line")
+                                .animation(nil, value: pointsUp)
                         }.buttonStyle(RoundButtonStyle(palette: palette))
                             .help(pointsUp ? L("回到最早日志") : L("前往最新日志"))
                             .accessibilityLabel(pointsUp ? L("回到最早日志") : L("前往最新日志"))
