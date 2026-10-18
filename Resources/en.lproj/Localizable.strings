@@ -798,3 +798,12 @@
 
 "后退" = "Back";
 "前进" = "Forward";
+
+"PDF 目录" = "PDF folder";
+"使用单独目录" = "Use a separate folder";
+"为论文和 PDF 使用单独目录" = "Use a separate folder for papers and PDFs";
+"选择 PDF 保存目录" = "Choose PDF Folder";
+"更改 PDF 保存目录" = "Change PDF folder";
+"之后下载的论文和 PDF 直接保存到此目录；已有文件不移动。" = "New papers and PDFs are saved directly here. Existing files stay where they are.";
+"其他文件按类型归入 Documents、Archives、Videos、Audio、Images。" = "Other files are organized into Documents, Archives, Videos, Audio, and Images.";
+"PDF 保存目录无法创建或不可写，请重新选择。" = "The PDF folder could not be created or is not writable. Choose another folder.";

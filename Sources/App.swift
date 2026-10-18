@@ -169,6 +169,19 @@ final class DownloadModel: ObservableObject {
     @Published var directory: URL {
         didSet { preferences.set(directory.path, forKey: "downloadRootDirectory"); directoryNotice = nil; traceSetting(.directory) }
     }
+    @Published var pdfDirectory: URL? {
+        didSet {
+            if let pdfDirectory { preferences.set(pdfDirectory.path, forKey: "pdfDownloadDirectory") }
+            else { preferences.removeObject(forKey: "pdfDownloadDirectory") }
+            directoryNotice = nil; traceSetting(.directory)
+        }
+    }
+    @Published var usesPDFDirectory: Bool {
+        didSet { preferences.set(usesPDFDirectory, forKey: "usesPDFDownloadDirectory"); directoryNotice = nil; traceSetting(.directory) }
+    }
+    var activePDFDirectory: URL? { usesPDFDirectory ? pdfDirectory : nil }
+    var pdfDirectoryLabel: String { pdfDirectory.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "" }
+
     var directoryLabel: String { (directory.path as NSString).abbreviatingWithTildeInPath }
     var directoryExists: Bool {
         var isDirectory: ObjCBool = false
@@ -305,6 +318,8 @@ final class DownloadModel: ObservableObject {
         language = AppLanguage(rawValue: preferences.string(forKey: "language") ?? "") ?? .system
         showsMenuBarIcon = preferences.object(forKey: "showsMenuBarIcon") as? Bool ?? true
         directory = downloadPreferences.directory
+        pdfDirectory = downloadPreferences.pdfDirectory
+        usesPDFDirectory = downloadPreferences.usesPDFDirectory
         if preferences.string(forKey: "downloadRootDirectory") == nil {
             preferences.set(directory.path, forKey: "downloadRootDirectory")
         }
@@ -1042,6 +1057,26 @@ final class DownloadModel: ObservableObject {
         }
     }
 
+    func setPDFDirectoryEnabled(_ enabled: Bool) {
+        guard !busy else { return }
+        if enabled && pdfDirectory == nil { choosePDFDirectory() }
+        else { usesPDFDirectory = enabled }
+    }
+
+    func choosePDFDirectory() {
+        guard !busy else { return }
+        let panel = NSOpenPanel()
+        panel.title = L("选择 PDF 保存目录")
+        panel.prompt = L("选择")
+        panel.canChooseFiles = false; panel.canChooseDirectories = true
+        panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
+        panel.directoryURL = pdfDirectory ?? directory
+        present(panel) { [self] response in
+            guard response == .OK, !busy, let url = panel.url else { return }
+            pdfDirectory = url; usesPDFDirectory = true
+        }
+    }
+
     func start() {
         guard !busy else { return }
         do { _ = try submitDownload(input, quick: false) }
@@ -1391,7 +1426,7 @@ final class DownloadModel: ObservableObject {
         }
     }
 
-    private func executeSource(_ ids: [UUID], target: URL, namingStyle: NamingStyle, run: UUID) async {
+    private func executeSource(_ ids: [UUID], target: URL, pdfTarget: URL?, namingStyle: NamingStyle, run: UUID) async {
         for id in ids {
             if Task.isCancelled { break }
             guard let item = items.first(where: { $0.id == id }),
@@ -1418,7 +1453,7 @@ final class DownloadModel: ObservableObject {
                 for await event in events { self?.receive(event, for: id, run: run) }
             }
             do {
-                let saved = try await engine.download(source, to: target, naming: snapshot.paperStyle, namingSnapshot: snapshot, mediaFormat: item.mediaFormat ?? .automatic, organizeByType: true) { event in sink.yield(event) }
+                let saved = try await engine.download(source, to: target, naming: snapshot.paperStyle, namingSnapshot: snapshot, mediaFormat: item.mediaFormat ?? .automatic, organizeByType: true, pdfDirectory: pdfTarget) { event in sink.yield(event) }
                 sink.finish()
                 await listener.value
                 update(id) {
@@ -1475,6 +1510,7 @@ final class DownloadModel: ObservableObject {
         directoryNotice = nil
         guard !ids.isEmpty else { return }
         let target = directory
+        let pdfTarget = activePDFDirectory
         busy = true
         cancelling = false
         let namingStyle = naming
@@ -1489,7 +1525,7 @@ final class DownloadModel: ObservableObject {
                         items.first(where: { $0.id == id })?.source?.rateLimitKey ?? "invalid"
                     }
                     _ = await SourceScheduler.run(groups) { [self] group in
-                        await executeSource(group, target: target, namingStyle: namingStyle, run: run)
+                        await executeSource(group, target: target, pdfTarget: pdfTarget, namingStyle: namingStyle, run: run)
                     }
                 }
                 if Task.isCancelled {

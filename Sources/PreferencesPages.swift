@@ -106,9 +106,26 @@ private struct WorkspaceGeneralSettings: View {
                                 .accessibilityLabel(L("更改保存位置"))
                         }
                     }
-                    Text(L("按类型归入 Papers、Documents、Archives、Videos、Audio、Images；首次下载时创建。"))
+                    Text(L(model.usesPDFDirectory ? "其他文件按类型归入 Documents、Archives、Videos、Audio、Images。" : "按类型归入 Papers、Documents、Archives、Videos、Audio、Images；首次下载时创建。"))
                         .font(.system(size: 11)).foregroundStyle(secondary).fixedSize(horizontal: false, vertical: true)
                         .padding(.leading, labelWidth + 16)
+                    row("PDF 目录") {
+                        Toggle(L("使用单独目录"), isOn: Binding(get: { model.usesPDFDirectory }, set: model.setPDFDirectoryEnabled))
+                            .toggleStyle(.checkbox).disabled(model.busy)
+                            .accessibilityLabel(L("为论文和 PDF 使用单独目录"))
+                    }
+                    if model.usesPDFDirectory {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 12) {
+                                Text(model.pdfDirectoryLabel).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading).help(model.pdfDirectory?.path ?? "")
+                                Button(L("更改…"), action: model.choosePDFDirectory).controlSize(.small).disabled(model.busy)
+                                    .accessibilityLabel(L("更改 PDF 保存目录"))
+                            }
+                            Text(L("之后下载的论文和 PDF 直接保存到此目录；已有文件不移动。"))
+                                .font(.system(size: 11)).foregroundStyle(secondary).fixedSize(horizontal: false, vertical: true)
+                        }.padding(.leading, labelWidth + 16)
+                    }
                     row("语言") {
                         Picker(L("语言"), selection: $model.language) {
                             ForEach(AppLanguage.allCases, id: \.self) { Text($0.label).tag($0) }

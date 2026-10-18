@@ -37,6 +37,8 @@ CI 固定 Xcode 26.3 / macOS SDK 26.2，并校验 arm64；最低运行系统仍�
 
 ## 已确认范围的小版本发布
 
+PDF 独立保存目录可运行 `./test.command --pdf-directory-only --snapshots`，覆盖默认关闭、偏好持久化、PDF 内容分流、批次目标固定、快捷下载、缓存与重名保护、目录异常与重试、CLI 覆盖和中英文设置布局。
+
 设置、关于与主窗口导航调整可运行 `./test.command --preferences-only --snapshots`，验证原生菜单与快捷键路由、窗口重开、资料库状态保留、命名规则草稿与保存，以及中英文浅深色最小窗口布局。无需重复无关的媒体工具或大库性能测试。
 
 仅影响资料库交互与重命名时，可按维护者确认的范围运行 `./test.command --library-polish-only --snapshots`，覆盖重命名、回滚、来源保留、列表／网格点击、菜单、详情、侧栏及 20,000 条资料库回归。`--library-details-only` 可单独复测详情操作与大库，避免重复已通过且未受后续修改影响的检查。

@@ -6,7 +6,7 @@ mkdir -p build/en.lproj
 cp Resources/en.lproj/Localizable.strings build/en.lproj/
 python3 Tools/prepare-media.py
 details_only=0
-for argument in "$@"; do [[ "$argument" == "--library-management-only" || "$argument" == "--ui-only" || "$argument" == "--stress-only" || "$argument" == "--trace-only" || "$argument" == "--logs-only" || "$argument" == "--preferences-only" || "$argument" == "--details-only" || "$argument" == "--library-polish-only" || "$argument" == "--library-details-only" ]] && details_only=1; done
+for argument in "$@"; do [[ "$argument" == "--library-management-only" || "$argument" == "--ui-only" || "$argument" == "--stress-only" || "$argument" == "--trace-only" || "$argument" == "--logs-only" || "$argument" == "--preferences-only" || "$argument" == "--pdf-directory-only" || "$argument" == "--details-only" || "$argument" == "--library-polish-only" || "$argument" == "--library-details-only" ]] && details_only=1; done
 if (( ! details_only )); then python3 Tests/MediaToolsTests.py; fi
 version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
 [[ "$version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]

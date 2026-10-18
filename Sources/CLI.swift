@@ -342,7 +342,7 @@ enum CLIRunner {
                     do {
                         let directory = override ?? defaults.directory
                         if override != nil { try DownloadFolder.prepareRoot(directory) }
-                        let paper = try await engine.download(source, to: directory, naming: naming, namingSnapshot: namingSnapshot, mediaFormat: options.mediaFormat, organizeByType: override == nil) { event in
+                        let paper = try await engine.download(source, to: directory, naming: naming, namingSnapshot: namingSnapshot, mediaFormat: options.mediaFormat, organizeByType: override == nil, pdfDirectory: override == nil ? defaults.activePDFDirectory : nil) { event in
                             console.receive(event)
                         }
                         result.identifier = paper.metadata?.reference.identifier

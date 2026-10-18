@@ -9,7 +9,7 @@
 - **Documents** — arXiv, Hugging Face papers, OpenReview, ACL, CVF, GitHub PDFs, and public PDF links.
 - **Files** — public HTTPS links for PPT/PPTX, DOC/DOCX, XLS/XLSX, EPUB, OpenDocument, text/data files, and ZIP/7Z/RAR/TAR/GZ/BZ2/XZ archives. Direct endpoints can identify files through response headers or supported container signatures.
 - **Media** — individual videos from YouTube, Bilibili, X, Toutiao, Xiaohongshu, Douyin, TikTok, Instagram, and Vimeo, plus direct image, audio, and video links.
-- **Organization** — one download folder, with `Papers`, `Documents`, `Archives`, `Videos`, `Audio`, and `Images` subfolders and built-in document and media libraries.
+- **Organization** — a default download folder, an optional separate folder for papers and PDFs, and `Papers`, `Documents`, `Archives`, `Videos`, `Audio`, and `Images` subfolders and built-in document and media libraries.
 
 Common files remain in the document library after download history is cleared. Open them with the default application or macOS Quick Look; preview availability depends on the system and installed apps. Archives are saved without extraction. Validation checks file signatures and container directories, not every embedded document object or archive checksum.
 
@@ -31,7 +31,7 @@ Choose System, 简体中文, or English in Settings → General → Language. Ch
 
 For videos that need sign-in, open Settings → Browser Authentication, choose the browser where you are already signed in, and enable authentication. Profile selection is optional. Settings and task logs report cookie-read results; a successful read does not confirm site sign-in. macOS may request Keychain or file access. Authentication is read when a supported site download starts. If cookie access fails or a site rejects the session, Folioak retries anonymously once; rate limits, cancellation and storage failures do not trigger fallback. This keeps your authentication settings and does not guarantee access to content requiring verification. A task’s menu can open its original link in the selected authentication browser or show task logs, with filtered export of the initial cause, fallback and final result. Turn authentication off to return to anonymous downloads, or clear the selection. Available quality still depends on the video, site and account; signing in does not guarantee 4K. Folioak does not export a cookies file or keep Cookie contents in its preferences, history or logs. yt-dlp may copy browser databases into a private temporary directory, cleaned after success, failure or cancellation once the process group exits. A crash or unconfirmed process exit can leave temporary data behind.
 
-New installations use `~/Downloads/Folioak`; type subfolders are created as needed. Click the folder to change the save location. Upgrades preserve your settings, files, and libraries. When upgrading from an earlier product name, quit and move the old app out of Applications after installing Folioak.
+New installations use `~/Downloads/Folioak`; type subfolders are created as needed. Enable a separate PDF folder in Settings → General → PDF folder (off by default) to save new papers and PDFs directly there, with one copy. Existing files stay where they are. Click the folder to change the save location. Upgrades preserve your settings, files, and libraries. When upgrading from an earlier product name, quit and move the old app out of Applications after installing Folioak.
 
 [CLI guide (中文)](CLI-README.md)
 

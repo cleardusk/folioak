@@ -2,6 +2,106 @@ import Foundation
 import PDFKit
 
 extension CoreTests {
+    @MainActor static func pdfDirectoryTests(root: URL, pdf: URL) async throws {
+        let suite = "folioak-pdf-directory-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let folder = root.appendingPathComponent("default-root", isDirectory: true)
+        let custom = root.appendingPathComponent("shared-pdfs", isDirectory: true)
+        let next = root.appendingPathComponent("next-pdfs", isDirectory: true)
+        preferences.set(folder.path, forKey: "downloadRootDirectory")
+        preferences.set(false, forKey: "updates.automatic")
+        try expect(!DownloadPreferences(preferences).usesPDFDirectory && DownloadPreferences(preferences).activePDFDirectory == nil,
+            "PDF override is off by default")
+        preferences.set(true, forKey: "usesPDFDownloadDirectory")
+        preferences.set("relative/path", forKey: "pdfDownloadDirectory")
+        try expect(DownloadPreferences(preferences).activePDFDirectory == nil, "missing or relative PDF paths cannot activate an override")
+        preferences.removeObject(forKey: "usesPDFDownloadDirectory")
+        preferences.removeObject(forKey: "pdfDownloadDirectory")
+
+        FixtureProtocol.reset(); defer { FixtureProtocol.reset() }
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FixtureProtocol.self]
+        let body = try Data(contentsOf: pdf)
+        for path in ["/report.pdf", "/download", "/append.pdf", "/retry.pdf", "/disabled.pdf", "/cli.pdf"] {
+            FixtureProtocol.install(.init(headers: ["Content-Type": "application/pdf", "ETag": "pdf-v1"], body: body), path: path)
+        }
+        for path in ["/notes.txt", "/other.txt"] {
+            FixtureProtocol.install(.init(headers: ["Content-Type": "text/plain"], body: Data("Notes remain in the ordinary documents directory.".utf8)), path: path)
+        }
+        let engine = DownloadEngine(transport: MockTransport(sourcePDF: pdf, delay: 30_000_000, latestVersion: 2),
+            pdfTransport: URLSessionTransport(testConfiguration: config, policy: .externalPDF), requestInterval: 0, retryDelay: 0)
+        let model = DownloadModel(engine: engine, preferences: preferences, stateURL: root.appendingPathComponent("workspace.json"))
+        model.pdfDirectory = custom
+        try expect(model.activePDFDirectory == nil && !FileManager.default.fileExists(atPath: custom.path),
+            "remembering a folder neither enables it nor creates it")
+        model.setPDFDirectoryEnabled(true)
+        try expect(DownloadPreferences(preferences).activePDFDirectory?.path == custom.path, "PDF folder and enabled flag persist together")
+        model.input = "2501.12345v2\nhttps://example.com/report.pdf\nhttps://example.com/download\nhttps://example.com/notes.txt"
+        model.start()
+        model.setPDFDirectoryEnabled(false)
+        try expect(model.usesPDFDirectory, "settings cannot change while a batch is active")
+        model.pdfDirectory = next // Even programmatic changes cannot redirect a running batch.
+        _ = try model.submitQuickDownload("https://example.com/append.pdf")
+        try await waitForQueue(model)
+        try expect(model.items.count == 5 && model.items.allSatisfy { $0.state == .saved }, "mixed batch and appended quick download complete")
+        for item in model.items {
+            let parent = item.savedURL?.deletingLastPathComponent().path
+            try expect(parent == (item.directURL?.pathExtension == "txt" ? folder.appendingPathComponent("Documents").path : custom.path),
+                "actual PDFs, arxiv and quick downloads use the frozen custom directory; other documents retain categories")
+        }
+        try expect(!FileManager.default.fileExists(atPath: custom.appendingPathComponent("Papers").path)
+            && !FileManager.default.fileExists(atPath: folder.appendingPathComponent("Papers").path)
+            && !FileManager.default.fileExists(atPath: next.path), "PDFs have one copy and no extra Papers subfolder")
+        let oldPaths = model.items.map(\.savedURL)
+        model.persistWorkspace()
+        let restored = DownloadModel(engine: engine, preferences: preferences, stateURL: root.appendingPathComponent("workspace.json"))
+        try expect(restored.activePDFDirectory?.path == next.path && restored.items.map(\.savedURL) == oldPaths,
+            "restart retains the new preference without rewriting existing paths")
+
+        let source = try DownloadSource.parse("https://example.com/report.pdf")
+        FixtureProtocol.install(.init(status: 304), path: "/report.pdf")
+        let cached = try await engine.download(source, to: folder, organizeByType: true, pdfDirectory: custom)
+        try expect(cached.alreadyExisted && FixtureProtocol.lastRequest("/report.pdf")?.value(forHTTPHeaderField: "If-None-Match") == "pdf-v1",
+            "custom PDF directory keeps conditional caching")
+        try createPDF(at: cached.url, shade: 0.2)
+        let annotated = try Data(contentsOf: cached.url)
+        FixtureProtocol.install(.init(headers: ["Content-Type": "application/pdf"], body: body), path: "/report.pdf")
+        let collision = try await engine.download(source, to: folder, organizeByType: true, pdfDirectory: custom)
+        try expect(collision.url != cached.url && (try Data(contentsOf: cached.url)) == annotated, "same-name download preserves locally changed PDF")
+
+        let blocked = root.appendingPathComponent("blocked-pdf-folder")
+        try Data("not a directory".utf8).write(to: blocked)
+        model.pdfDirectory = blocked
+        model.input = "https://example.com/retry.pdf\nhttps://example.com/other.txt"
+        model.start(); try await waitForQueue(model)
+        try expect(model.items[0].state == .failed && model.items[0].error?.contains("PDF 保存目录") == true && model.items[1].state == .saved,
+            "unavailable PDF folder reports an error without fallback or blocking other document types")
+        model.pdfDirectory = next
+        model.retry(model.items[0].id); try await waitForQueue(model)
+        try expect(model.items[0].savedURL?.deletingLastPathComponent().path == next.path, "retry uses the current PDF directory")
+        _ = try await engine.download(DownloadSource.parse("https://example.com/download"), to: blocked, organizeByType: true, pdfDirectory: custom)
+        try expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("Papers").path), "unused main root does not block a custom PDF download")
+        model.setPDFDirectoryEnabled(false)
+        model.input = "https://example.com/disabled.pdf"; model.start(); try await waitForQueue(model)
+        try expect(model.items[0].savedURL?.deletingLastPathComponent().path == folder.appendingPathComponent("Papers").path
+            && DownloadPreferences(preferences).pdfDirectory?.path == next.path && DownloadPreferences(preferences).activePDFDirectory == nil,
+            "disabling restores Papers while remembering the optional directory")
+
+        model.setPDFDirectoryEnabled(true)
+        for override in [false, true] {
+            let explicit = root.appendingPathComponent("cli-explicit", isDirectory: true)
+            let arguments = ["https://example.com/cli.pdf"] + (override ? ["--output", explicit.path] : [])
+            let console = CapturedConsole()
+            let code = await CLIRunner.run(try CLIOptions.parse(arguments), version: "test", engine: engine, preferences: preferences,
+                stdout: { console.stdout($0) }, stderr: { console.stderr($0) })
+            let output = URL(fileURLWithPath: console.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            try expect(code == 0 && output.deletingLastPathComponent().path == (override ? explicit.path : next.path)
+                && DownloadPreferences(preferences).activePDFDirectory?.path == next.path,
+                "CLI follows PDF preference unless explicit output overrides it without changing settings")
+        }
+        print("PASS PDF directory: opt-in persistence, content routing, batch snapshot, quick download, existing paths, cache, collision safety, failures, retry and CLI override")
+    }
+
     @MainActor static func githubPDFTests(root: URL, pdf: URL) async throws {
         let link = "https://github.com/openai/math/blob/main/overview.pdf"
         let raw = "https://raw.githubusercontent.com/openai/math/main/overview.pdf"

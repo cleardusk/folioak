@@ -850,11 +850,11 @@ actor DownloadEngine {
         }
     }
 
-    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, namingSnapshot: AssetNamingSnapshot? = nil, mediaFormat: MediaFormat = .automatic, organizeByType: Bool = false, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
+    func download(_ source: DownloadSource, to directory: URL, naming: NamingStyle = .dateTitle, namingSnapshot: AssetNamingSnapshot? = nil, mediaFormat: MediaFormat = .automatic, organizeByType: Bool = false, pdfDirectory: URL? = nil, event: @escaping @Sendable (DownloadEvent) -> Void = { _ in }) async throws -> SavedDocument {
         try Task.checkCancellation()
         switch source {
         case .arxiv(let reference):
-            let destination = organizeByType ? try DownloadFolder.papers.prepare(in: directory) : directory
+            let destination = try DownloadFolder.preparePDF(in: directory, custom: pdfDirectory, organizeByType: organizeByType)
             let paper = try await download(reference, to: destination, naming: naming, namingSnapshot: namingSnapshot, event: event)
             return SavedDocument(title: paper.metadata.title, metadata: paper.metadata, url: paper.url, alreadyExisted: paper.alreadyExisted, pages: paper.pages)
         case .media(let url):
@@ -870,7 +870,7 @@ actor DownloadEngine {
             }
         case .pdf(let url), .file(let url):
             guard PublicHTTPS.allows(url) else { throw DownloadError.unsafeResponse }
-            try DownloadFolder.prepareRoot(directory)
+            if pdfDirectory == nil { try DownloadFolder.prepareRoot(directory) }
             var shared: RequestCoordinator?
             if let coordinator {
                 // Establish a private parent before creating per-origin state.
@@ -881,16 +881,16 @@ actor DownloadEngine {
             let native = pdfTransport ?? URLSessionTransport(policy: .externalPDF, fileLimit: url.pathExtension.lowercased() == "pdf" ? ResourceLimits.pdfBytes : FileStorage.byteLimit)
             let client = DownloadEngine(transport: native, requestInterval: coordinator == nil ? min(1, requestInterval) : 1,
                 retryDelay: retryDelay, rateLimitDelay: rateLimitDelay, coordinator: shared)
-            return try await client.downloadDirect(url, to: directory, namingSnapshot: namingSnapshot, mediaFormat: mediaFormat, organizeByType: organizeByType, event: event)
+            return try await client.downloadDirect(url, to: directory, namingSnapshot: namingSnapshot, mediaFormat: mediaFormat, organizeByType: organizeByType, pdfDirectory: pdfDirectory, event: event)
         }
     }
 
-    private func downloadDirect(_ url: URL, to directory: URL, namingSnapshot: AssetNamingSnapshot?, mediaFormat: MediaFormat, organizeByType: Bool,
+    private func downloadDirect(_ url: URL, to directory: URL, namingSnapshot: AssetNamingSnapshot?, mediaFormat: MediaFormat, organizeByType: Bool, pdfDirectory: URL?,
                                 event: @escaping @Sendable (DownloadEvent) -> Void) async throws -> SavedDocument {
         defer { lease = nil }
         try await acquire(event: event)
         event(.checkingLocal)
-        let paperDirectory = organizeByType ? directory.appendingPathComponent(DownloadFolder.papers.rawValue, isDirectory: true) : directory
+        let paperDirectory = pdfDirectory ?? (organizeByType ? directory.appendingPathComponent(DownloadFolder.papers.rawValue, isDirectory: true) : directory)
         var cached = FileStorage.extensions.union(GenericFileStorage.extensions).contains(url.pathExtension.lowercased()) ? nil : try PDFStorage.existing(source: url, directory: paperDirectory)
         return try await retried(event: event) {
             var request = URLRequest(url: url)
@@ -924,8 +924,9 @@ actor DownloadEngine {
             event(.validating)
             let ext = try await FileStorage.detectedExtension(file, source: url, response: response)
             let saved: SavedDocument
+            if ext != "pdf", pdfDirectory != nil { try DownloadFolder.prepareRoot(directory) }
             if ext == "pdf" {
-                let destination = organizeByType ? try DownloadFolder.papers.prepare(in: directory) : directory
+                let destination = try DownloadFolder.preparePDF(in: directory, custom: pdfDirectory, organizeByType: organizeByType)
                 saved = try PDFStorage.save(downloaded: file, source: url, response: response, directory: destination, namingSnapshot: namingSnapshot)
             } else if GenericFileStorage.extensions.contains(ext) {
                 try await GenericFileStorage.validate(file, extension: ext)

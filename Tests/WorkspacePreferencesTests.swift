@@ -138,6 +138,7 @@ private final class PreferencesTestWindow: NSPanel {
         try await libraryRoundTrip(model, surface: surface, opened: { opened.count }, snapshots: snapshots)
         try await navigationRoundTrip(model, surface: surface, opened: { opened.count }, snapshots: snapshots)
         try await mediaGridRoundTrip(preferences: preferences, root: root, snapshots: snapshots)
+        try await pdfDirectorySettings(model, preferences: preferences, root: root, surface: surface, snapshots: snapshots)
         try await namingAndSettings(model, preferences: preferences, surface: surface, snapshots: snapshots)
         try await layouts(model, surface: surface, snapshots: snapshots)
         try await delegateRoutes(model)
@@ -323,9 +324,59 @@ private final class PreferencesTestWindow: NSPanel {
         print("PASS media grid preferences: search, exact selection, scroll and disabled hidden native actions survive Settings/About")
     }
 
+    private static func pdfDirectorySettings(_ model: DownloadModel, preferences: UserDefaults, root: URL, surface: Surface, snapshots: Bool) async throws {
+        // OCR may merge the checkmark into the label. Match its text suffix.
+        func checkboxPoint() throws -> NSPoint? {
+            let expected = L("使用单独目录").replacingOccurrences(of: " ", with: "").lowercased()
+            return try surface.labels().first { label, point in
+                point.x > 190 && label.replacingOccurrences(of: " ", with: "").lowercased().hasSuffix(expected)
+            }?.1
+        }
+        func toggle() async throws {
+            await surface.settle()
+            guard let point = try checkboxPoint() else { throw TestFailure.failed("visible PDF checkbox") }
+            await surface.click(point)
+        }
+        defer { surface.host.appearance = nil; surface.window.appearance = nil }
+        model.preferencesPage = .settings; model.settingsTab = "通用"; model.language = .chinese
+        await surface.settle()
+        for scroll in surface.descendants.compactMap({ $0 as? NSScrollView }) {
+            scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        await surface.settle()
+        try expect(!model.usesPDFDirectory && model.pdfDirectory == nil, "general settings start with PDF override disabled")
+        try await toggle()
+        guard let panel = surface.window.attachedSheet as? NSOpenPanel else { throw TestFailure.failed("PDF toggle opens a directory picker") }
+        try expect(panel.canChooseDirectories && !panel.canChooseFiles && !model.usesPDFDirectory, "folder selection must complete before enabling")
+        panel.cancel(nil); await surface.settle()
+        try expect(model.pdfDirectory == nil && !model.usesPDFDirectory, "cancelling initial folder selection keeps the feature off")
+        model.pdfDirectory = root.appendingPathComponent("a-long-research-project-directory/PapersRepo", isDirectory: true)
+        try await toggle()
+        try expect(model.usesPDFDirectory && DownloadPreferences(preferences).activePDFDirectory?.path == model.pdfDirectory?.path,
+            "visible PDF checkbox enables and persists the remembered folder")
+        for language in [AppLanguage.chinese, .english] {
+            model.language = language
+            for appearance in [AppAppearance.light, .dark] {
+                model.appearance = appearance; NSApp.appearance = appearance.native
+                surface.window.appearance = appearance.native; surface.host.appearance = appearance.native
+                surface.host.layoutSubtreeIfNeeded(); surface.window.displayIfNeeded()
+                try await Task.sleep(nanoseconds: 450_000_000)
+                await surface.settle()
+                try surface.save("pdf-directory-\(language.rawValue)-\(appearance.rawValue)", enabled: snapshots)
+                try expect(try checkboxPoint() != nil,
+                    "localized PDF setting fits the minimum window: " + L("使用单独目录") + "; visible " + (try surface.labels().map(\.0).joined(separator: " | ")))
+            }
+        }
+        model.language = .chinese; await surface.settle()
+        try await toggle()
+        try expect(!model.usesPDFDirectory && DownloadPreferences(preferences).pdfDirectory != nil, "turning off keeps the last selected folder")
+        print("PASS PDF settings UI: folder-only picker, cancel, persisted checkbox, long path, Chinese/English and light/dark layouts")
+    }
+
     private static func namingAndSettings(_ model: DownloadModel, preferences: UserDefaults, surface: Surface, snapshots: Bool) async throws {
         model.preferencesPage = .settings; model.settingsTab = "通用"; await surface.settle()
-        try await surface.press("浅色")
+        let generalScroll = surface.descendants.compactMap { $0 as? NSPopUpButton }.first(where: { $0.isEnabled })?.enclosingScrollView
+        try await surface.press("浅色", scroll: generalScroll)
         try expect(model.appearance == .light && preferences.string(forKey: "appearance") == "light", "appearance changes are actually persisted")
         try await surface.press("命名规则")
         try expect(model.settingsTab == "命名规则", "settings category click routes naming inline")

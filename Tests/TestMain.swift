@@ -121,6 +121,18 @@ struct CoreTests {
                 try await logScrollTests()
                 return
             }
+            if CommandLine.arguments.contains("--pdf-directory-only") {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-pdf-directory-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let pdf = root.appendingPathComponent("fixture.pdf"); try createPDF(at: pdf)
+                try await pdfDirectoryTests(root: root, pdf: pdf)
+                try await genericPDFTests(root: root, pdf: pdf)
+                try await WorkspacePreferencesTests.run(snapshots: CommandLine.arguments.contains("--snapshots"))
+                try await settingsLayoutTests()
+                try await localizationTests()
+                return
+            }
             if CommandLine.arguments.contains("--preferences-only") {
                 try await WorkspacePreferencesTests.run(snapshots: CommandLine.arguments.contains("--snapshots"))
                 try await settingsLayoutTests()
@@ -274,6 +286,7 @@ struct CoreTests {
             try await processTests(root: root, pdf: pdf)
             try await networkTests(root: root, pdf: pdf)
             try await transportTests(root: root, pdf: pdf)
+            try await pdfDirectoryTests(root: root, pdf: pdf)
             try await genericPDFTests(root: root, pdf: pdf)
             try await existingFileTests(root: root, pdf: pdf)
             try await queueTests(root: root, pdf: pdf)

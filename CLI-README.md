@@ -18,3 +18,5 @@ folioak --help                       # 全部选项
 支持公开论文、PPT/Office/EPUB/文本/压缩包文件直链和媒体链接；站点范围与限制见 [README](README.zh-CN.md)。按 `Ctrl+C` 停止下载，已完成的文件保留。包内保留 `leafpick` 和 `arxiv-download` 兼容入口；若曾设置指向旧应用路径的 shell alias，请按上面的示例更新。
 
 用于脚本：`cat links.txt | folioak --json`。进度写入 stderr；退出码 `0` 成功，`1` 有失败或待重试，`2` 参数错误，`130` 用户取消，`143` 终止。
+
+应用启用独立 PDF 保存目录后，CLI 默认将论文和 PDF 保存到该目录；显式 `-o` / `--output` 会覆盖本次所有文件的输出位置，不修改应用偏好。

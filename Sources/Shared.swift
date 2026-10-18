@@ -45,6 +45,15 @@ enum DownloadFolder: String, Sendable {
         } catch { throw DownloadError.storage("保存位置无法创建或不可写，请更改位置后重试。") }
     }
 
+    static func preparePDF(in root: URL, custom: URL?, organizeByType: Bool) throws -> URL {
+        if let custom {
+            do { try prepareRoot(custom) }
+            catch { throw DownloadError.storage("PDF 保存目录无法创建或不可写，请重新选择。") }
+            return custom
+        }
+        return organizeByType ? try papers.prepare(in: root) : root
+    }
+
     func prepare(in root: URL) throws -> URL {
         let target = root.appendingPathComponent(rawValue, isDirectory: true)
         do {
@@ -67,6 +76,9 @@ struct DownloadPreferences {
         return UserDefaults(suiteName: domain)!
     }
     let directory: URL
+    let pdfDirectory: URL?
+    let usesPDFDirectory: Bool
+    var activePDFDirectory: URL? { usesPDFDirectory ? pdfDirectory : nil }
     let naming: NamingStyle
     let namingRules: AssetNamingRules
     init(_ preferences: UserDefaults, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -78,6 +90,10 @@ struct DownloadPreferences {
         // meanings differ from the new root and cannot be safely inferred.
         directory = preferences.string(forKey: "downloadRootDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? oldDefault ?? home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
+        pdfDirectory = preferences.string(forKey: "pdfDownloadDirectory").flatMap {
+            $0.hasPrefix("/") ? URL(fileURLWithPath: $0, isDirectory: true) : nil
+        }
+        usesPDFDirectory = preferences.bool(forKey: "usesPDFDownloadDirectory") && pdfDirectory != nil
         namingRules = AssetNamingRules.read(preferences)
         naming = NamingStyle(rawValue: preferences.string(forKey: "namingStyle") ?? "") ?? .dateTitle
     }
