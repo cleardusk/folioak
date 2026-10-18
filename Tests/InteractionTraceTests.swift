@@ -154,6 +154,9 @@ extension CoreTests {
         model.papers = (0..<20_000).map { index in
             LibraryPaper(DownloadItem(original: "fixture", state: .saved, documentTitle: "Paper \(index)"))
         }
+        // Fixture mutations schedule an autosave whose completion publishes notices.
+        // Drain it before measuring notifications caused by trace events alone.
+        await model.persistWorkspaceAndWait()
         func cachedQuery() -> Int {
             model.libraryQueries.documents(model.papers, revision: model.libraryRevision, query: "paper", filter: .all, sort: .title, tag: nil).items.count
         }
@@ -177,7 +180,8 @@ extension CoreTests {
             await model.trace.flush()
             timings.append(samples.sorted())
         }
-        try expect(notifications == 0 && builds == model.libraryQueries.documentBuilds, "trace events cause no model publications or 20k query rebuilds")
+        try expect(notifications == 0 && builds == model.libraryQueries.documentBuilds,
+            "trace events cause no model publications or 20k query rebuilds: publications=\(notifications), query builds=\(builds)->\(model.libraryQueries.documentBuilds)")
         observation.cancel()
         let off = timings[0][Int(Double(timings[0].count) * 0.95)]
         let on = timings[1][Int(Double(timings[1].count) * 0.95)]
