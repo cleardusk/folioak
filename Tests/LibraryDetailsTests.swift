@@ -30,8 +30,8 @@ extension CoreTests {
         window.isReleasedWhenClosed = false; window.hidesOnDeactivate = false; window.contentView = host; window.makeKeyAndOrderFront(nil)
         defer { window.close() }
         func settle() async { try? await Task.sleep(nanoseconds: 100_000_000); host.layoutSubtreeIfNeeded() }
-        func snapshot(_ suffix: String) throws {
-            guard CommandLine.arguments.contains("--snapshots"), let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+        func snapshot(_ suffix: String, force: Bool = false) throws {
+            guard force || CommandLine.arguments.contains("--snapshots"), let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
             host.cacheDisplay(in: host.bounds, to: bitmap)
             let folder = URL(fileURLWithPath: "build/qa/library-polish")
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -66,7 +66,7 @@ extension CoreTests {
             let actions = descendants(host).compactMap { $0 as? DetailActionRegion.Region }.map {
                 "\($0.identifier?.rawValue ?? "unnamed") enabled=\($0.enabled) bounds=\($0.convert($0.bounds, to: host)) visible=\($0.convert($0.visibleRect, to: host))"
             }
-            try snapshot("missing-action-" + identifier)
+            try snapshot("missing-action-" + identifier, force: true)
             throw TestFailure.failed("rendered details action is reachable: \(identifier); clip=\(scroll.contentView.convert(scroll.contentView.bounds, to: host)); actions=\(actions)")
         }
         func press(_ identifier: String) async throws {

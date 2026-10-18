@@ -69,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          ./test.command --stress --snapshots 2>&1 | tee build/ci-regression.log
+          ./test.command --stress 2>&1 | tee build/ci-regression.log
       - name: Check native interaction stability
         shell: bash
         run: |
