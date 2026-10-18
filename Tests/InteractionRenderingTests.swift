@@ -805,7 +805,7 @@ extension CoreTests {
             AppLocalization.shared.language = language
             for scheme in [ColorScheme.light, .dark] {
                 let view = InteractionTestHost(rootView: TaskDiagnosticView(model: model, item: item, showingDiagnostics: true).environment(\.colorScheme, scheme))
-                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 540), styleMask: [.borderless], backing: .buffered, defer: false)
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620), styleMask: [.borderless], backing: .buffered, defer: false)
                 window.contentView = view; window.orderFront(nil)
                 defer { window.orderOut(nil) }
                 await settle(view)

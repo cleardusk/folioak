@@ -110,6 +110,17 @@ struct CoreTests {
         defer { print("PASS core test suite completed") }
         AppLocalization.shared.language = .chinese
         do {
+            if CommandLine.arguments.contains("--details-only") {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-details-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let pdf = root.appendingPathComponent("fixture.pdf")
+                try createPDF(at: pdf)
+                try await downloadOriginTests(root: root, pdf: pdf)
+                try await fileInformationTests(root: root, pdf: pdf)
+                try await detailInteractionTests()
+                return
+            }
             if CommandLine.arguments.contains("--native-menus-only") {
                 try await quickDownloadUITests()
                 try await librarySelectionUITests()
@@ -194,6 +205,7 @@ struct CoreTests {
             try await stageOneRegressionTests(root: root, pdf: pdf)
             if CommandLine.arguments.contains("--stage-one-only") { return }
             try await mediaTests(root: root)
+            try await downloadOriginTests(root: root, pdf: pdf)
             try await fileInformationTests(root: root, pdf: pdf)
             try await thumbnailTests()
             if CommandLine.arguments.contains("--media-only") { return }

@@ -99,6 +99,8 @@ struct DownloadItem: Identifiable, Codable {
     var libraryRemovedAt: Date? = nil
     var preservesInput: Bool? = nil
     var namingSnapshot: AssetNamingSnapshot? = nil
+    var origin: DownloadOrigin? = nil
+    var provenance: DownloadOrigin? { origin ?? DownloadOrigin.recovered(original, source: source) }
     var isLibraryRemoved: Bool { libraryRemovedAt != nil }
     var localURLs: [URL] { (savedURL.map { [$0] } ?? []) + (additionalURLs ?? []) }
     var source: DownloadSource? {
@@ -614,10 +616,12 @@ final class DownloadModel: ObservableObject {
             if (item.finishedAt ?? item.createdAt) <= (old.finishedAt ?? old.createdAt) { return }
             var saved = item; saved.id = mediaLibrary[index].id
             saved.libraryRemovedAt = old.libraryRemovedAt
+            saved.origin = old.provenance ?? item.provenance
             mediaLibrary[index] = saved
         } else {
             guard mediaLibrary.count < LibraryStore.countLimit else { mediaLibraryNotice = "媒体库已满，下载文件仍已保存。"; return }
-            mediaLibrary.append(item)
+            var saved = item; saved.origin = item.provenance
+            mediaLibrary.append(saved)
         }
     }
 
@@ -707,7 +711,7 @@ final class DownloadModel: ObservableObject {
         archiveResults()
         guard let restored = try? DownloadSource.parse(original) else { return }
         let snapshot = item.namingSnapshot ?? AssetNamingSnapshot(rules: namingRules, paperStyle: naming, now: item.createdAt)
-        items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued, mediaFormat: item.mediaFormat, namingSnapshot: item.localURLs.isEmpty ? snapshot : snapshot.saving(item.localURLs))]
+        items = [DownloadItem(id: item.id, original: original, reference: restored.reference, directURL: restored.directURL, state: .queued, mediaFormat: item.mediaFormat, namingSnapshot: item.localURLs.isEmpty ? snapshot : snapshot.saving(item.localURLs), origin: item.provenance)]
         duplicateCount = 0; batchID = UUID()
         record(.info, DiagnosticMessage(.redownload), item: items[0])
         saveWorkspace()
@@ -944,7 +948,8 @@ final class DownloadModel: ObservableObject {
         let added = entries.map { entry in
             DownloadItem(original: entry.original, reference: entry.reference, directURL: entry.source?.directURL,
                 state: entry.source == nil ? .failed : .queued, error: entry.error, errorMessage: entry.diagnostic,
-                mediaFormat: entry.source?.supportsAudioExtraction == true ? mediaFormat : nil, preservesInput: quick ? true : nil, namingSnapshot: namingSnapshot)
+                mediaFormat: entry.source?.supportsAudioExtraction == true ? mediaFormat : nil, preservesInput: quick ? true : nil, namingSnapshot: namingSnapshot,
+                origin: entry.source.map { _ in DownloadOrigin(input: entry.original, capturedAt: Date()) })
         }
         let updatedItems = retainedItems + added
         var updatedHistory = historyByArchivingResults()
@@ -1122,6 +1127,13 @@ final class DownloadModel: ObservableObject {
         if let source = item.source {
             notice = opener(source.webURL) ? nil : "无法打开来源页面，请检查默认浏览器。"
         }
+    }
+
+    @discardableResult func openOriginalSource(_ item: DownloadItem) -> Bool {
+        guard let url = item.provenance?.browserURL else { return false }
+        let opened = opener(url)
+        notice = opened ? nil : "无法打开来源页面，请检查默认浏览器。"
+        return opened
     }
 
     func openAuthenticationSource(_ item: DownloadItem) {

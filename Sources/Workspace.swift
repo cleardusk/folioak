@@ -5,6 +5,37 @@ struct TransferSample: Codable {
     let bytes: Int64
 }
 
+// Independent of the normalized URL used for retries and downloads.
+// A nil capture date marks a best-effort recovery from an older record.
+struct DownloadOrigin: Codable, Equatable, Sendable {
+    let input: String
+    let capturedAt: Date?
+    var valid: Bool {
+        !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && input.utf8.count <= ResourceLimits.inputBytes &&
+            (capturedAt?.timeIntervalSince1970.isFinite ?? true)
+    }
+    var browserURL: URL? {
+        let candidate = input.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<>\"'“”"))
+        guard candidate.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else { return nil }
+        if let parts = URLComponents(string: candidate), parts.scheme != nil {
+            if parts.scheme?.lowercased() == "arxiv", let reference = try? ArxivReference.parse(candidate) {
+                return reference.abstractURL
+            }
+            guard ["http", "https"].contains(parts.scheme?.lowercased() ?? ""),
+                  parts.host?.isEmpty == false, parts.user == nil, parts.password == nil else { return nil }
+            return parts.url
+        }
+        // Bare arXiv/BV identifiers have a source page, but are not rewritten in storage.
+        return (try? DownloadSource.parse(candidate))?.webURL
+    }
+    static func recovered(_ original: String, source: DownloadSource?) -> Self? {
+        guard let source else { return nil }
+        let previous = Self(input: original, capturedAt: nil)
+        return previous.valid && previous.browserURL != nil ? previous : Self(input: source.webURL.absoluteString, capturedAt: nil)
+    }
+}
+
 enum ActivityLevel: String, Codable, CaseIterable {
     case info, success, warning, error
     var label: String {
@@ -90,17 +121,19 @@ enum WorkspaceStore {
         return snapshot
     }
     private static func normalizedSource(_ item: DownloadItem) -> DownloadItem {
-        guard item.reference == nil, let url = item.directURL,
-              let source = try? DownloadSource.parse(url.absoluteString) else { return item }
         var result = item
-        result.reference = source.reference
-        result.directURL = source.directURL
+        result.origin = item.provenance
+        if item.reference == nil, let url = item.directURL,
+           let source = try? DownloadSource.parse(url.absoluteString) {
+            result.reference = source.reference
+            result.directURL = source.directURL
+        }
         return result
     }
     static func validItem(_ item: DownloadItem) -> Bool {
         let references = [item.reference, item.restoreReference, item.metadata?.reference].compactMap { $0 }
         guard references.allSatisfy({ (try? ArxivReference.parse($0.identifier)) == $0 }),
-              item.original.utf8.count <= ResourceLimits.inputBytes,
+              item.original.utf8.count <= ResourceLimits.inputBytes, item.origin?.valid ?? true,
               item.diagnostics?.valid ?? true,
               item.namingSnapshot?.valid ?? true,
               item.metadata.map({ $0.title.count <= ResourceLimits.titleCharacters && (1...12).contains($0.month) && (1900...2199).contains($0.year) }) ?? true,
@@ -139,6 +172,7 @@ enum WorkspaceStore {
         var textBytes = snapshot.input.utf8.count
         for item in snapshot.items + snapshot.history {
             textBytes += item.original.utf8.count
+            textBytes += item.origin?.input.utf8.count ?? 0
             textBytes += item.metadata?.title.utf8.count ?? 0
             textBytes += item.documentTitle?.utf8.count ?? 0
             textBytes += item.error?.utf8.count ?? 0
@@ -208,7 +242,10 @@ enum MediaLibraryStore {
               Set(saved.items.map(\.id)).count == saved.items.count, saved.items.allSatisfy(valid) else {
             throw DownloadError.storage("媒体库格式无效。")
         }
-        return saved.items
+        return saved.items.map { item in
+            var result = item; result.origin = item.provenance
+            return result
+        }
     }
     static func write(_ items: [DownloadItem], to url: URL) throws {
         guard items.count <= LibraryStore.countLimit, Set(items.map(\.id)).count == items.count, items.allSatisfy(valid) else {

@@ -24,11 +24,13 @@ struct LibraryPaper: Identifiable, Codable, Sendable {
     var checkedAt: Date?
     var taskID: UUID?
     var namingSnapshot: AssetNamingSnapshot?
+    var origin: DownloadOrigin?
+    var provenance: DownloadOrigin? { origin ?? DownloadOrigin.recovered(original, source: source) }
 
     init(_ item: DownloadItem) {
         id = item.id; title = PaperMetadata.cleanTitle(item.title)
         authors = String((item.metadata?.authors?.joined(separator: ", ") ?? "").prefix(16_384))
-        original = item.original; metadata = item.metadata
+        original = item.original; metadata = item.metadata; origin = item.provenance
         reference = item.metadata?.reference ?? item.reference; directURL = item.directURL
         file = item.savedURL; pages = item.pages; addedAt = item.finishedAt ?? item.createdAt
         missing = item.state == .missing; taskID = item.id; namingSnapshot = item.namingSnapshot
@@ -46,11 +48,11 @@ struct LibraryPaper: Identifiable, Codable, Sendable {
     var downloadItem: DownloadItem {
         DownloadItem(id: id, original: original, reference: reference, directURL: directURL, metadata: metadata,
                      state: missing ? .missing : .saved, savedURL: file, pages: pages,
-                     documentTitle: title, createdAt: addedAt, finishedAt: addedAt, namingSnapshot: namingSnapshot)
+                     documentTitle: title, createdAt: addedAt, finishedAt: addedAt, namingSnapshot: namingSnapshot, origin: provenance)
     }
     func matches(_ query: String) -> Bool {
         if query.isEmpty { return true }
-        let fields = [title, authors, original, reference?.identifier ?? "", directURL?.host ?? "", tags.joined(separator: " "), file?.lastPathComponent ?? ""]
+        let fields = [title, authors, original, provenance?.input ?? "", reference?.identifier ?? "", directURL?.host ?? "", tags.joined(separator: " "), file?.lastPathComponent ?? ""]
         return query.split(whereSeparator: \.isWhitespace).allSatisfy { term in
             fields.contains { $0.localizedCaseInsensitiveContains(term) }
         }
@@ -79,17 +81,19 @@ enum LibraryStore {
         // Older downloads can have a media-looking preview URL but contain a PDF.
         // Keep their library records readable when a new preview route is added.
         snapshot.papers = snapshot.papers.map { paper in
-            guard paper.reference == nil, let url = paper.directURL,
-                  let normalized = (try? DownloadSource.parse(url.absoluteString))?.directURL else { return paper }
             var result = paper
-            result.directURL = normalized
+            result.origin = paper.provenance
+            if paper.reference == nil, let url = paper.directURL,
+               let normalized = (try? DownloadSource.parse(url.absoluteString))?.directURL {
+                result.directURL = normalized
+            }
             return result
         }
         guard snapshot.papers.allSatisfy(valid) else { throw DownloadError.storage("文档库格式无效。") }
         return snapshot.papers
     }
     static func valid(_ paper: LibraryPaper) -> Bool {
-        (paper.namingSnapshot?.valid ?? true) && paper.title.count <= ResourceLimits.titleCharacters && paper.authors.count <= 16_384 && paper.original.utf8.count <= ResourceLimits.inputBytes &&
+        (paper.origin?.valid ?? true) && (paper.namingSnapshot?.valid ?? true) && paper.title.count <= ResourceLimits.titleCharacters && paper.authors.count <= 16_384 && paper.original.utf8.count <= ResourceLimits.inputBytes &&
         paper.tags.count <= 20 && paper.tags.allSatisfy { $0.count <= 40 } &&
         [paper.reference, paper.latest, paper.metadata?.reference].compactMap { $0 }.allSatisfy { (try? ArxivReference.parse($0.identifier)) == $0 } &&
         (paper.file.map { $0.isFileURL && ($0.pathExtension.lowercased() == "pdf" || GenericFileStorage.extensions.contains($0.pathExtension.lowercased())) } ?? true) &&
@@ -131,6 +135,7 @@ extension DownloadModel {
         if let index = papers.firstIndex(where: { $0.identity == incoming.identity || ($0.file != nil && $0.file == incoming.file && ($0.source == nil || incoming.source == nil)) }) {
             var updated = incoming
             let old = papers[index]
+            updated.origin = old.provenance ?? incoming.provenance
             updated.id = old.id; updated.addedAt = old.addedAt; updated.tags = old.tags; updated.favorite = old.favorite; updated.read = old.read
             updated.title = old.title
             updated.latest = old.latest; updated.checkedAt = old.checkedAt
@@ -254,7 +259,7 @@ extension DownloadModel {
     func cancelVersionCheck() { versionWorker?.cancel() }
     func downloadLatest(_ paper: LibraryPaper) {
         guard !busy, let reference = paper.latest, paper.hasUpdate else { return }
-        retryFromLibrary(DownloadItem(original: reference.identifier, reference: reference, state: .queued))
+        retryFromLibrary(DownloadItem(original: reference.identifier, reference: reference, state: .queued, origin: paper.provenance))
     }
     func showPaperDetails(_ paper: LibraryPaper) {
         diagnosticItem = paper.downloadItem
@@ -470,7 +475,7 @@ struct LibraryRow: View {
         if mediaRevision == revision && mediaQuery == query && mediaRemoved == removed { return mediaResult }
         mediaResult = items.filter { item in
             item.isLibraryRemoved == removed && (query.isEmpty || item.title.localizedCaseInsensitiveContains(query) ||
-                item.original.localizedCaseInsensitiveContains(query) || item.localURLs.contains { $0.lastPathComponent.localizedCaseInsensitiveContains(query) })
+                item.original.localizedCaseInsensitiveContains(query) || (item.provenance?.input.localizedCaseInsensitiveContains(query) ?? false) || item.localURLs.contains { $0.lastPathComponent.localizedCaseInsensitiveContains(query) })
         }.sorted { ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt) }
         mediaRevision = revision; mediaQuery = query; mediaRemoved = removed; mediaBuilds += 1
         return mediaResult

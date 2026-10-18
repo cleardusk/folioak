@@ -393,6 +393,8 @@ struct TaskDiagnosticView: View {
     @WorkspaceViewState private var files: [FileInformation] = []
     @WorkspaceViewState private var loading = false
     @WorkspaceViewState var showingDiagnostics = false
+    @WorkspaceViewState private var copiedSource = false
+    @WorkspaceViewState private var sourceActionError: String?
     private var paper: LibraryPaper? { libraryPaperID.flatMap { id in model.papers.first { $0.id == id } } }
     var current: DownloadItem {
         if let paper {
@@ -426,22 +428,24 @@ struct TaskDiagnosticView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(current.title).font(.system(size: 14, weight: .medium)).lineLimit(3).textSelection(.enabled)
-                        Text(L10n.text(current.state.message)).font(.system(size: 12)).foregroundStyle(current.state.color(palette))
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(current.title).font(.system(size: 16, weight: .medium))
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        Label(L10n.text(current.state.message), systemImage: current.state.symbol)
+                            .font(.system(size: 12)).foregroundStyle(current.state.color(palette))
                     }
+                    Divider()
+                    sourceContent
+                    Divider()
+                    informationGroup("记录信息", fields: recordFields)
                     ForEach(Array(files.enumerated()), id: \.offset) { index, information in
-                        if index > 0 { Divider() }
+                        Divider()
+                        if files.count > 1 {
+                            Text(information.url.lastPathComponent).font(.system(size: 13, weight: .medium))
+                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        }
                         ForEach(Array(information.groups.enumerated()), id: \.offset) { _, group in
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(L(group.title)).font(.system(size: 12, weight: .medium))
-                                ForEach(Array(group.fields.enumerated()), id: \.offset) { _, field in
-                                    HStack(alignment: .top, spacing: 12) {
-                                        Text(L(field.name)).foregroundStyle(ThemePalette.color(palette.secondary)).frame(width: L10n.language.code() == "en" ? 104 : 72, alignment: .leading)
-                                        Text(field.name == "尺寸" ? L(field.value) : field.value).frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                                    }.font(.system(size: 12))
-                                }
-                            }
+                            informationGroup(group.title, fields: group.fields)
                         }
                         if let issue = information.issue {
                             Text(L(issue)).font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
@@ -476,7 +480,7 @@ struct TaskDiagnosticView: View {
                     }
                 }
             }
-        }.padding(24).frame(width: 500, height: 540)
+        }.padding(24).frame(width: 560, height: 620)
             .foregroundStyle(ThemePalette.color(palette.text))
             .background(ThemePalette.color(palette.canvas))
             .task(id: current.localURLs.map(\.absoluteString).joined(separator: "\n") + L10n.locale.identifier) {
@@ -491,6 +495,73 @@ struct TaskDiagnosticView: View {
                     loading = false
                 } catch { /* Dismissal or a new file selection cancels the old read. */ }
             }
+    }
+    @discardableResult func copyOriginalLink(to pasteboard: NSPasteboard = .general) -> Bool {
+        guard let source = current.provenance else { return false }
+        pasteboard.clearContents()
+        return pasteboard.setString(source.input, forType: .string)
+    }
+    var originalIsLink: Bool { current.provenance?.input.contains("://") == true }
+    private var sourceContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L(originalIsLink ? "原始下载链接" : "原始输入")).font(.system(size: 12, weight: .medium))
+            if let source = current.provenance {
+                Text(source.input).font(.system(size: 12)).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+                if source.capturedAt == nil {
+                    Text(L("来自历史记录，无法确认是否为首次输入。"))
+                        .font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+                }
+                HStack(spacing: 12) {
+                    Button(L(copiedSource ? "已复制" : (originalIsLink ? "复制链接" : "复制内容"))) {
+                        copiedSource = copyOriginalLink()
+                        sourceActionError = copiedSource ? nil : "未能复制链接，请重试。"
+                    }.buttonStyle(QuietButtonStyle(palette: palette))
+                    if source.browserURL != nil {
+                        Button(L("打开来源页面")) {
+                            sourceActionError = model.openOriginalSource(current) ? nil : "无法打开来源页面，请检查默认浏览器。"
+                        }.buttonStyle(QuietButtonStyle(palette: palette))
+                    }
+                }
+                if let sourceActionError {
+                    Text(L(sourceActionError)).font(.system(size: 12)).foregroundStyle(UIColors.error)
+                }
+            } else {
+                Text(L(current.source == nil && !current.localURLs.isEmpty ? "本地导入，未记录下载来源。" : "未记录下载来源。"))
+                    .font(.system(size: 12)).foregroundStyle(ThemePalette.color(palette.secondary))
+            }
+        }
+    }
+    var recordFields: [FileInformation.Field] {
+        var fields = [FileInformation.Field(name: "添加时间", value: L10n.date(paper?.addedAt ?? current.createdAt))]
+        if let captured = current.provenance?.capturedAt {
+            fields.append(.init(name: "首次记录", value: L10n.date(captured)))
+        }
+        if let completed = diagnosticTask?.finishedAt {
+            fields.append(.init(name: "结束时间", value: L10n.date(completed)))
+        }
+        if let reference = current.metadata?.reference ?? current.reference {
+            fields.append(.init(name: "arXiv", value: reference.identifier))
+        }
+        if let paper {
+            fields.append(.init(name: "阅读状态", value: L(paper.read ? "已读" : "未读")))
+            if !paper.tags.isEmpty { fields.append(.init(name: "标签", value: paper.tags.joined(separator: " · "))) }
+        }
+        return fields
+    }
+    private func informationGroup(_ title: String, fields: [FileInformation.Field]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L(title)).font(.system(size: 12, weight: .medium))
+            ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
+                HStack(alignment: .top, spacing: 12) {
+                    Text(L(field.name)).foregroundStyle(ThemePalette.color(palette.secondary))
+                        .frame(width: L10n.language.code() == "en" ? 104 : 72, alignment: .leading)
+                    Text(field.name == "尺寸" ? L(field.value) : field.value)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }.font(.system(size: 12))
+            }
+        }
     }
     private var diagnosticContent: some View {
         VStack(alignment: .leading, spacing: 16) {

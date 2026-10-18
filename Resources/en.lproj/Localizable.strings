@@ -703,3 +703,20 @@
 "保存" = "Save";
 "下载进度" = "Download progress";
 "正在下载" = "Downloading";
+
+"原始下载链接" = "Original download link";
+"来自历史记录，无法确认是否为首次输入。" = "Recovered from history; the first input cannot be verified.";
+"本地导入，未记录下载来源。" = "Imported locally; no download source recorded.";
+"未记录下载来源。" = "No download source recorded.";
+"复制链接" = "Copy Link";
+"已复制" = "Copied";
+"未能复制链接，请重试。" = "Could not copy the link. Try again.";
+"记录信息" = "Record";
+"添加时间" = "Date added";
+"首次记录" = "First recorded";
+"结束时间" = "Finished";
+"阅读状态" = "Read status";
+"已读" = "Read";
+
+"原始输入" = "Original input";
+"复制内容" = "Copy Input";

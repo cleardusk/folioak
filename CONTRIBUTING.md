@@ -44,3 +44,5 @@ Project source is licensed under [MIT](LICENSE). Keep its copyright notice when 
 Run `FOLIOAK_TEST_OPTIMIZE=1 ./test.command --large-library-only` to measure queries, asynchronous persistence, and main-actor responsiveness with 20,000 records under release optimization. Use `FOLIOAK_TEST_OPTIMIZE=1 ./test.command --stress --snapshots` for full stress and visual checks; `./test.command --files-only` exercises common-file download and library recovery fixtures.
 
 Naming regressions use `--naming-only`; `--grid-only` covers native list/grid selection and focus, bilingual light/dark snapshots and actual 20,000-item viewport mounting. `--progress-only` checks real URLSession delegate callbacks, known/unknown totals, cancellation and arXiv pacing with offline fixtures. Public-link reproduction stays separate from the offline suite.
+
+For file-detail and original-source changes, `./test.command --details-only --snapshots` runs focused provenance, persistence compatibility, file metadata and native detail-layout checks. It skips unrelated CLI builds and media-tool integration tests; the default full suite still includes these regressions.
