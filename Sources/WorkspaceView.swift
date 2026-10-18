@@ -829,10 +829,11 @@ struct DownloaderView: View {
                             // Keep rows inset while the scroll canvas spans the
                             // content column, including its outer margins and gaps.
                             .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .top)
-                            .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture {
+                            .background(ThemePalette.color(palette.canvas))
+                            .contentShape(Rectangle()).onTapGesture {
                                 selection.clear(); listFocus = nil
                                 dismissEditing()
-                            })
+                            }
                     }
                     .id(page)
                     .padding(.horizontal, -24)
