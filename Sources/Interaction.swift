@@ -391,6 +391,35 @@ struct RecordDisclosureStyle: DisclosureGroupStyle {
     }
 }
 
+private extension View {
+    @ViewBuilder func detailActionIdentifier(_ identifier: String) -> some View {
+        #if TESTING
+        accessibilityIdentifier(identifier).background(DetailActionRegion(identifier: identifier))
+        #else
+        accessibilityIdentifier(identifier)
+        #endif
+    }
+}
+
+#if TESTING
+// Background test hosts do not consistently expose SwiftUI's accessibility
+// tree. Mark the actual control bounds without handling its mouse events.
+struct DetailActionRegion: NSViewRepresentable {
+    @Environment(\.isEnabled) private var enabled
+    let identifier: String
+    func makeNSView(context: Context) -> Region {
+        let view = Region(); view.setAccessibilityElement(false); return view
+    }
+    func updateNSView(_ view: Region, context: Context) {
+        view.identifier = NSUserInterfaceItemIdentifier(identifier); view.enabled = enabled
+    }
+    final class Region: NSView {
+        var enabled = true
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+#endif
+
 struct TaskDiagnosticView: View {
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
@@ -616,6 +645,7 @@ struct TaskDiagnosticView: View {
                 }
                 HStack {
                     Button(L("取消")) { editingMetadata = false }.buttonStyle(QuietButtonStyle(palette: palette))
+                        .detailActionIdentifier("details-cancel-edit")
                     Button(L("保存")) {
                         model.changePaper(paper.id) {
                             $0.title = String(titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).prefix(ResourceLimits.titleCharacters))
@@ -623,6 +653,7 @@ struct TaskDiagnosticView: View {
                         }
                         model.saveWorkspace(); editingMetadata = false
                     }.buttonStyle(QuietButtonStyle(palette: palette))
+                        .detailActionIdentifier("details-save-edit")
                         .disabled(titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.canManageLibrary(.documents))
                 }
             } else {
@@ -630,7 +661,8 @@ struct TaskDiagnosticView: View {
                 if let paper, !paper.removed {
                     Button(L("编辑文档信息…")) {
                         titleDraft = paper.title; tagsDraft = paper.tags.joined(separator: ", "); editingMetadata = true
-                    }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(!model.canManageLibrary(.documents))
+                    }.buttonStyle(QuietButtonStyle(palette: palette))
+                        .detailActionIdentifier("details-edit-metadata").disabled(!model.canManageLibrary(.documents))
                 }
             }
         }.font(.system(size: 12))
@@ -640,10 +672,12 @@ struct TaskDiagnosticView: View {
             HStack {
                 Button(L(model.checkingVersions.contains(paper.id) ? "正在检查…" : "检查论文更新")) { attemptedMaintenance = true; model.checkPaperVersions([paper.id]) }
                     .buttonStyle(QuietButtonStyle(palette: palette))
+                    .detailActionIdentifier("details-check-version")
                     .disabled(!model.checkingVersions.isEmpty || !model.canManageLibrary(.documents))
                 if paper.hasUpdate {
                     Button(L("下载 v\(paper.latest!.version!)")) { model.downloadLatest(paper); dismiss() }
-                        .buttonStyle(QuietButtonStyle(palette: palette)).disabled(model.busy)
+                        .buttonStyle(QuietButtonStyle(palette: palette))
+                        .detailActionIdentifier("details-download-version").disabled(model.busy)
                 }
             }
             if let date = paper.checkedAt {
@@ -667,6 +701,7 @@ struct TaskDiagnosticView: View {
             HStack {
                 if let task = taskLogItem {
                     Button(L("查看任务日志")) { showTaskLogs?(task); dismiss() }.buttonStyle(QuietButtonStyle(palette: palette))
+                        .detailActionIdentifier("details-show-task-logs")
                 }
                 if BrowserAuthenticationIssue.matches(current.errorMessage) && model.browserAuthentication.selection != nil {
                     Button(L("在认证浏览器中打开")) { model.openAuthenticationSource(current) }
