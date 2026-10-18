@@ -104,6 +104,7 @@ struct RoundButtonStyle: ButtonStyle {
         configuration.label.font(.system(size: 15, weight: .medium))
             .foregroundStyle(ThemePalette.color(palette.text).opacity(enabled ? 1 : 0.35))
             .frame(width: 32, height: 32)
+            .contentShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control))
             .modifier(ControlFeedback(palette: palette, pressed: configuration.isPressed))
     }
 }
