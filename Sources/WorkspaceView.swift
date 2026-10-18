@@ -1272,11 +1272,20 @@ struct LogContent: View {
     let palette: ThemePalette
     var dismissEditing: () -> Void = {}
     var scrollMemory: WorkspaceScrollMemory?
+    #if TESTING
+    var reduceMotionOverride: Bool? = nil
+    #endif
     @WorkspaceViewState private var position = LogScrollPosition()
     @WorkspaceViewState private var followingLatest = true
     @WorkspaceViewState private var requestedBottom: Bool?
     @WorkspaceViewState private var scrollRequest = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var scrollIsAnimated: Bool {
+        #if TESTING
+        if let reduceMotionOverride { return !reduceMotionOverride }
+        #endif
+        return !reduceMotion
+    }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     // Keep the arrow pointing toward the active destination until arrival.
     // Repeated clicks during the jump must not reverse its direction.
@@ -1328,7 +1337,7 @@ struct LogContent: View {
                         }.frame(minHeight: viewport.size.height, alignment: .top)
                             .background(ThemePalette.color(palette.canvas).contentShape(Rectangle()).onTapGesture(perform: dismissEditing))
                             .background(LogScrollObserver(followingLatest: followingLatest, request: scrollRequest,
-                                                       destination: requestedBottom, animated: !reduceMotion, changed: { metrics in
+                                                       destination: requestedBottom, animated: scrollIsAnimated, changed: { metrics in
                             position = metrics
                             if requestedBottom == true && metrics.atBottom || requestedBottom == false && metrics.atTop { requestedBottom = nil }
                         }, userScrolled: { metrics in

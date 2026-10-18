@@ -618,7 +618,8 @@ private struct LogRegressionView: View {
     @ObservedObject var probe: LogRegressionProbe
     var body: some View {
         LogContent(entries: probe.entries.filter { (probe.query.isEmpty || $0.message.contains(probe.query)) && (probe.level == nil || $0.level == probe.level) },
-                   hasLogs: !probe.entries.isEmpty, query: probe.query, level: $probe.level, palette: AppTheme.graphite.palette(dark: false))
+                   hasLogs: !probe.entries.isEmpty, query: probe.query, level: $probe.level, palette: AppTheme.graphite.palette(dark: false),
+                   reduceMotionOverride: false)
     }
 }
 extension CoreTests {
@@ -628,6 +629,8 @@ extension CoreTests {
         probe.entries = (0..<1500).map { i in
             ActivityEntry(level: i % 9 == 0 ? .warning : .info, message: "日志 \(i) · " + String(repeating: "较长的消息，检查实际滚动边界。", count: i % 5), subject: "回归检查", itemID: task)
         }
+        // This fixture asserts animated frames; the runner may enable Reduce Motion.
+        // Direct and in-flight reduced-motion jumps are covered by the native checks below.
         let view = NSHostingView(rootView: LogRegressionView(probe: probe))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
