@@ -943,14 +943,21 @@ extension CoreTests {
         let model = DownloadModel(preferences: preferences)
         for index in 0..<6 {
             let file = root.appendingPathComponent("file-\(index).pdf")
-            try createPDF(at: file, shade: CGFloat(index + 1) / 8)
             let source = URL(string: "https://example.com/switch-\(index).pdf")!
             model.upsertPaper(DownloadItem(original: source.absoluteString, directURL: source, state: .saved, savedURL: file,
                 documentTitle: "Page switch record \(index + 1)", finishedAt: Date().addingTimeInterval(Double(-index))))
         }
+        // Navigation compares stable content. Missing-file rows use static icons:
+        // real thumbnails intentionally load asynchronously after every remount,
+        // including cache hits, and belong to the separate thumbnail tests.
+        model.papers = model.papers.map { paper in var value = paper; value.missing = true; return value }
         model.navigation = WorkspaceNavigation(page: .library)
-        let host = QuickTestHost(rootView: DownloaderView(model: model, page: .library).environment(\.colorScheme, .light))
+        var view = DownloaderView(model: model, page: .library)
+        view.reduceMotionOverride = false
+        let host = QuickTestHost(rootView: view.environment(\.colorScheme, .light))
         let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        // A runner's parked cursor must not start row-hover animations between frames.
+        window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
         defer { window.close() }
         try await Task.sleep(nanoseconds: 250_000_000)
@@ -979,6 +986,13 @@ extension CoreTests {
             try await Task.sleep(nanoseconds: 400_000_000)
             guard let settled = content() else { throw TestFailure.failed("page switch snapshot") }
             let changed = differing(early, settled)
+            if changed >= 40 {
+                let output = URL(fileURLWithPath: "build/qa/page-switch")
+                try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+                for (name, bitmap) in [("early", early), ("settled", settled)] {
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent("\(from.rawValue)-\(to.rawValue)-\(name).png"))
+                }
+            }
             try expect(changed < 40, "\(from.rawValue) → \(to.rawValue) shows the destination without a fading previous page: \(changed) samples differ")
         }
         print("PASS page switch UI: library, downloads and media swap content without ghost frames")
