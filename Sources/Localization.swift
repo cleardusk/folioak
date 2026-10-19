@@ -121,7 +121,12 @@ enum L10n {
                      time: Date.FormatStyle.TimeStyle = .standard) -> String {
         date.formatted(Date.FormatStyle(date: dateStyle, time: time).locale(locale))
     }
-    static func logTime(_ date: Date) -> String {
+    static func relative(_ date: Date, now: Date = Date()) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = locale; formatter.unitsStyle = .short
+        return now.timeIntervalSince(date) < 60 ? text("刚刚") : formatter.localizedString(for: date, relativeTo: now)
+    }
+        static func logTime(_ date: Date) -> String {
         date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits).locale(Locale(identifier: "en_GB")))
     }
 }

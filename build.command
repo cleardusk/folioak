@@ -17,12 +17,13 @@ mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   -target arm64-apple-macosx13.0 \
   -framework AppKit -framework SwiftUI -framework PDFKit -framework QuickLookThumbnailing \
-  Sources/Messages.swift Sources/BrowserAuthentication.swift Sources/DownloadError.swift Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Files.swift Sources/Douyin.swift Sources/Shared.swift Sources/AssetNaming.swift Sources/Localization.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspacePersistence.swift Sources/Library.swift Sources/AssetRename.swift Sources/Shortcuts.swift Sources/LibraryPresentation.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/MediaThumbnail.swift Sources/SidebarMotion.swift Sources/BrowserAuthenticationSettings.swift Sources/Updates.swift Sources/QuickDownload.swift Sources/AssetNamingSettings.swift Sources/InteractionTrace.swift Sources/InteractionTraceSettings.swift Sources/PreferencesPages.swift Sources/App.swift \
+  Sources/Messages.swift Sources/BrowserAuthentication.swift Sources/DownloadError.swift Sources/Core.swift Sources/PDF.swift Sources/Media.swift Sources/Files.swift Sources/Douyin.swift Sources/Shared.swift Sources/AssetNaming.swift Sources/Localization.swift Sources/Theme.swift Sources/Workspace.swift Sources/WorkspacePersistence.swift Sources/Library.swift Sources/AssetRename.swift Sources/Shortcuts.swift Sources/LibraryPresentation.swift Sources/WorkspaceView.swift Sources/Interaction.swift Sources/FileInformation.swift Sources/MediaThumbnail.swift Sources/SidebarMotion.swift Sources/WorkspaceBrand.swift Sources/BrowserAuthenticationSettings.swift Sources/Updates.swift Sources/QuickDownload.swift Sources/AssetNamingSettings.swift Sources/InteractionTrace.swift Sources/InteractionTraceSettings.swift Sources/PreferencesPages.swift Sources/App.swift \
   -o "$staged_app/Contents/MacOS/FolioakApp"
 strip "$staged_app/Contents/MacOS/FolioakApp"
 cp Resources/Info.plist "$staged_app/Contents/Info.plist"
 cp -R Resources/en.lproj Resources/zh-Hans.lproj "$staged_app/Contents/Resources/"
 cp LICENSE "$staged_app/Contents/Resources/LICENSE"
+cp Resources/FolioakGlyph.png "$staged_app/Contents/Resources/FolioakGlyph.png"
 cp -R build/media-tools "$staged_app/Contents/Resources/media-tools"
 # Prepared tools, nested Python framework and shared libraries are already signed.
 "$staged_app/Contents/Resources/media-tools/qjs" --version

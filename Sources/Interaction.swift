@@ -401,6 +401,40 @@ private extension View {
     }
 }
 
+// Title-bar–style drag surface for the borderless workspace. Only blank chrome
+// moves the window; controls above it keep ordinary click and press behavior.
+struct WindowDragRegion: NSViewRepresentable {
+    var click: () -> Void = {}
+    func makeNSView(context: Context) -> Region { Region() }
+    func updateNSView(_ view: Region, context: Context) { view.click = click }
+    final class Region: NSView {
+        var click: () -> Void = {}
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            if event.clickCount == 2 {
+                // Match the system title-bar double-click preference.
+                switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+                case "None": break
+                case "Minimize": window.performMiniaturize(nil)
+                default: window.performZoom(nil)
+                }
+                return
+            }
+            click()
+            #if TESTING
+            if let probe = Self.dragProbe { probe(); return }
+            #endif
+            window.performDrag(with: event)
+        }
+        #if TESTING
+        // performDrag runs a tracking loop; tests observe the drag instead.
+        static var dragProbe: (() -> Void)?
+        #endif
+    }
+}
+
 #if TESTING
 // Background test hosts do not consistently expose SwiftUI's accessibility
 // tree. Mark the actual control bounds without handling its mouse events.

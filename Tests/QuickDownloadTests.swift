@@ -435,6 +435,11 @@ extension CoreTests {
         }
         try await fileRowDoubleClickTests()
         try await removalAnimationUITests()
+        try inputRecognitionTests()
+        try WorkspacePreferencesTests.brandParticleFade()
+        try await pageSwitchUITests()
+        try await windowDragRegionTests()
+        try await brandEasterEggTests()
         let controller = MenuBarController(model: model, openWindow: {}, openSettings: {}, quit: {})
         try await Task.sleep(nanoseconds: 150_000_000)
         // Check the whole pointer sequence, including the mouse-up frame that
@@ -924,5 +929,221 @@ extension CoreTests {
             try expect(regions().isEmpty && !host.gestureRecognizers.contains { $0 is NSClickGestureRecognizer }, "last-row transition cleans up every native recognizer")
         }
         print("PASS row removal UI: three lists, fade/reflow intermediate frames, batch removal, empty state and native recognizer cleanup")
+    }
+
+    // Record transitions belong to record mutations. Navigation must swap the
+    // content column in one frame instead of fading the previous page over it.
+    @MainActor static func pageSwitchUITests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-page-switch-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "folioak-page-switch-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        for index in 0..<6 {
+            let file = root.appendingPathComponent("file-\(index).pdf")
+            try createPDF(at: file, shade: CGFloat(index + 1) / 8)
+            let source = URL(string: "https://example.com/switch-\(index).pdf")!
+            model.upsertPaper(DownloadItem(original: source.absoluteString, directURL: source, state: .saved, savedURL: file,
+                documentTitle: "Page switch record \(index + 1)", finishedAt: Date().addingTimeInterval(Double(-index))))
+        }
+        model.navigation = WorkspaceNavigation(page: .library)
+        let host = QuickTestHost(rootView: DownloaderView(model: model, page: .library).environment(\.colorScheme, .light))
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        func content() -> NSBitmapImageRep? {
+            host.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            // Exclude the sidebar, whose selection indicator animates by design.
+            let rect = NSRect(x: 240, y: 0, width: host.bounds.width - 240, height: host.bounds.height)
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: rect) else { return nil }
+            host.cacheDisplay(in: rect, to: bitmap); return bitmap
+        }
+        func differing(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> Int {
+            var count = 0
+            for x in stride(from: 0, to: min(a.pixelsWide, b.pixelsWide), by: 3) {
+                for y in stride(from: 0, to: min(a.pixelsHigh, b.pixelsHigh), by: 3) {
+                    guard let p = a.colorAt(x: x, y: y), let q = b.colorAt(x: x, y: y) else { continue }
+                    if abs(p.redComponent - q.redComponent) + abs(p.greenComponent - q.greenComponent) + abs(p.blueComponent - q.blueComponent) > 0.06 { count += 1 }
+                }
+            }
+            return count
+        }
+        for (from, to) in [(WorkspacePage.library, WorkspacePage.downloads), (.downloads, .library), (.library, .media), (.media, .downloads)] {
+            if model.navigation.current.page != from { model.navigation.visit(WorkspaceRoute(page: from)); try await Task.sleep(nanoseconds: 400_000_000) }
+            model.navigation.visit(WorkspaceRoute(page: to))
+            try await Task.sleep(nanoseconds: 30_000_000)
+            guard let early = content() else { throw TestFailure.failed("page switch snapshot") }
+            try await Task.sleep(nanoseconds: 400_000_000)
+            guard let settled = content() else { throw TestFailure.failed("page switch snapshot") }
+            let changed = differing(early, settled)
+            try expect(changed < 40, "\(from.rawValue) → \(to.rawValue) shows the destination without a fading previous page: \(changed) samples differ")
+        }
+        print("PASS page switch UI: library, downloads and media swap content without ghost frames")
+    }
+
+    // Blank chrome behaves like a title bar; sidebar items and header controls
+    // never hand their presses to window dragging.
+    @MainActor static func windowDragRegionTests() async throws {
+        let suite = "folioak-window-drag-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        let host = QuickTestHost(rootView: DownloaderView(model: model, page: .downloads).environment(\.colorScheme, .light))
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        host.layoutSubtreeIfNeeded()
+        var dragCount = 0
+        WindowDragRegion.Region.dragProbe = { dragCount += 1 }
+        defer { WindowDragRegion.Region.dragProbe = nil }
+        func drags(_ x: CGFloat, _ yFromTop: CGFloat) -> Bool {
+            let before = dragCount
+            let location = host.convert(NSPoint(x: x, y: host.isFlipped ? yFromTop : host.bounds.height - yFromTop), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+            }
+            return dragCount > before
+        }
+        // Coordinates follow the 960 pt workspace: sidebar 190 pt, header row 76 pt.
+        for (x, y, label) in [(CGFloat(100), CGFloat(380), "sidebar gap below navigation"), (160, 24, "sidebar top beside the toggle"),
+                              (600, 38, "page header blank space")] {
+            try expect(drags(x, y), "\(label) moves the window like a title bar")
+        }
+        for (x, y, label) in [(CGFloat(90), CGFloat(114), "downloads tab"), (90, 164, "library tab"), (90, 214, "media tab"),
+                              (37, 55, "sidebar toggle"), (230, 38, "back button")] {
+            try expect(!drags(x, y), "\(label) keeps its press instead of dragging the window")
+        }
+        print("PASS window drag regions: blank sidebar and header drag, navigation controls stay clickable")
+    }
+
+    static func inputRecognitionTests() throws {
+        let empty = InputRecognition(" \n\t ")
+        try expect(empty.total == 0 && !empty.isOverLimit,
+            "empty input has no recognized items or batch-limit warning")
+        let mixed = InputRecognition([
+            "1706.03762", "https://example.com/paper.pdf",
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            "https://example.com/archive.zip", "not-a-link"
+        ].joined(separator: "\n"))
+        try expect(mixed.total == 5 && mixed.papers == 2 && mixed.media == 1 && mixed.files == 1 && mixed.invalid == 1 && !mixed.isOverLimit,
+            "input recognition distinguishes papers, media, files and invalid tokens")
+        let atLimit = (0..<ResourceLimits.batchCount).map { "https://example.com/paper-\($0).pdf" }.joined(separator: "\n")
+        let allowed = InputRecognition(atLimit)
+        try expect(allowed.total == ResourceLimits.batchCount && allowed.papers == ResourceLimits.batchCount && !allowed.isOverLimit,
+            "all 200 tokens are classified at the accepted batch boundary")
+        try expect(try BatchInput(atLimit).entries.count == allowed.total,
+            "recognized boundary count matches the accepted download batch")
+        let overLimit = atLimit + "\nhttps://example.com/extra.pdf"
+        let rejected = InputRecognition(overLimit)
+        try expect(rejected.total == ResourceLimits.batchCount + 1 && rejected.isOverLimit,
+            "201 tokens retain their full count and report the exceeded batch limit")
+        try expect(rejected.papers == 0 && rejected.media == 0 && rejected.files == 0 && rejected.invalid == 0,
+            "over-limit input does not present a misleading partial classification")
+        do {
+            _ = try BatchInput(overLimit)
+            throw TestFailure.failed("over-limit recognition agrees with batch rejection")
+        } catch DownloadError.limit(_) {}
+        print("PASS input recognition: mixed source types, empty input and exact 200/201 batch limits")
+    }
+
+    @MainActor static func brandEasterEggTests() async throws {
+        let suite = "folioak-brand-egg-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        var downloadView = DownloaderView(model: model, page: .downloads)
+        downloadView.reduceMotionOverride = false
+        let host = QuickTestHost(rootView: downloadView.environment(\.colorScheme, .light))
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        var drags = 0
+        WindowDragRegion.Region.dragProbe = { drags += 1 }
+        defer { WindowDragRegion.Region.dragProbe = nil }
+        // The leaf mark sits beside the 50 pt sidebar toggle in the 76 pt header row.
+        let location = host.convert(NSPoint(x: 80, y: host.isFlipped ? 55 : host.bounds.height - 55), to: nil)
+        func taps(_ count: Int, interval: UInt64) async throws {
+            for _ in 0..<count {
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                }
+                try await Task.sleep(nanoseconds: interval)
+            }
+        }
+        let start = LeafBurst.triggered, grandStart = LeafBurst.grandTriggered
+        let mountedBefore = LeafBurstOverlay.mounted
+        try await taps(4, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start, "four quick taps keep the leaf burst hidden")
+        try await Task.sleep(nanoseconds: 700_000_000)
+        try await taps(4, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start, "a pause resets the tap count")
+        try await taps(1, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start + 1, "the fifth quick tap releases the leaf burst")
+        try await taps(2, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start + 3, "every extra quick tap adds another burst")
+        try await taps(3, interval: 120_000_000)
+        try expect(LeafBurst.grandTriggered == grandStart + 2, "the tenth tap of a streak starts another full round")
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        try await taps(5, interval: 120_000_000)
+        try expect(LeafBurst.grandTriggered == grandStart + 3, "five more taps after a pause start a new round over the first")
+        try await taps(5, interval: 120_000_000)
+        try expect(LeafBurst.grandTriggered == grandStart + 4, "overlapping rounds keep responding")
+        for _ in 0..<80 where LeafBurstOverlay.mounted == mountedBefore {
+            try await Task.sleep(nanoseconds: 25_000_000)
+            host.layoutSubtreeIfNeeded()
+        }
+        try expect(LeafBurstOverlay.mounted == mountedBefore + 1,
+            "overlapping bursts share one mounted animation overlay")
+        let triggeredBeforeReduction = LeafBurst.triggered
+        // Preserve the hosting/root view identity so this exercises a live
+        // preference change while particles are already on screen.
+        downloadView.reduceMotionOverride = true
+        host.rootView = downloadView.environment(\.colorScheme, .light)
+        for _ in 0..<80 where LeafBurstOverlay.mounted != mountedBefore {
+            try await Task.sleep(nanoseconds: 25_000_000)
+            host.layoutSubtreeIfNeeded()
+        }
+        try expect(LeafBurstOverlay.mounted == mountedBefore,
+            "enabling reduced motion removes an already mounted particle overlay: before=\(mountedBefore), now=\(LeafBurstOverlay.mounted), override=\(String(describing: downloadView.reduceMotionOverride))")
+        let notesBefore = FolioNote.presented
+        try await taps(5, interval: 120_000_000)
+        try expect(LeafBurst.triggered == triggeredBeforeReduction && LeafBurstOverlay.mounted == mountedBefore,
+            "reduced-motion brand taps never create particles or mount an animation overlay")
+        try expect(FolioNote.presented == notesBefore + 1,
+            "five brand taps still present the text note with reduced motion")
+        downloadView.reduceMotionOverride = false
+        host.rootView = downloadView.environment(\.colorScheme, .light)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        host.layoutSubtreeIfNeeded()
+        try expect(LeafBurst.triggered == triggeredBeforeReduction && LeafBurstOverlay.mounted == mountedBefore,
+            "disabling reduced motion does not resurrect retired particle animations")
+        if let directory = ProcessInfo.processInfo.environment["FOLIOAK_EGG_FRAMES"] {
+            // The preference-change regression cleared the previous rounds.
+            // Start a fresh round only when diagnostic frames were requested.
+            try await taps(5, interval: 120_000_000)
+            for (index, delay) in [UInt64(0), 300, 500, 800, 1200, 1500, 1800].enumerated() {
+                try await Task.sleep(nanoseconds: delay * 1_000_000)
+                let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                process.arguments = ["-x", "-o", "-l\(window.windowNumber)", "\(directory)/egg-\(index).png"]
+                try process.run(); process.waitUntilExit()
+            }
+        }
+        var stack = LeafBurstStack(), retired = 0
+        for _ in 0..<6 {
+            let burst = LeafBurst(grand: true, accent: 0x0A7A50)
+            retired += stack.push(burst).count
+            try expect(stack.bursts.last?.retired == nil, "the newest round is never retired")
+            try expect(stack.liveParticles <= LeafBurstStack.particleBudget, "live particles stay within the budget")
+        }
+        try expect(retired == 4 && stack.bursts.count == 6, "older rounds fade out instead of being dropped mid-frame")
+        try expect(drags == 0, "tapping the brand mark never drags the window")
+        print("PASS brand easter egg: five-tap rounds, pause reset, bounded overlap, live reduced-motion cancellation, text-note fallback and clickable mark")
     }
 }

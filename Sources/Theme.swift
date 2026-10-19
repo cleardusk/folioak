@@ -66,14 +66,16 @@ struct ThemePalette {
 }
 
 enum AppTheme: String, CaseIterable {
-    case native, graphite, iris, lagoon, amber, midnight
+    case grove, native, graphite, iris, lagoon, amber, midnight
     case vscode, oneDark, dracula, nord, solarized, gruvbox
 
-    static let standardThemes: [AppTheme] = [.native, .graphite, .iris, .lagoon, .amber, .midnight]
+    // Grove is the signature palette derived from the oak-leaf mark.
+    static let standardThemes: [AppTheme] = [.grove, .native, .graphite, .iris, .lagoon, .amber, .midnight]
     static let codingThemes: [AppTheme] = [.vscode, .oneDark, .dracula, .nord, .solarized, .gruvbox]
 
     var label: String {
         switch self {
+        case .grove: return L("林叶")
         case .native: return L("暖砂")
         case .graphite: return L("石墨")
         case .iris: return L("鸢尾")
@@ -91,6 +93,10 @@ enum AppTheme: String, CaseIterable {
 
     func palette(dark: Bool) -> ThemePalette {
         switch (self, dark) {
+        case (.grove, false):
+            return ThemePalette(canvas: 0xFBFCFA, surface: 0xF0F4F1, text: 0x18231E, secondary: 0x56665E, border: 0xD9E2DC, accent: 0x0A7A50, action: 0x0B7F53, onAction: 0xFFFFFF)
+        case (.grove, true):
+            return ThemePalette(canvas: 0x0B100E, surface: 0x141B18, text: 0xE2ECE6, secondary: 0xA0B3A9, border: 0x2A3731, accent: 0x4CCF97, action: 0x3FC58C, onAction: 0x04241A)
         case (.native, false):
             return ThemePalette(canvas: 0xFFFAF8, surface: 0xF5EEEA, text: 0x28201D, secondary: 0x766862, border: 0xE2D8D1, accent: 0x805644, action: 0x805644, onAction: 0xFFFFFF)
         case (.native, true):
@@ -158,15 +164,40 @@ struct PrimaryActionStyle: ButtonStyle {
     let palette: ThemePalette
     @Environment(\.isEnabled) private var enabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @WorkspaceViewState private var hovered = false
 
     func makeBody(configuration: Configuration) -> some View {
+        let shape = Capsule(style: .continuous)
         configuration.label
-            .font(.system(size: 18, weight: .semibold))
-            .foregroundStyle(ThemePalette.color(enabled ? palette.onAction : palette.secondary).opacity(enabled ? 1 : 0.65))
-            .frame(width: 40, height: 40)
-            .background(ThemePalette.color(enabled ? palette.action : palette.border), in: Circle())
-            .contentShape(Circle())
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.95 : 1)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(ThemePalette.color(enabled ? palette.onAction : palette.secondary))
+            .padding(.horizontal, 16)
+            .frame(minWidth: 40, minHeight: 36)
+            .background(shape.fill(enabled ? ThemePalette.color(palette.action) : ThemePalette.color(palette.border).opacity(0.55)))
+            .overlay(shape.fill(Color.white.opacity(enabled ? (configuration.isPressed ? 0 : hovered ? 0.10 : 0) : 0)))
+            .overlay(shape.fill(Color.black.opacity(enabled && configuration.isPressed ? 0.12 : 0)))
+            .shadow(color: ThemePalette.color(palette.action).opacity(enabled && !configuration.isPressed ? 0.28 : 0), radius: enabled ? (hovered ? 8 : 5) : 0, y: enabled ? 2 : 0)
+            .contentShape(shape)
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.97 : 1)
+            .onHover { hovered = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovered)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: enabled)
+    }
+}
+
+// The oak-leaf mark as a tintable template. Falls back to a system leaf when
+// the resource is not bundled, such as in command-line test hosts.
+struct FolioakGlyph: View {
+    static let image: NSImage? = {
+        let roots = [Bundle.main.resourceURL, URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()].compactMap { $0 }
+        for root in roots {
+            if let image = NSImage(contentsOf: root.appendingPathComponent("FolioakGlyph.png")) { image.isTemplate = true; return image }
+        }
+        return nil
+    }()
+    var body: some View {
+        if let image = Self.image { Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit) }
+        else { Image(systemName: "leaf.fill").resizable().aspectRatio(contentMode: .fit) }
     }
 }
 

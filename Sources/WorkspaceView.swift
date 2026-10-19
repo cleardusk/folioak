@@ -182,15 +182,30 @@ struct DownloaderView: View {
     @WorkspaceViewState private var libraryFilter = LibraryFilter.all
     @WorkspaceViewState private var librarySort = LibrarySort.newest
     @WorkspaceViewState private var libraryTag: String?
+    @WorkspaceViewState private var leafBursts = LeafBurstStack()
+    @WorkspaceViewState private var showingFolioNote = false
+    @WorkspaceViewState private var folioNoteRequest = UUID()
+    @WorkspaceViewState private var celebrationRound = -1
+    #if TESTING
+    var reduceMotionOverride: Bool? = nil
+    #endif
     @Environment(\.displayScale) private var displayScale
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var reduceMotion: Bool {
+        #if TESTING
+        if let reduceMotionOverride { return reduceMotionOverride }
+        #endif
+        return systemReduceMotion
+    }
     @Environment(\.colorSchemeContrast) private var contrast
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var recordTransition: AnyTransition {
-        reduceMotion ? .identity : .asymmetric(insertion: .opacity, removal: .opacity.animation(.easeOut(duration: 0.10)))
+        // No animation is attached here: record mutations animate through
+        // `recordAnimation`, while page navigation swaps in a single frame.
+        reduceMotion ? .identity : .opacity
     }
     private var listSelectionActive: Bool { listFocused && !inputFocused && !searchFocused }
     private var selectedID: UUID? { selection.primary }
@@ -383,7 +398,7 @@ struct DownloaderView: View {
                             Spacer()
                         }.frame(height: WorkspaceMetrics.headerHeight)
                     } else { header }
-                }
+                }.background(WindowDragRegion(click: dismissEditing).padding(.horizontal, -24))
                 ZStack(alignment: .topLeading) {
                     workspaceContent
                         .opacity(workspaceActive ? 1 : 0)
@@ -411,6 +426,51 @@ struct DownloaderView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
         .ignoresSafeArea(.container, edges: .top)
+        .overlayPreferenceValue(BrandMarkAnchor.self) { anchor in
+            GeometryReader { proxy in
+                if let anchor, !reduceMotion, !leafBursts.isEmpty {
+                    let mark = proxy[anchor]
+                    LeafBurstOverlay(bursts: leafBursts.bursts, origin: CGPoint(x: mark.midX, y: mark.midY), palette: palette)
+                }
+            }
+        }
+        .onChange(of: reduceMotion) { reduced in
+            if reduced { leafBursts = LeafBurstStack() }
+        }
+        .overlay(alignment: .top) {
+            if showingFolioNote {
+                // A new round swaps the line in place rather than re-sliding the pill.
+                FolioNote(palette: palette, round: celebrationRound).id(celebrationRound).padding(.top, 14)
+                    .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
+            }
+        }
+    }
+
+    private func celebrate(_ grand: Bool) {
+        if grand { celebrationRound += 1 }
+        guard !reduceMotion else {
+            if grand { showFolioNote() }
+            return
+        }
+        let burst = LeafBurst(grand: grand, accent: palette.accent)
+        for id in leafBursts.push(burst) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + LeafBurst.retireDuration) { leafBursts.remove(id) }
+        }
+        if grand { NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now); showFolioNote() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + burst.duration) { leafBursts.remove(burst.id) }
+    }
+
+    private func showFolioNote() {
+        #if TESTING
+        FolioNote.presented += 1
+        #endif
+        let request = UUID()
+        folioNoteRequest = request
+        withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.78)) { showingFolioNote = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) {
+            guard folioNoteRequest == request else { return }
+            withAnimation(reduceMotion ? nil : .easeIn(duration: 0.25)) { showingFolioNote = false }
+        }
     }
 
     private var workspaceContent: some View {
@@ -470,8 +530,7 @@ struct DownloaderView: View {
                 } label: { SidebarToggleGlyph(expanded: !collapsed).frame(width: 50, height: 42).contentShape(Rectangle()) }
                     .buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary)
                     .help(collapsed ? L("展开侧栏") : L("收起侧栏")).accessibilityLabel(collapsed ? L("展开侧栏") : L("收起侧栏"))
-                Text("Folioak").font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
+                BrandMark(palette: palette, reduceMotion: reduceMotion, tapped: dismissEditing, celebrate: celebrate).fixedSize()
                     .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     .frame(width: collapsed ? 0 : nil, alignment: .leading).clipped()
                 Spacer(minLength: 0)
@@ -482,6 +541,7 @@ struct DownloaderView: View {
                         HStack(spacing: 13) {
                             SidebarGlyph(symbol: destination.icon, filledSymbol: destination.filledIcon, selected: workspaceActive && destination == page)
                                 .font(.system(size: 17, weight: .regular)).frame(width: 24, height: 24)
+                                .foregroundStyle(workspaceActive && destination == page ? accent : secondary)
                             HStack {
                                 Text(L(destination.rawValue)).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(ThemePalette.color(palette.text)).fixedSize()
                                 Spacer(minLength: 0)
@@ -541,8 +601,9 @@ struct DownloaderView: View {
                 }
             }
         }.padding(.horizontal, 12).padding(.bottom, 16).frame(width: collapsed ? 74 : 190)
+            // The drag region sits above the fill so blank sidebar space wins hit testing.
+            .background(WindowDragRegion(click: dismissEditing))
             .background(ThemePalette.color(palette.sidebar))
-            .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
     }
 
     private var navigationControls: some View {
@@ -663,7 +724,8 @@ struct DownloaderView: View {
     }
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let recognition = InputRecognition(model.input)
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: WorkspaceMetrics.Space.compact) {
                 Text(L("添加链接")).font(WorkspaceMetrics.TypeScale.title)
                 Spacer()
@@ -685,7 +747,8 @@ struct DownloaderView: View {
                 DirectoryMenu(model: model, palette: palette)
                     .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
                 Spacer(minLength: WorkspaceMetrics.Space.compact)
-                primaryAction
+                InputRecognitionChips(recognition: recognition, palette: palette)
+                primaryAction(recognition: recognition)
             }.padding(.horizontal, WorkspaceMetrics.Space.inset)
                 .padding(.top, WorkspaceMetrics.Space.regular)
                 .padding(.bottom, WorkspaceMetrics.Space.section)
@@ -694,24 +757,44 @@ struct DownloaderView: View {
             if model.busy { dismissEditing() } else { model.focusInput() }
         })
         .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel))
+        .overlay {
+            if dropTargeted && !model.busy {
+                ZStack {
+                    RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).fill(accent.opacity(0.07))
+                    RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).strokeBorder(accent, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+                    Label(L("松开以添加链接"), systemImage: "arrow.down.doc").font(.system(size: 13, weight: .semibold)).foregroundStyle(accent)
+                        .padding(.horizontal, 14).frame(height: 32).background(ThemePalette.color(palette.canvas), in: Capsule())
+                }.allowsHitTesting(false).transition(.opacity)
+            }
+        }
         .overlay(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).stroke((inputFocused || dropTargeted) && !model.busy ? accent.opacity(0.65) : ThemePalette.color(palette.border).opacity(0.6), lineWidth: (inputFocused || dropTargeted) ? 1 : 1 / displayScale))
+        .shadow(color: Color.black.opacity(scheme == .dark ? 0 : inputFocused && !model.busy ? 0.07 : 0.035), radius: inputFocused ? 14 : 10, y: 4)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: dropTargeted)
         .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
     }
 
-    @ViewBuilder private var primaryAction: some View {
+    @ViewBuilder private func primaryAction(recognition: InputRecognition) -> some View {
         if model.busy {
             Button(action: model.cancel) {
-                if model.cancelling { ProgressView().controlSize(.small).tint(ThemePalette.color(palette.onAction)) }
-                else { Image(systemName: "stop.fill").font(.system(size: 14, weight: .semibold)) }
+                HStack(spacing: 6) {
+                    if model.cancelling { ProgressView().controlSize(.small).tint(ThemePalette.color(palette.onAction)); Text(L("正在取消")) }
+                    else { Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)); Text(L("停止")) }
+                }
             }.buttonStyle(PrimaryActionStyle(palette: palette))
                 .keyboardShortcut(searchFocused ? nil : .cancelAction).disabled(model.cancelling)
                 .help(model.cancelling ? L("正在取消") : L("取消下载（Esc）"))
                 .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
         } else {
-            Button(action: model.start) { Image(systemName: "arrow.down") }
+            let count = recognition.total
+            Button(action: model.start) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down").font(.system(size: 12, weight: .bold))
+                    Text(count == 0 ? L("开始下载") : L("下载 \(count) 项")).monospacedDigit()
+                }
+            }
                 .buttonStyle(PrimaryActionStyle(palette: palette))
                 .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
-                .disabled(model.tokenCount == 0).help(L("开始下载（\(model.shortcuts[.download].label)）"))
+                .disabled(count == 0).help(L("开始下载（\(model.shortcuts[.download].label)）"))
                 .accessibilityLabel(L("开始下载"))
         }
     }
@@ -903,7 +986,13 @@ struct DownloaderView: View {
         return L("粘贴链接，开始下载")
     }
 
-    private func empty(icon: String, text: String) -> some View {
+    @ViewBuilder private func empty(icon: String, text: String) -> some View {
+        if page == .downloads && model.downloads.isEmpty && query.isEmpty {
+            DownloadsWelcome(palette: palette, busy: model.busy) { model.appendInput("https://arxiv.org/abs/1706.03762") }
+        } else { emptyPlaceholder(icon: icon, text: text) }
+    }
+
+    private func emptyPlaceholder(icon: String, text: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(secondary)
             Text(text).font(WorkspaceMetrics.TypeScale.body).foregroundStyle(secondary)
@@ -951,7 +1040,9 @@ struct DownloaderView: View {
                 } else if page == .downloads {
                     if model.busy { ProgressView().controlSize(.mini).frame(width: 12) }
                     else if !model.summary.isEmpty { Circle().fill(accent).frame(width: 5, height: 5) }
-                    Text(L(model.summary)).lineLimit(1)
+                    if model.summary.isEmpty && model.successes > 0 {
+                        Label(L("已完成 \(model.successes) 项"), systemImage: "checkmark.circle.fill").foregroundStyle(UIColors.success).lineLimit(1)
+                    } else { Text(L(model.summary)).lineLimit(1) }
                     Spacer()
 
                 } else if page == .logs {
@@ -1047,6 +1138,7 @@ struct DownloadRow: View {
         busy = model.busy; theme = model.theme; self.selected = selected; self.selectionActive = selectionActive; self.select = select
     }
     @StateObject private var clickTarget = FileRowClickTarget()
+    @WorkspaceViewState private var hovered = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.displayScale) private var displayScale
     @Environment(\.colorSchemeContrast) private var contrast
@@ -1066,13 +1158,7 @@ struct DownloadRow: View {
                     palette: palette, revision: "\(model.fileRefreshRevision)|\(item.state)", preview: .media, subtitleIsError: item.state == .missing) { controls }
             } else { rowContent }
         }.padding(.horizontal, grid ? 6 : 10).padding(.vertical, grid ? 6 : WorkspaceMetrics.Space.regular)
-            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
-            .overlay(alignment: .bottom) {
-                if !grid { Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
-                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10) }
-            }
-            .overlay { if grid && selected && selectionActive { RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control).stroke(ThemePalette.color(palette.accent).opacity(0.6), lineWidth: 1) } }
+            .modifier(FileRowSurface(palette: palette, grid: grid, selected: selected && selectionActive, hovered: $hovered))
             .contentShape(Rectangle())
             .background(FileRowClickRegion(target: clickTarget) {
                 let current = (inMediaLibrary ? model.mediaLibrary : model.downloads).first { $0.id == item.id }
@@ -1112,6 +1198,9 @@ struct DownloadRow: View {
                     }.foregroundStyle(item.state.color(palette)).lineLimit(1)
                     }
                     if let files = item.additionalURLs, !files.isEmpty { Text(L("\(files.count + 1) 个文件")) }
+                    if !inMediaLibrary, item.state == .saved || item.state == .existing, let finished = item.finishedAt {
+                        Text(L10n.relative(finished)).help(L10n.date(finished, dateStyle: .complete))
+                    }
                 }.font(.system(size: 11)).foregroundStyle(secondary)
                 if item.state == .downloading {
                     DownloadTransferProgress(progress: item.progress, bytesPerSecond: item.bytesPerSecond, palette: palette)
@@ -1149,6 +1238,7 @@ struct DownloadRow: View {
                     Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32)
                         .accessibilityLabel(L("\(item.title)的更多操作"))
+                        .opacity(hovered || selected || grid ? 1 : 0.45)
                 }
                 if hasAuthenticationIssue && !(inMediaLibrary && item.isLibraryRemoved) {
                     Button(L("浏览器认证…"), action: authenticate)
@@ -1217,6 +1307,29 @@ struct DownloadRow: View {
     }
 
 
+}
+
+// Shared list/grid row chrome: hover wash, active selection and hairline.
+struct FileRowSurface: ViewModifier {
+    let palette: ThemePalette
+    let grid: Bool
+    let selected: Bool
+    @Binding var hovered: Bool
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous)
+        content
+            .background(selected ? ThemePalette.color(palette.accent).opacity(0.10) : ThemePalette.color(palette.text).opacity(hovered ? 0.035 : 0))
+            .clipShape(shape)
+            .overlay(alignment: .bottom) {
+                if !grid { Rectangle().fill(ThemePalette.color(palette.border).opacity(hovered || selected ? 0 : 0.6)).frame(height: 1 / displayScale)
+                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10) }
+            }
+            .overlay { if grid && selected { shape.stroke(ThemePalette.color(palette.accent).opacity(0.6), lineWidth: 1) } }
+            .onHover { hovered = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovered)
+    }
 }
 
 struct DownloadTransferProgress: View {

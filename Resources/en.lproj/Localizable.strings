@@ -59,6 +59,7 @@
 "%@ 文件夹无法创建或不可写，请检查保存位置与权限。" = "The %@ folder could not be created or is not writable. Check the location and permissions.";
 "输入超过 64 KB，请分批导入。" = "Input exceeds 64 KB. Import it in smaller batches.";
 "每批最多 200 条输入，请分批下载。" = "Each batch supports up to 200 entries.";
+"最多 200 项" = "200 max";
 "请选择 UTF-8 编码的文本文件。" = "Choose a UTF-8 text file.";
 "任务协调" = "Coordination";
 "获取信息" = "Get Information";
@@ -808,3 +809,18 @@
 "之后下载的论文和 PDF 直接保存到此目录；已有文件不移动。" = "New papers and PDFs are saved directly here. Existing files stay where they are.";
 "其他文件按类型归入 Documents、Archives、Videos、Audio、Images。" = "Other files are organized into Documents, Archives, Videos, Audio, and Images.";
 "PDF 保存目录无法创建或不可写，请重新选择。" = "The PDF folder could not be created or is not writable. Choose another folder.";
+"林叶" = "Grove";
+"松开以添加链接" = "Drop to add links";
+"下载 %@ 项" = "Download (%@)";
+"已完成 %@ 项" = "%@ completed";
+"刚刚" = "Just now";
+"论文" = "Papers";
+"无法识别" = "Unrecognized";
+"论文、视频与文件直链，自动按类型归档到本地。" = "Papers, videos and direct file links, sorted into local folders by type.";
+"试试示例：Attention Is All You Need" = "Try an example: Attention Is All You Need";
+"每一页，都是一片叶子。" = "Every page, a leaf.";
+"风起时，书页翻动。" = "When the wind rises, pages turn.";
+"落叶归根，文件归档。" = "Leaves find their roots, files their folders.";
+"满园秋色，尽在一页。" = "A whole autumn, on a single page.";
+"抖音" = "Douyin";
+"小红书" = "Xiaohongshu";

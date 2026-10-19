@@ -110,6 +110,7 @@ private final class PreferencesTestWindow: NSPanel {
 
     static func run(snapshots: Bool) async throws {
         _ = NSApplication.shared
+        try await welcomeLayouts(snapshots: snapshots)
         try navigationHistory()
         let oldLanguage = AppLocalization.shared.language, oldAppearance = NSApp.appearance
         defer { AppLocalization.shared.language = oldLanguage; NSApp.appearance = oldAppearance }
@@ -509,6 +510,70 @@ private final class PreferencesTestWindow: NSPanel {
         try expect(NSApp.sendAction(settingsAction, to: settings.target, from: settings) && model.preferencesPage == .settings,
             "Settings remains reachable after closing and reopening the main window")
         print("PASS preferences routes: native Command-comma/About menus, one retained main window, close/reopen and modal-operation protection")
+    }
+
+    static func welcomeLayouts(snapshots: Bool) async throws {
+        _ = NSApplication.shared
+        let suite = "folioak-welcome-layout-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        let oldLanguage = AppLocalization.shared.language, oldAppearance = NSApp.appearance
+        defer {
+            preferences.removePersistentDomain(forName: suite)
+            AppLocalization.shared.language = oldLanguage; NSApp.appearance = oldAppearance
+        }
+        let model = DownloadModel(preferences: preferences)
+        let surface = Surface(DownloaderView(model: model, page: .downloads))
+        defer { surface.window.close() }
+        for language in [AppLanguage.chinese, .english] {
+            model.language = language
+            for appearance in [AppAppearance.light, .dark] {
+                model.appearance = appearance; NSApp.appearance = appearance.native
+                model.input = ""
+                await surface.settle()
+                try await Task.sleep(nanoseconds: 300_000_000)
+                try surface.save("welcome-\(language.rawValue)-\(appearance.rawValue)", enabled: snapshots)
+                try expect(surface.host.bounds.size == NSSize(width: 780, height: 540), "welcome keeps the minimum window size")
+                try expect(try surface.location(L("粘贴链接，开始下载")) != nil, "welcome headline fits above the footer")
+                let example = L("试试示例：Attention Is All You Need")
+                let labels = try surface.labels()
+                // OCR can confuse the narrow "ll" in "All" with an I. Locate
+                // both ends of the distinctive title, then exercise its action.
+                guard let point = labels.first(where: { $0.1.x > 190 && $0.0.contains("Attention") && $0.0.contains("Need") })?.1 else {
+                    throw TestFailure.failed("welcome example is fully visible: " + example + "; actual " + labels.map(\.0).joined(separator: " | "))
+                }
+                await surface.click(point)
+                try expect(model.input == "https://arxiv.org/abs/1706.03762" && !model.busy,
+                    "welcome example stays visible and clickable without starting a download")
+            }
+        }
+        print("PASS welcome layout: minimum-size Chinese/English light/dark window and example action")
+    }
+
+    static func brandParticleFade() throws {
+        let palette = AppTheme.grove.palette(dark: false)
+        let burst = LeafBurst(grand: false, accent: palette.accent)
+        let now = burst.start.addingTimeInterval(0.4)
+        var retiring = burst
+        retiring.retired = now.addingTimeInterval(-LeafBurst.retireDuration / 2)
+        func ink(_ value: LeafBurst) throws -> Double {
+            let content = LeafBurstOverlay(bursts: [value], origin: CGPoint(x: 160, y: 60), palette: palette)
+                .canvas(at: now).frame(width: 640, height: 420).background(Color.white)
+            let renderer = ImageRenderer(content: content)
+            guard let image = renderer.cgImage else { throw TestFailure.failed("leaf fade bitmap") }
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            var total = 0.0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                    total += 3 - color.redComponent - color.greenComponent - color.blueComponent
+                }
+            }
+            return total
+        }
+        let full = try ink(burst), half = try ink(retiring)
+        try expect(full > 10 && half / full > 0.35 && half / full < 0.75,
+            "retiring particles visibly fade rather than disappearing at removal: \(full), \(half)")
+        print("PASS leaf rendering: retirement reduces actual particle opacity")
     }
 
     private static func layouts(_ model: DownloadModel, surface: Surface, snapshots: Bool) async throws {
