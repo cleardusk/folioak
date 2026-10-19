@@ -1333,6 +1333,9 @@ struct LogContent: View {
                                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 8)
                                     }
                                     LogRow(entry: entry, palette: palette)
+                                        #if TESTING
+                                        .background(LogReadingRegion(id: entry.id))
+                                        #endif
                                 }.id(entry.id)
                             }
                         }.frame(minHeight: viewport.size.height, alignment: .top)

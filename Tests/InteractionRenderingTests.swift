@@ -614,6 +614,19 @@ extension CoreTests {
     @Published var level: ActivityLevel?
     @Published var entries: [ActivityEntry] = []
 }
+// Measure the same visible log entry across lazy-stack height refinements.
+// This background does not participate in hit testing or release builds.
+struct LogReadingRegion: NSViewRepresentable {
+    let id: UUID
+    func makeNSView(context: Context) -> Region {
+        let view = Region(); view.setAccessibilityElement(false); return view
+    }
+    func updateNSView(_ view: Region, context: Context) { view.entryID = id }
+    final class Region: NSView {
+        var entryID: UUID?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
 private struct LogRegressionView: View {
     @ObservedObject var probe: LogRegressionProbe
     var body: some View {
@@ -650,6 +663,44 @@ extension CoreTests {
             scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
             scroll.reflectScrolledClipView(scroll.contentView)
             NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
+        }
+        func readingRegions(_ root: NSView) -> [LogReadingRegion.Region] {
+            (root as? LogReadingRegion.Region).map { [$0] } ?? root.subviews.flatMap(readingRegions)
+        }
+        func readingAnchor(in scroll: NSScrollView) throws -> (id: UUID, offset: CGFloat) {
+            let clip = scroll.contentView
+            let visible = readingRegions(view).compactMap { region -> (UUID, CGRect)? in
+                guard let id = region.entryID, region.window === window, !region.isHiddenOrHasHiddenAncestor else { return nil }
+                let frame = region.convert(region.bounds, to: clip)
+                guard frame.width > 0, frame.height > 0, frame.minY >= clip.bounds.minY + 2, frame.maxY <= clip.bounds.maxY - 2 else { return nil }
+                return (id, frame)
+            }.sorted { $0.1.minY < $1.1.minY }
+            guard let row = visible.first else { throw TestFailure.failed("manual log reading has a fully visible entry") }
+            return (row.0, row.1.minY - clip.bounds.minY)
+        }
+        func appendWhileReading(_ message: String, assertion: String) async throws {
+            guard let scroll = observer(view)?.scroll else { throw TestFailure.failed("manual log reading has a scroll view") }
+            let anchor = try readingAnchor(in: scroll)
+            let before = scroll.contentView.bounds
+            let beforeContent = scroll.documentView?.bounds
+            try expect(observer(view)?.followingLatest == false && !LogScrollPosition(scroll: scroll).atBottom,
+                       "manual reading disables tail following before append: \(assertion)")
+            probe.entries.append(ActivityEntry(level: .info, message: message, subject: nil, itemID: nil))
+            await settle()
+            let after = scroll.contentView.bounds
+            let row = readingRegions(view).first { $0.entryID == anchor.id && $0.window === window && !$0.isHiddenOrHasHiddenAncestor }
+            let offset: CGFloat? = row.flatMap {
+                let frame = $0.convert($0.bounds, to: scroll.contentView)
+                guard frame.width > 0, frame.height > 0, frame.minY >= after.minY, frame.maxY <= after.maxY else { return nil }
+                return frame.minY - after.minY
+            }
+            // LazyVStack may revise the estimated height of offscreen rows, so
+            // document offsets can change while the visible text stays still.
+            try expect(offset.map { abs($0 - anchor.offset) < 2 } == true && observer(view)?.followingLatest == false && !LogScrollPosition(scroll: scroll).atBottom,
+                       "\(assertion): row=\(anchor.id) offset=\(anchor.offset)->\(String(describing: offset)) clip=\(before)->\(after) content=\(String(describing: beforeContent))->\(String(describing: scroll.documentView?.bounds)) following=\(String(describing: observer(view)?.followingLatest))")
+            if abs(after.minY - before.minY) >= 2 {
+                print("PASS log reading anchor: visible entry stays fixed while lazy document offset changes by \(after.minY - before.minY)")
+            }
         }
         await settle()
         guard let scroll = observer(view)?.scroll else { throw TestFailure.failed("logs expose native clip bounds") }
@@ -696,9 +747,7 @@ extension CoreTests {
         await settle()
         let readingFromTop = scroll.contentView.bounds.minY
         try expect(readingFromTop > 2, "manual wheel scrolling releases the requested top anchor")
-        probe.entries.append(ActivityEntry(level: .info, message: "顶部阅读位置不被新增日志打断", subject: nil, itemID: nil))
-        await settle()
-        try expect(abs(scroll.contentView.bounds.minY - readingFromTop) < 2, "appending logs preserves manual reading after jumping to top")
+        try await appendWhileReading("顶部阅读位置不被新增日志打断", assertion: "appending logs preserves manual reading after jumping to top")
         await clickJump()
         try expect(LogScrollPosition(scroll: scroll).atBottom, "real log button returns to latest entry after manual scrolling")
         await clickJump()
@@ -710,10 +759,7 @@ extension CoreTests {
         try expect(LogScrollPosition(scroll: scroll).atBottom, "tail stays aligned when wrapping changes row heights")
         userScroll(scroll, y: scroll.contentView.bounds.minY - 200)
         await settle()
-        let readingY = scroll.contentView.bounds.minY
-        probe.entries.append(ActivityEntry(level: .info, message: "手动上滚后不拉回", subject: nil, itemID: nil))
-        await settle()
-        try expect(abs(scroll.contentView.bounds.minY - readingY) < 2, "new log preserves historical reading position")
+        try await appendWhileReading("手动上滚后不拉回", assertion: "new log preserves historical reading position")
         userScroll(scroll, y: scroll.documentView!.bounds.maxY - scroll.contentView.bounds.height)
         await settle()
         probe.entries.append(ActivityEntry(level: .info, message: "尾部继续跟随", subject: nil, itemID: nil))
