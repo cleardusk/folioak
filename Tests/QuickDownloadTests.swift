@@ -1014,26 +1014,31 @@ extension CoreTests {
         var dragCount = 0
         WindowDragRegion.Region.dragProbe = { dragCount += 1 }
         defer { WindowDragRegion.Region.dragProbe = nil }
-        func drags(_ x: CGFloat, _ yFromTop: CGFloat) -> Bool {
+        func drags(_ x: CGFloat, _ yFromTop: CGFloat) async throws -> Bool {
             let before = dragCount
             let location = host.convert(NSPoint(x: x, y: host.isFlipped ? yFromTop : host.bounds.height - yFromTop), to: nil)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                try await window.dispatchQueuedMouseEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!)
             }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            host.layoutSubtreeIfNeeded()
             return dragCount > before
         }
         // Coordinates follow the 960 pt workspace: sidebar 190 pt, header row 76 pt.
         for (x, y, label) in [(CGFloat(100), CGFloat(380), "sidebar gap below navigation"), (160, 24, "sidebar top beside the toggle"),
                               (600, 38, "page header blank space")] {
-            try expect(drags(x, y), "\(label) moves the window like a title bar")
+            try expect(try await drags(x, y), "\(label) moves the window like a title bar")
         }
-        // Collapse last: it moves header controls away from their expanded
-        // coordinates as soon as the native event loop advances the animation.
-        for (x, y, label) in [(CGFloat(90), CGFloat(114), "downloads tab"), (90, 164, "library tab"), (90, 214, "media tab"),
-                              (230, 38, "back button"), (37, 55, "sidebar toggle")] {
-            try expect(!drags(x, y), "\(label) keeps its press instead of dragging the window")
+        for (destination, y) in [(WorkspacePage.downloads, CGFloat(114)), (.library, 164), (.media, 214)] {
+            try expect(try await !drags(90, y), "\(destination.rawValue) keeps its press instead of dragging the window")
+            try expect(model.navigation.current.page == destination, "queued sidebar click commits navigation before the next control probe")
         }
+        try expect(!model.navigation.back.isEmpty, "back probe targets an enabled navigation button")
+        try expect(try await !drags(230, 38), "back button keeps its press instead of dragging the window")
+        try expect(model.navigation.current.page == .library, "back button actually navigates to the previous page")
+        // Collapse last, after all coordinates based on the expanded sidebar.
+        try expect(try await !drags(37, 55), "sidebar toggle keeps its press instead of dragging the window")
         print("PASS window drag regions: blank sidebar and header drag, navigation controls stay clickable")
     }
 
@@ -1087,8 +1092,8 @@ extension CoreTests {
         func taps(_ count: Int, interval: UInt64) async throws {
             for _ in 0..<count {
                 for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                    window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                    try await window.dispatchQueuedMouseEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!)
                 }
                 try await Task.sleep(nanoseconds: interval)
             }

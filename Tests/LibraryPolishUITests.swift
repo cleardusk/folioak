@@ -66,13 +66,20 @@ extension CoreTests {
                         repeat {
                             if let queued = NSApp.nextEvent(matching: NSEvent.EventTypeMask(rawValue: 1 << expected.type.rawValue),
                                 until: waits ? deadline : .distantPast, inMode: .default, dequeue: true) {
-                                if queued.type == expected.type && queued.windowNumber == expected.windowNumber {
+                                if queued.type == expected.type && queued.windowNumber == expected.windowNumber &&
+                                    queued.eventNumber == expected.eventNumber && abs(queued.timestamp - expected.timestamp) < 0.000001 {
                                     return (queued, deferred.suffix(12).map(describe).joined(separator: " | "))
                                 }
                                 deferred.append(queued)
                             } else if !waits { break }
                         } while Date() < deadline
                         return (nil, deferred.suffix(12).map(describe).joined(separator: " | "))
+                    }
+                    func dispatch(_ event: NSEvent) {
+                        NSApp.sendEvent(event)
+                        // Let AppKit commit/reset the native gesture before an
+                        // async wait without consuming unrelated queued input.
+                        _ = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp], until: Date(), inMode: .default, dequeue: false)
                     }
                     func send(_ event: NSEvent) throws {
                         // The normal event-loop dequeue updates NSApp.currentEvent.
@@ -83,7 +90,7 @@ extension CoreTests {
                         guard let queued = result.event else {
                             throw TestFailure.failed("library click dequeues its own native event within 1s: page=\(page.rawValue) mode=\(mode) style=\(scrollerStyle) target=\(point) hit=\(String(describing: host.hitTest(point))) expected={\(describe(event))} encountered={\(result.seen)}")
                         }
-                        NSApp.sendEvent(queued)
+                        dispatch(queued)
                     }
                     if tracksMouse {
                         // Text fields, scrollers and native menus can consume the
@@ -100,7 +107,7 @@ extension CoreTests {
                         // any release still queued rather than leaking it into
                         // the next independent click/menu scenario.
                         if let release = dequeueOwn(up, waits: false).event {
-                            NSApp.sendEvent(release)
+                            dispatch(release)
                         }
                         await settle()
                         return
@@ -152,14 +159,30 @@ extension CoreTests {
                 let rowPoint = NSPoint(x: row.minX + 40, y: row.midY)
                 func assertSelectionCount(_ count: Int) async throws {
                     var titles: [String] = []
+                    var trackedMenu: NSMenu?
+                    var trackingEnded = false
+                    var cancel: Timer?
                     let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { note in
-                        guard let menu = note.object as? NSMenu else { return }
+                        guard trackedMenu == nil, let menu = note.object as? NSMenu else { return }
+                        trackedMenu = menu
                         titles = menu.items.filter(\.isEnabled).map(\.title)
-                        let cancel = Timer(timeInterval: 0, repeats: false) { _ in menu.cancelTrackingWithoutAnimation() }
-                        RunLoop.main.add(cancel, forMode: .eventTracking)
+                        let timer = Timer(timeInterval: 0, repeats: false) { _ in menu.cancelTrackingWithoutAnimation() }
+                        cancel = timer
+                        RunLoop.main.add(timer, forMode: .eventTracking)
                     }
-                    defer { NotificationCenter.default.removeObserver(observer) }
+                    let endObserver = NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: nil) { note in
+                        guard let menu = note.object as? NSMenu, menu === trackedMenu else { return }
+                        trackingEnded = true
+                    }
+                    defer {
+                        NotificationCenter.default.removeObserver(observer)
+                        NotificationCenter.default.removeObserver(endObserver)
+                        cancel?.invalidate()
+                    }
                     try await click(NSPoint(x: host.bounds.width - 40, y: host.isFlipped ? 38 : host.bounds.height - 38), tracksMouse: true)
+                    for _ in 0..<80 where !trackingEnded { try await Task.sleep(nanoseconds: 25_000_000) }
+                    try expect(trackedMenu != nil && trackingEnded,
+                        "selection-count menu finishes native tracking before the next click in \(page.rawValue) \(mode) \(scrollerStyle): began=\(trackedMenu != nil), ended=\(trackingEnded), titles=\(titles)")
                     try expect(titles.contains(L("移出所选 \(count) 项")),
                         "native pointer modifiers keep \(count) selected rows in \(page.rawValue) \(mode) \(scrollerStyle): \(titles)")
                 }
