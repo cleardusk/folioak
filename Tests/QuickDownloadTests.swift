@@ -1028,8 +1028,10 @@ extension CoreTests {
                               (600, 38, "page header blank space")] {
             try expect(drags(x, y), "\(label) moves the window like a title bar")
         }
+        // Collapse last: it moves header controls away from their expanded
+        // coordinates as soon as the native event loop advances the animation.
         for (x, y, label) in [(CGFloat(90), CGFloat(114), "downloads tab"), (90, 164, "library tab"), (90, 214, "media tab"),
-                              (37, 55, "sidebar toggle"), (230, 38, "back button")] {
+                              (230, 38, "back button"), (37, 55, "sidebar toggle")] {
             try expect(!drags(x, y), "\(label) keeps its press instead of dragging the window")
         }
         print("PASS window drag regions: blank sidebar and header drag, navigation controls stay clickable")
