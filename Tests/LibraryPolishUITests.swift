@@ -86,8 +86,8 @@ extension CoreTests {
                         NSApp.sendEvent(queued)
                     }
                     if tracksMouse {
-                        // NSTextView tracks synchronously inside mouseDown. Queue
-                        // its release before entering that native tracking loop.
+                        // Text fields, scrollers and native menus can consume the
+                        // release in a nested tracking loop. Queue it before down.
                         let location = host.convert(point, to: nil)
                         let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: modifiers,
                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
@@ -159,7 +159,7 @@ extension CoreTests {
                         RunLoop.main.add(cancel, forMode: .eventTracking)
                     }
                     defer { NotificationCenter.default.removeObserver(observer) }
-                    try await click(NSPoint(x: host.bounds.width - 40, y: host.isFlipped ? 38 : host.bounds.height - 38))
+                    try await click(NSPoint(x: host.bounds.width - 40, y: host.isFlipped ? 38 : host.bounds.height - 38), tracksMouse: true)
                     try expect(titles.contains(L("移出所选 \(count) 项")),
                         "native pointer modifiers keep \(count) selected rows in \(page.rawValue) \(mode) \(scrollerStyle): \(titles)")
                 }
@@ -219,7 +219,7 @@ extension CoreTests {
                     cancel = Timer(timeInterval: 0, repeats: false) { _ in menu.cancelTrackingWithoutAnimation() }
                     RunLoop.main.add(cancel!, forMode: .eventTracking)
                 }
-                try await preserveSelection(after: NSPoint(x: action.maxX - 16, y: action.midY), message: "native row menu preserves selection")
+                try await preserveSelection(after: NSPoint(x: action.maxX - 16, y: action.midY), tracksMouse: true, message: "native row menu preserves selection")
                 NotificationCenter.default.removeObserver(observer); cancel?.invalidate()
                 try expect(tracked, "row action menu receives its native click")
                 try expect(menuTitles.count == (page == .library ? 8 : 6), "healthy library row exposes its compact action count: \(menuTitles)")
