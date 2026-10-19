@@ -435,6 +435,8 @@ extension CoreTests {
         }
         try await fileRowDoubleClickTests()
         try await removalAnimationUITests()
+        try inputRecognitionTests()
+        try WorkspacePreferencesTests.brandParticleFade()
         try await pageSwitchUITests()
         try await windowDragRegionTests()
         try await brandEasterEggTests()
@@ -1019,12 +1021,44 @@ extension CoreTests {
         print("PASS window drag regions: blank sidebar and header drag, navigation controls stay clickable")
     }
 
+    static func inputRecognitionTests() throws {
+        let empty = InputRecognition(" \n\t ")
+        try expect(empty.total == 0 && !empty.isOverLimit,
+            "empty input has no recognized items or batch-limit warning")
+        let mixed = InputRecognition([
+            "1706.03762", "https://example.com/paper.pdf",
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            "https://example.com/archive.zip", "not-a-link"
+        ].joined(separator: "\n"))
+        try expect(mixed.total == 5 && mixed.papers == 2 && mixed.media == 1 && mixed.files == 1 && mixed.invalid == 1 && !mixed.isOverLimit,
+            "input recognition distinguishes papers, media, files and invalid tokens")
+        let atLimit = (0..<ResourceLimits.batchCount).map { "https://example.com/paper-\($0).pdf" }.joined(separator: "\n")
+        let allowed = InputRecognition(atLimit)
+        try expect(allowed.total == ResourceLimits.batchCount && allowed.papers == ResourceLimits.batchCount && !allowed.isOverLimit,
+            "all 200 tokens are classified at the accepted batch boundary")
+        try expect(try BatchInput(atLimit).entries.count == allowed.total,
+            "recognized boundary count matches the accepted download batch")
+        let overLimit = atLimit + "\nhttps://example.com/extra.pdf"
+        let rejected = InputRecognition(overLimit)
+        try expect(rejected.total == ResourceLimits.batchCount + 1 && rejected.isOverLimit,
+            "201 tokens retain their full count and report the exceeded batch limit")
+        try expect(rejected.papers == 0 && rejected.media == 0 && rejected.files == 0 && rejected.invalid == 0,
+            "over-limit input does not present a misleading partial classification")
+        do {
+            _ = try BatchInput(overLimit)
+            throw TestFailure.failed("over-limit recognition agrees with batch rejection")
+        } catch DownloadError.limit(_) {}
+        print("PASS input recognition: mixed source types, empty input and exact 200/201 batch limits")
+    }
+
     @MainActor static func brandEasterEggTests() async throws {
         let suite = "folioak-brand-egg-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = DownloadModel(preferences: preferences)
-        let host = QuickTestHost(rootView: DownloaderView(model: model, page: .downloads).environment(\.colorScheme, .light))
+        var downloadView = DownloaderView(model: model, page: .downloads)
+        downloadView.reduceMotionOverride = false
+        let host = QuickTestHost(rootView: downloadView.environment(\.colorScheme, .light))
         let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
         defer { window.close() }
@@ -1044,6 +1078,7 @@ extension CoreTests {
             }
         }
         let start = LeafBurst.triggered, grandStart = LeafBurst.grandTriggered
+        let mountedBefore = LeafBurstOverlay.mounted
         try await taps(4, interval: 120_000_000)
         try expect(LeafBurst.triggered == start, "four quick taps keep the leaf burst hidden")
         try await Task.sleep(nanoseconds: 700_000_000)
@@ -1060,7 +1095,39 @@ extension CoreTests {
         try expect(LeafBurst.grandTriggered == grandStart + 3, "five more taps after a pause start a new round over the first")
         try await taps(5, interval: 120_000_000)
         try expect(LeafBurst.grandTriggered == grandStart + 4, "overlapping rounds keep responding")
+        for _ in 0..<80 where LeafBurstOverlay.mounted == mountedBefore {
+            try await Task.sleep(nanoseconds: 25_000_000)
+            host.layoutSubtreeIfNeeded()
+        }
+        try expect(LeafBurstOverlay.mounted == mountedBefore + 1,
+            "overlapping bursts share one mounted animation overlay")
+        let triggeredBeforeReduction = LeafBurst.triggered
+        // Preserve the hosting/root view identity so this exercises a live
+        // preference change while particles are already on screen.
+        downloadView.reduceMotionOverride = true
+        host.rootView = downloadView.environment(\.colorScheme, .light)
+        for _ in 0..<80 where LeafBurstOverlay.mounted != mountedBefore {
+            try await Task.sleep(nanoseconds: 25_000_000)
+            host.layoutSubtreeIfNeeded()
+        }
+        try expect(LeafBurstOverlay.mounted == mountedBefore,
+            "enabling reduced motion removes an already mounted particle overlay: before=\(mountedBefore), now=\(LeafBurstOverlay.mounted), override=\(String(describing: downloadView.reduceMotionOverride))")
+        let notesBefore = FolioNote.presented
+        try await taps(5, interval: 120_000_000)
+        try expect(LeafBurst.triggered == triggeredBeforeReduction && LeafBurstOverlay.mounted == mountedBefore,
+            "reduced-motion brand taps never create particles or mount an animation overlay")
+        try expect(FolioNote.presented == notesBefore + 1,
+            "five brand taps still present the text note with reduced motion")
+        downloadView.reduceMotionOverride = false
+        host.rootView = downloadView.environment(\.colorScheme, .light)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        host.layoutSubtreeIfNeeded()
+        try expect(LeafBurst.triggered == triggeredBeforeReduction && LeafBurstOverlay.mounted == mountedBefore,
+            "disabling reduced motion does not resurrect retired particle animations")
         if let directory = ProcessInfo.processInfo.environment["FOLIOAK_EGG_FRAMES"] {
+            // The preference-change regression cleared the previous rounds.
+            // Start a fresh round only when diagnostic frames were requested.
+            try await taps(5, interval: 120_000_000)
             for (index, delay) in [UInt64(0), 300, 500, 800, 1200, 1500, 1800].enumerated() {
                 try await Task.sleep(nanoseconds: delay * 1_000_000)
                 let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
@@ -1077,6 +1144,6 @@ extension CoreTests {
         }
         try expect(retired == 4 && stack.bursts.count == 6, "older rounds fade out instead of being dropped mid-frame")
         try expect(drags == 0, "tapping the brand mark never drags the window")
-        print("PASS brand easter egg: five quick taps burst, pauses reset, repeated and overlapping rounds stay within budget, and the mark stays clickable")
+        print("PASS brand easter egg: five-tap rounds, pause reset, bounded overlap, live reduced-motion cancellation, text-note fallback and clickable mark")
     }
 }

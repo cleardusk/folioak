@@ -186,9 +186,18 @@ struct DownloaderView: View {
     @WorkspaceViewState private var showingFolioNote = false
     @WorkspaceViewState private var folioNoteRequest = UUID()
     @WorkspaceViewState private var celebrationRound = -1
+    #if TESTING
+    var reduceMotionOverride: Bool? = nil
+    #endif
     @Environment(\.displayScale) private var displayScale
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var reduceMotion: Bool {
+        #if TESTING
+        if let reduceMotionOverride { return reduceMotionOverride }
+        #endif
+        return systemReduceMotion
+    }
     @Environment(\.colorSchemeContrast) private var contrast
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     private var secondary: Color { ThemePalette.color(palette.secondary) }
@@ -419,11 +428,14 @@ struct DownloaderView: View {
         .ignoresSafeArea(.container, edges: .top)
         .overlayPreferenceValue(BrandMarkAnchor.self) { anchor in
             GeometryReader { proxy in
-                if let anchor, !leafBursts.isEmpty {
+                if let anchor, !reduceMotion, !leafBursts.isEmpty {
                     let mark = proxy[anchor]
                     LeafBurstOverlay(bursts: leafBursts.bursts, origin: CGPoint(x: mark.midX, y: mark.midY), palette: palette)
                 }
             }
+        }
+        .onChange(of: reduceMotion) { reduced in
+            if reduced { leafBursts = LeafBurstStack() }
         }
         .overlay(alignment: .top) {
             if showingFolioNote {
@@ -449,6 +461,9 @@ struct DownloaderView: View {
     }
 
     private func showFolioNote() {
+        #if TESTING
+        FolioNote.presented += 1
+        #endif
         let request = UUID()
         folioNoteRequest = request
         withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.78)) { showingFolioNote = true }
@@ -515,7 +530,7 @@ struct DownloaderView: View {
                 } label: { SidebarToggleGlyph(expanded: !collapsed).frame(width: 50, height: 42).contentShape(Rectangle()) }
                     .buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary)
                     .help(collapsed ? L("展开侧栏") : L("收起侧栏")).accessibilityLabel(collapsed ? L("展开侧栏") : L("收起侧栏"))
-                BrandMark(palette: palette, tapped: dismissEditing, celebrate: celebrate).fixedSize()
+                BrandMark(palette: palette, reduceMotion: reduceMotion, tapped: dismissEditing, celebrate: celebrate).fixedSize()
                     .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     .frame(width: collapsed ? 0 : nil, alignment: .leading).clipped()
                 Spacer(minLength: 0)
@@ -709,7 +724,8 @@ struct DownloaderView: View {
     }
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let recognition = InputRecognition(model.input)
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: WorkspaceMetrics.Space.compact) {
                 Text(L("添加链接")).font(WorkspaceMetrics.TypeScale.title)
                 Spacer()
@@ -732,7 +748,7 @@ struct DownloaderView: View {
                     .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
                 Spacer(minLength: WorkspaceMetrics.Space.compact)
                 InputRecognitionChips(recognition: recognition, palette: palette)
-                primaryAction
+                primaryAction(recognition: recognition)
             }.padding(.horizontal, WorkspaceMetrics.Space.inset)
                 .padding(.top, WorkspaceMetrics.Space.regular)
                 .padding(.bottom, WorkspaceMetrics.Space.section)
@@ -757,7 +773,7 @@ struct DownloaderView: View {
         .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
     }
 
-    @ViewBuilder private var primaryAction: some View {
+    @ViewBuilder private func primaryAction(recognition: InputRecognition) -> some View {
         if model.busy {
             Button(action: model.cancel) {
                 HStack(spacing: 6) {
@@ -782,8 +798,6 @@ struct DownloaderView: View {
                 .accessibilityLabel(L("开始下载"))
         }
     }
-
-    private var recognition: InputRecognition { InputRecognition(model.input) }
 
     private var hasSearchContent: Bool {
         switch page {

@@ -4,10 +4,14 @@ import SwiftUI
 // starting. Parsing is bounded by the batch limit and has no side effects.
 struct InputRecognition: Equatable {
     var papers = 0, media = 0, files = 0, invalid = 0
-    var total: Int { papers + media + files + invalid }
+    let total: Int
+    var isOverLimit: Bool { total > ResourceLimits.batchCount }
 
     init(_ text: String) {
-        for token in DownloadSource.tokens(in: text).prefix(ResourceLimits.batchCount) {
+        let tokens = DownloadSource.tokens(in: text)
+        total = tokens.count
+        guard !isOverLimit else { return }
+        for token in tokens {
             switch try? DownloadSource.parse(token) {
             case .arxiv?, .pdf?: papers += 1
             case .media?: media += 1
@@ -30,9 +34,15 @@ struct InputRecognitionChips: View {
          ("files", "doc", L("文件"), recognition.files, false),
          ("invalid", "exclamationmark.circle", L("无法识别"), recognition.invalid, true)].filter { $0.count > 0 }
     }
+    private var limitMessage: String { L("每批最多 200 条输入，请分批下载。") }
 
     var body: some View {
         HStack(spacing: 6) {
+            if recognition.isOverLimit {
+                Label(L("最多 200 项"), systemImage: "exclamationmark.circle")
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(UIColors.error)
+                    .help(limitMessage)
+            }
             ForEach(parts, id: \.id) { part in
                 HStack(spacing: 4) {
                     Image(systemName: part.symbol).font(.system(size: 10, weight: .semibold))
@@ -47,8 +57,8 @@ struct InputRecognitionChips: View {
         }
         .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.8), value: recognition)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(parts.map { $0.label + " " + L("\($0.count) 项") }.joined(separator: "，"))
-        .accessibilityHidden(parts.isEmpty)
+        .accessibilityLabel(recognition.isOverLimit ? limitMessage : parts.map { $0.label + " " + L("\($0.count) 项") }.joined(separator: "，"))
+        .accessibilityHidden(recognition.total == 0)
     }
 }
 
@@ -64,27 +74,38 @@ struct DownloadsWelcome: View {
     private var secondary: Color { ThemePalette.color(palette.secondary) }
 
     var body: some View {
+        ViewThatFits(in: .vertical) {
+            content(decorated: true).fixedSize(horizontal: false, vertical: true)
+            content(decorated: false).fixedSize(horizontal: false, vertical: true)
+        }.padding(.horizontal, 24).frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func content(decorated: Bool) -> some View {
         VStack(spacing: 14) {
-            ZStack {
-                Circle().fill(accent.opacity(0.10)).frame(width: 64, height: 64)
-                Circle().strokeBorder(accent.opacity(0.18), lineWidth: 1).frame(width: 88, height: 88)
-                FolioakGlyph().foregroundStyle(accent).frame(width: 28, height: 28)
-            }.accessibilityHidden(true).padding(.bottom, 4)
+            if decorated {
+                ZStack {
+                    Circle().fill(accent.opacity(0.10)).frame(width: 64, height: 64)
+                    Circle().strokeBorder(accent.opacity(0.18), lineWidth: 1).frame(width: 88, height: 88)
+                    FolioakGlyph().foregroundStyle(accent).frame(width: 28, height: 28)
+                }.accessibilityHidden(true).padding(.bottom, 4)
+            }
             Text(L("粘贴链接，开始下载")).font(.system(size: 15, weight: .semibold))
             Text(L("论文、视频与文件直链，自动按类型归档到本地。"))
                 .font(WorkspaceMetrics.TypeScale.body).foregroundStyle(secondary).multilineTextAlignment(.center)
-            WelcomeFlow(spacing: 6) {
-                ForEach(Self.sources, id: \.self) { source in
-                    Text(L(source)).font(.system(size: 11, weight: .medium)).foregroundStyle(secondary)
-                        .padding(.horizontal, 9).frame(height: 22)
-                        .overlay(Capsule().strokeBorder(ThemePalette.color(palette.border), lineWidth: 1))
-                }
-            }.frame(maxWidth: 420).padding(.top, 2)
+            if decorated {
+                WelcomeFlow(spacing: 6) {
+                    ForEach(Self.sources, id: \.self) { source in
+                        Text(L(source)).font(.system(size: 11, weight: .medium)).foregroundStyle(secondary)
+                            .padding(.horizontal, 9).frame(height: 22)
+                            .overlay(Capsule().strokeBorder(ThemePalette.color(palette.border), lineWidth: 1))
+                    }
+                }.frame(maxWidth: 420).padding(.top, 2)
+            }
             Button(action: tryExample) {
                 Label(L("试试示例：Attention Is All You Need"), systemImage: "sparkles")
             }.buttonStyle(QuietButtonStyle(palette: palette)).disabled(busy).padding(.top, 6)
                 .help("arxiv.org/abs/1706.03762")
-        }.padding(.horizontal, 24).frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.frame(maxWidth: .infinity)
     }
 }
 
@@ -130,10 +151,10 @@ struct BrandMarkAnchor: PreferenceKey {
 
 struct BrandMark: View {
     let palette: ThemePalette
+    let reduceMotion: Bool
     let tapped: () -> Void
     let celebrate: (_ grand: Bool) -> Void
     static let threshold = 5
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @WorkspaceViewState private var taps = 0
     @WorkspaceViewState private var lastTap = Date.distantPast
     @WorkspaceViewState private var spin = 0.0
@@ -245,7 +266,7 @@ struct LeafBurst: Identifiable {
 // Live bursts across repeated rounds. New rounds never cut an older one
 // off mid-frame: when the particle budget is exceeded the oldest bursts
 // retire and fade out quickly instead of popping, so rapid or overlapping
-// rounds stay smooth and the window never fills beyond the budget.
+// rounds stay smooth. Retiring particles remain for the short fade-out.
 struct LeafBurstStack {
     static let particleBudget = 420
     private(set) var bursts: [LeafBurst] = []
@@ -297,37 +318,47 @@ struct LeafBurstOverlay: View {
     let origin: CGPoint
     let palette: ThemePalette
     @Environment(\.colorScheme) private var scheme
+    #if TESTING
+    static var mounted = 0
+    #endif
 
     var body: some View {
         TimelineView(.animation) { timeline in
-            Canvas { context, size in
-                let now = timeline.date
-                var leaves: [UInt32: GraphicsContext.ResolvedImage] = [:]
-                let resolver = context
-                func leaf(_ hex: UInt32) -> GraphicsContext.ResolvedImage? {
-                    if let image = leaves[hex] { return image }
-                    guard let tinted = LeafTint.image(hex) else { return nil }
-                    let image = resolver.resolve(Image(nsImage: tinted)); leaves[hex] = image; return image
-                }
-                // Overlapping rounds share one light: each keeps its own sweep, but
-                // levels are normalized so the total never exceeds the brightest
-                // and the handoff between rounds stays continuous.
-                let glows = bursts.filter(\.grand).map { burst -> (level: Double, age: Double) in
-                    let age = now.timeIntervalSince(burst.start)
-                    return (glowLevel(age: age, duration: burst.duration) * burst.presence(at: now), age)
-                }
-                let total = glows.reduce(0) { $0 + $1.level }, peak = glows.map(\.level).max() ?? 0
-                for glow in glows where glow.level > 0.001 { drawGlow(&context, size: size, level: glow.level * peak / total, age: glow.age) }
-                for burst in bursts {
-                    let age = now.timeIntervalSince(burst.start), presence = burst.presence(at: now)
-                    guard presence > 0.001 else { continue }
-                    var layer = context
-                    layer.opacity = presence
-                    if burst.grand { drawRipple(&layer, age: age) }
-                    for particle in burst.particles { draw(particle, age: age - particle.delay, size: size, leaf: leaf, in: &layer) }
-                }
-            }
+            canvas(at: timeline.date)
         }.allowsHitTesting(false).accessibilityHidden(true)
+        #if TESTING
+        .onAppear { Self.mounted += 1 }
+        .onDisappear { Self.mounted -= 1 }
+        #endif
+    }
+
+    func canvas(at now: Date) -> some View {
+        Canvas { context, size in
+            var leaves: [UInt32: GraphicsContext.ResolvedImage] = [:]
+            let resolver = context
+            func leaf(_ hex: UInt32) -> GraphicsContext.ResolvedImage? {
+                if let image = leaves[hex] { return image }
+                guard let tinted = LeafTint.image(hex) else { return nil }
+                let image = resolver.resolve(Image(nsImage: tinted)); leaves[hex] = image; return image
+            }
+            // Overlapping rounds share one light: each keeps its own sweep, but
+            // levels are normalized so the total never exceeds the brightest
+            // and the handoff between rounds stays continuous.
+            let glows = bursts.filter(\.grand).map { burst -> (level: Double, age: Double) in
+                let age = now.timeIntervalSince(burst.start)
+                return (glowLevel(age: age, duration: burst.duration) * burst.presence(at: now), age)
+            }
+            let total = glows.reduce(0) { $0 + $1.level }, peak = glows.map(\.level).max() ?? 0
+            for glow in glows where glow.level > 0.001 { drawGlow(&context, size: size, level: glow.level * peak / total, age: glow.age) }
+            for burst in bursts {
+                let age = now.timeIntervalSince(burst.start), presence = burst.presence(at: now)
+                guard presence > 0.001 else { continue }
+                var layer = context
+                layer.opacity = presence
+                if burst.grand { drawRipple(&layer, age: age) }
+                for particle in burst.particles { draw(particle, age: age - particle.delay, size: size, leaf: leaf, in: &layer) }
+            }
+        }
     }
 
     // A soft wash of light sweeps out from the mark as the gust leaves it,
@@ -389,7 +420,7 @@ struct LeafBurstOverlay: View {
         let fade = min(1, t / 0.08) * (p.kind == .spark ? (progress > 0.6 ? max(0, 1 - (progress - 0.6) / 0.4) : 1)
                                                       : min(1, (p.life - t) / 0.9))
         var c = context
-        c.opacity = fade
+        c.opacity *= fade
         c.translateBy(x: point.x, y: point.y)
         c.rotate(by: .radians(p.rotation + p.spin * time))
         let flip = cos(p.flipRate * time + p.phase)
@@ -417,7 +448,7 @@ struct LeafBurstOverlay: View {
                        with: .color(ThemePalette.color(palette.accent).opacity(0.5)))
             }
         case .spark:
-            c.opacity = fade * (0.55 + 0.45 * sin(t * 18 + p.phase))
+            c.opacity *= 0.55 + 0.45 * sin(t * 18 + p.phase)
             c.fill(Self.star(s), with: .color(ThemePalette.color(Self.blend(p.from, 0xF2CC5B, progress))))
         }
     }
@@ -444,6 +475,9 @@ struct LeafBurstOverlay: View {
 }
 
 struct FolioNote: View {
+    #if TESTING
+    static var presented = 0
+    #endif
     @ObservedObject private var localization = AppLocalization.shared
     let palette: ThemePalette
     let round: Int

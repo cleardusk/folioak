@@ -59,6 +59,7 @@
 "%@ 文件夹无法创建或不可写，请检查保存位置与权限。" = "The %@ folder could not be created or is not writable. Check the location and permissions.";
 "输入超过 64 KB，请分批导入。" = "Input exceeds 64 KB. Import it in smaller batches.";
 "每批最多 200 条输入，请分批下载。" = "Each batch supports up to 200 entries.";
+"最多 200 项" = "200 max";
 "请选择 UTF-8 编码的文本文件。" = "Choose a UTF-8 text file.";
 "任务协调" = "Coordination";
 "获取信息" = "Get Information";
