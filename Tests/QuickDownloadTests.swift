@@ -1043,7 +1043,7 @@ extension CoreTests {
                 try await Task.sleep(nanoseconds: interval)
             }
         }
-        let start = LeafBurst.triggered
+        let start = LeafBurst.triggered, grandStart = LeafBurst.grandTriggered
         try await taps(4, interval: 120_000_000)
         try expect(LeafBurst.triggered == start, "four quick taps keep the leaf burst hidden")
         try await Task.sleep(nanoseconds: 700_000_000)
@@ -1053,7 +1053,13 @@ extension CoreTests {
         try expect(LeafBurst.triggered == start + 1, "the fifth quick tap releases the leaf burst")
         try await taps(2, interval: 120_000_000)
         try expect(LeafBurst.triggered == start + 3, "every extra quick tap adds another burst")
-        try expect(drags == 0, "tapping the brand mark never drags the window")
+        try await taps(3, interval: 120_000_000)
+        try expect(LeafBurst.grandTriggered == grandStart + 2, "the tenth tap of a streak starts another full round")
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        try await taps(5, interval: 120_000_000)
+        try expect(LeafBurst.grandTriggered == grandStart + 3, "five more taps after a pause start a new round over the first")
+        try await taps(5, interval: 120_000_000)
+        try expect(LeafBurst.grandTriggered == grandStart + 4, "overlapping rounds keep responding")
         if let directory = ProcessInfo.processInfo.environment["FOLIOAK_EGG_FRAMES"] {
             for (index, delay) in [UInt64(0), 300, 500, 800, 1200, 1500, 1800].enumerated() {
                 try await Task.sleep(nanoseconds: delay * 1_000_000)
@@ -1062,6 +1068,15 @@ extension CoreTests {
                 try process.run(); process.waitUntilExit()
             }
         }
-        print("PASS brand easter egg: five quick taps burst, slower taps reset, extra taps stack and the mark stays clickable")
+        var stack = LeafBurstStack(), retired = 0
+        for _ in 0..<6 {
+            let burst = LeafBurst(grand: true, accent: 0x0A7A50)
+            retired += stack.push(burst).count
+            try expect(stack.bursts.last?.retired == nil, "the newest round is never retired")
+            try expect(stack.liveParticles <= LeafBurstStack.particleBudget, "live particles stay within the budget")
+        }
+        try expect(retired == 4 && stack.bursts.count == 6, "older rounds fade out instead of being dropped mid-frame")
+        try expect(drags == 0, "tapping the brand mark never drags the window")
+        print("PASS brand easter egg: five quick taps burst, pauses reset, repeated and overlapping rounds stay within budget, and the mark stays clickable")
     }
 }

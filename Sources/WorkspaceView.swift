@@ -182,9 +182,10 @@ struct DownloaderView: View {
     @WorkspaceViewState private var libraryFilter = LibraryFilter.all
     @WorkspaceViewState private var librarySort = LibrarySort.newest
     @WorkspaceViewState private var libraryTag: String?
-    @WorkspaceViewState private var bursts: [LeafBurst] = []
+    @WorkspaceViewState private var leafBursts = LeafBurstStack()
     @WorkspaceViewState private var showingFolioNote = false
     @WorkspaceViewState private var folioNoteRequest = UUID()
+    @WorkspaceViewState private var celebrationRound = -1
     @Environment(\.displayScale) private var displayScale
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -418,26 +419,33 @@ struct DownloaderView: View {
         .ignoresSafeArea(.container, edges: .top)
         .overlayPreferenceValue(BrandMarkAnchor.self) { anchor in
             GeometryReader { proxy in
-                if let anchor, !bursts.isEmpty {
+                if let anchor, !leafBursts.isEmpty {
                     let mark = proxy[anchor]
-                    LeafBurstOverlay(bursts: bursts, origin: CGPoint(x: mark.midX, y: mark.midY), palette: palette)
+                    LeafBurstOverlay(bursts: leafBursts.bursts, origin: CGPoint(x: mark.midX, y: mark.midY), palette: palette)
                 }
             }
         }
         .overlay(alignment: .top) {
-            if showingFolioNote { FolioNote(palette: palette).padding(.top, 14).transition(.move(edge: .top).combined(with: .opacity)) }
+            if showingFolioNote {
+                // A new round swaps the line in place rather than re-sliding the pill.
+                FolioNote(palette: palette, round: celebrationRound).id(celebrationRound).padding(.top, 14)
+                    .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
+            }
         }
     }
 
     private func celebrate(_ grand: Bool) {
+        if grand { celebrationRound += 1 }
         guard !reduceMotion else {
             if grand { showFolioNote() }
             return
         }
         let burst = LeafBurst(grand: grand, accent: palette.accent)
-        bursts = Array((bursts + [burst]).suffix(4))
+        for id in leafBursts.push(burst) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + LeafBurst.retireDuration) { leafBursts.remove(id) }
+        }
         if grand { NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now); showFolioNote() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + burst.duration) { bursts.removeAll { $0.id == burst.id } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + burst.duration) { leafBursts.remove(burst.id) }
     }
 
     private func showFolioNote() {

@@ -156,6 +156,9 @@ struct BrandMark: View {
         let now = Date()
         taps = now.timeIntervalSince(lastTap) < 0.6 ? taps + 1 : 1
         lastTap = now
+        // Every fifth tap of a streak is a full round; taps between rounds
+        // add small gusts, and a pause starts the count over.
+        let grand = taps.isMultiple(of: Self.threshold)
         guard taps >= Self.threshold else {
             guard !reduceMotion else { return }
             // Each tap winds the mark a little further so the build-up is felt.
@@ -164,10 +167,10 @@ struct BrandMark: View {
             settle(after: 0.16)
             return
         }
-        celebrate(taps == Self.threshold)
+        celebrate(grand)
         guard !reduceMotion else { return }
-        withAnimation(.spring(response: 0.7, dampingFraction: 0.6)) { spin += 360; tilt = 0 }
-        withAnimation(.spring(response: 0.18, dampingFraction: 0.5)) { scale = taps == Self.threshold ? 1.5 : 1.25 }
+        withAnimation(.spring(response: 0.7, dampingFraction: 0.6)) { spin += grand ? 360 : 0; tilt = grand ? 0 : (taps.isMultiple(of: 2) ? -14 : 14) }
+        withAnimation(.spring(response: 0.18, dampingFraction: 0.5)) { scale = grand ? 1.5 : 1.25 }
         settle(after: 0.18)
     }
 
@@ -188,13 +191,22 @@ struct LeafBurst: Identifiable {
         var size: Double, life: Double, delay: Double, rest: Double, from: UInt32, to: UInt32
     }
     #if TESTING
-    static var triggered = 0
+    static var triggered = 0, grandTriggered = 0
     #endif
     let id = UUID()
     let start = Date()
     let grand: Bool
     let duration: Double
     let particles: [Particle]
+    var retired: Date?
+    static let retireDuration = 0.7
+
+    // Visibility multiplier: 1 while live, easing to 0 once retired early.
+    func presence(at now: Date) -> Double {
+        guard let retired else { return 1 }
+        let t = min(1, max(0, now.timeIntervalSince(retired) / Self.retireDuration))
+        return 1 - t * t * (3 - 2 * t)
+    }
 
     // The grand burst is a gust from the mark followed by a canopy shower
     // across the whole window; leaves settle on the bottom edge, then fade.
@@ -203,7 +215,7 @@ struct LeafBurst: Identifiable {
         self.grand = grand
         duration = grand ? 7.4 : 4.6
         #if TESTING
-        Self.triggered += 1
+        Self.triggered += 1; if grand { Self.grandTriggered += 1 }
         #endif
         let greens: [UInt32] = [accent, 0x2F9E63, 0x6DBE4B, 0x1F6B45]
         let autumn: [UInt32] = [0xF2CC5B, 0xE8B53A, 0xE07B2C, 0xC2502F, 0x9C6B3C, 0xD9893B]
@@ -228,6 +240,31 @@ struct LeafBurst: Identifiable {
         }
         particles = (0..<(grand ? 64 : 22)).map { particle($0, sky: false) } + (0..<(grand ? 120 : 0)).map { particle($0, sky: true) }
     }
+}
+
+// Live bursts across repeated rounds. New rounds never cut an older one
+// off mid-frame: when the particle budget is exceeded the oldest bursts
+// retire and fade out quickly instead of popping, so rapid or overlapping
+// rounds stay smooth and the window never fills beyond the budget.
+struct LeafBurstStack {
+    static let particleBudget = 420
+    private(set) var bursts: [LeafBurst] = []
+    var isEmpty: Bool { bursts.isEmpty }
+    var liveParticles: Int { bursts.filter { $0.retired == nil }.reduce(0) { $0 + $1.particles.count } }
+
+    /// Adds a burst and returns the bursts retired to make room.
+    mutating func push(_ burst: LeafBurst, now: Date = Date()) -> [UUID] {
+        bursts.append(burst)
+        var retired: [UUID] = []
+        for index in bursts.indices where bursts[index].id != burst.id && bursts[index].retired == nil {
+            guard liveParticles > Self.particleBudget else { break }
+            bursts[index].retired = now
+            retired.append(bursts[index].id)
+        }
+        return retired
+    }
+
+    mutating func remove(_ id: UUID) { bursts.removeAll { $0.id == id } }
 }
 
 // Tinted copies of the leaf glyph, quantized so ripening reuses bitmaps.
@@ -272,11 +309,22 @@ struct LeafBurstOverlay: View {
                     guard let tinted = LeafTint.image(hex) else { return nil }
                     let image = resolver.resolve(Image(nsImage: tinted)); leaves[hex] = image; return image
                 }
-                for burst in bursts where burst.grand { drawGlow(&context, size: size, age: now.timeIntervalSince(burst.start), duration: burst.duration) }
-                for burst in bursts {
+                // Overlapping rounds share one light: each keeps its own sweep, but
+                // levels are normalized so the total never exceeds the brightest
+                // and the handoff between rounds stays continuous.
+                let glows = bursts.filter(\.grand).map { burst -> (level: Double, age: Double) in
                     let age = now.timeIntervalSince(burst.start)
-                    if burst.grand { drawRipple(&context, age: age) }
-                    for particle in burst.particles { draw(particle, age: age - particle.delay, size: size, leaf: leaf, in: &context) }
+                    return (glowLevel(age: age, duration: burst.duration) * burst.presence(at: now), age)
+                }
+                let total = glows.reduce(0) { $0 + $1.level }, peak = glows.map(\.level).max() ?? 0
+                for glow in glows where glow.level > 0.001 { drawGlow(&context, size: size, level: glow.level * peak / total, age: glow.age) }
+                for burst in bursts {
+                    let age = now.timeIntervalSince(burst.start), presence = burst.presence(at: now)
+                    guard presence > 0.001 else { continue }
+                    var layer = context
+                    layer.opacity = presence
+                    if burst.grand { drawRipple(&layer, age: age) }
+                    for particle in burst.particles { draw(particle, age: age - particle.delay, size: size, leaf: leaf, in: &layer) }
                 }
             }
         }.allowsHitTesting(false).accessibilityHidden(true)
@@ -284,17 +332,19 @@ struct LeafBurstOverlay: View {
 
     // A soft wash of light sweeps out from the mark as the gust leaves it,
     // lingers through the leaf shower and dims with it rather than ahead of it.
-    private func drawGlow(_ context: inout GraphicsContext, size: CGSize, age: Double, duration: Double) {
+    private func glowLevel(age: Double, duration: Double) -> Double {
         let end = duration - 0.4
-        guard age > 0, age < end else { return }
+        guard age > 0, age < end else { return 0 }
         func smooth(_ x: Double) -> Double { let t = min(1, max(0, x)); return t * t * (3 - 2 * t) }
-        let diagonal = hypot(size.width, size.height)
-        let grow = 1 - pow(1 - min(1, age / 1.4), 3)
         // Flash on launch, settle to a warm afterglow, then ease out with the shower.
         let flash = 1 - 0.45 * smooth((age - 0.35) / 1.2)
-        let fade = 1 - smooth((age - 2.6) / (end - 2.6))
-        let alpha = (scheme == .dark ? 0.18 : 0.14) * smooth(age / 0.25) * flash * fade
-        let radius = 40 + diagonal * grow
+        return smooth(age / 0.25) * flash * (1 - smooth((age - 2.6) / (end - 2.6)))
+    }
+
+    private func drawGlow(_ context: inout GraphicsContext, size: CGSize, level: Double, age: Double) {
+        let diagonal = hypot(size.width, size.height)
+        let alpha = (scheme == .dark ? 0.18 : 0.14) * level
+        let radius = 40 + diagonal * (1 - pow(1 - min(1, age / 1.4), 3))
         let tint = ThemePalette.color(palette.accent)
         context.fill(Path(CGRect(origin: .zero, size: size)), with: .radialGradient(
             Gradient(stops: [.init(color: Color(.sRGB, red: 1, green: 0.86, blue: 0.5).opacity(alpha), location: 0),
@@ -396,13 +446,16 @@ struct LeafBurstOverlay: View {
 struct FolioNote: View {
     @ObservedObject private var localization = AppLocalization.shared
     let palette: ThemePalette
+    let round: Int
+    // Later rounds continue the story instead of repeating the first line.
+    static let lines = ["每一页，都是一片叶子。", "风起时，书页翻动。", "落叶归根，文件归档。", "满园秋色，尽在一页。"]
 
     var body: some View {
         HStack(spacing: 10) {
             FolioakGlyph().foregroundStyle(ThemePalette.color(palette.accent)).frame(width: 20, height: 20)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Folio + Oak").font(.system(size: 13, weight: .semibold, design: .rounded))
-                Text(L("每一页，都是一片叶子。")).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+                Text(L(Self.lines[round % Self.lines.count])).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
             }
         }
         .padding(.leading, 14).padding(.trailing, 18).padding(.vertical, 9)
