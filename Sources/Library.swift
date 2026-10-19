@@ -302,9 +302,9 @@ struct LibraryRow: View {
     var grid = false
     let select: () -> Void
     @StateObject private var clickTarget = FileRowClickTarget()
+    @WorkspaceViewState private var hovered = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.colorSchemeContrast) private var contrast
-    @Environment(\.displayScale) private var displayScale
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     var body: some View {
         Group {
@@ -315,13 +315,7 @@ struct LibraryRow: View {
                     palette: palette, revision: "\(model.fileRefreshRevision)", subtitleIsError: paper.missing, favorite: paper.favorite, unread: !paper.read) { controls }
             } else { rowContent }
         }.padding(.horizontal, grid ? 6 : 10).padding(.vertical, grid ? 6 : WorkspaceMetrics.Space.regular)
-            .background(selected && selectionActive ? ThemePalette.color(palette.accent).opacity(0.09) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control, style: .continuous))
-            .overlay(alignment: .bottom) {
-                if !grid { Rectangle().fill(ThemePalette.color(palette.border).opacity(0.6)).frame(height: 1 / displayScale)
-                    .padding(.leading, 10 + WorkspaceMetrics.rowIconSize + WorkspaceMetrics.Space.regular).padding(.trailing, 10) }
-            }
-            .overlay { if grid && selected && selectionActive { RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.control).stroke(ThemePalette.color(palette.accent).opacity(0.6), lineWidth: 1) } }
+            .modifier(FileRowSurface(palette: palette, grid: grid, selected: selected && selectionActive, hovered: $hovered))
             .contentShape(Rectangle())
             .background(FileRowClickRegion(target: clickTarget) {
                 if let current = model.papers.first(where: { $0.id == paper.id }), !current.removed { model.openPaper(current) }
@@ -375,6 +369,7 @@ struct LibraryRow: View {
                 else { Button(L("打开")) { model.openPaper(paper) }.buttonStyle(RowActionStyle(palette: palette)) }
                 Menu { actions } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
                         .menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette)).menuIndicator(.hidden).frame(width: 32).accessibilityLabel(L("\(paper.title)的更多操作"))
+                        .opacity(hovered || selected || grid ? 1 : 0.45)
             }.padding(.top, 1).background(FileRowClickRegion(target: clickTarget, controls: true))
     }
     @ViewBuilder private var actions: some View {

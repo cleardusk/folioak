@@ -1281,8 +1281,8 @@ struct CoreTests {
         let suite = "arxiv-theme-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
-        try expect(DownloadModel(preferences: preferences).theme == .graphite, "new installs use neutral graphite")
-        try expect(AppTheme.standardThemes.map(\.rawValue) == ["native", "graphite", "iris", "lagoon", "amber", "midnight"], "existing theme identifiers remain stable")
+        try expect(DownloadModel(preferences: preferences).theme == .grove, "new installs use the signature grove theme")
+        try expect(AppTheme.standardThemes.map(\.rawValue) == ["grove", "native", "graphite", "iris", "lagoon", "amber", "midnight"], "existing theme identifiers remain stable")
         try expect(AppTheme.standardThemes + AppTheme.codingThemes == AppTheme.allCases, "theme groups include every theme exactly once")
         for theme in AppTheme.allCases {
             let model = DownloadModel(preferences: preferences)

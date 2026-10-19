@@ -317,7 +317,7 @@ final class DownloadModel: ObservableObject {
         namingRules = downloadPreferences.namingRules
         naming = downloadPreferences.naming
         appearance = AppAppearance(rawValue: preferences.string(forKey: "appearance") ?? "") ?? .system
-        theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "graphite") ?? .native
+        theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "grove") ?? .native
         language = AppLanguage(rawValue: preferences.string(forKey: "language") ?? "") ?? .system
         showsMenuBarIcon = preferences.object(forKey: "showsMenuBarIcon") as? Bool ?? true
         directory = downloadPreferences.directory
