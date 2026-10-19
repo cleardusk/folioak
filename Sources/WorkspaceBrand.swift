@@ -272,7 +272,7 @@ struct LeafBurstOverlay: View {
                     guard let tinted = LeafTint.image(hex) else { return nil }
                     let image = resolver.resolve(Image(nsImage: tinted)); leaves[hex] = image; return image
                 }
-                for burst in bursts where burst.grand { drawGlow(&context, size: size, age: now.timeIntervalSince(burst.start)) }
+                for burst in bursts where burst.grand { drawGlow(&context, size: size, age: now.timeIntervalSince(burst.start), duration: burst.duration) }
                 for burst in bursts {
                     let age = now.timeIntervalSince(burst.start)
                     if burst.grand { drawRipple(&context, age: age) }
@@ -282,12 +282,18 @@ struct LeafBurstOverlay: View {
         }.allowsHitTesting(false).accessibilityHidden(true)
     }
 
-    // A soft wash of light sweeps out from the mark as the gust leaves it.
-    private func drawGlow(_ context: inout GraphicsContext, size: CGSize, age: Double) {
-        guard age > 0, age < 2.2 else { return }
+    // A soft wash of light sweeps out from the mark as the gust leaves it,
+    // lingers through the leaf shower and dims with it rather than ahead of it.
+    private func drawGlow(_ context: inout GraphicsContext, size: CGSize, age: Double, duration: Double) {
+        let end = duration - 0.4
+        guard age > 0, age < end else { return }
+        func smooth(_ x: Double) -> Double { let t = min(1, max(0, x)); return t * t * (3 - 2 * t) }
         let diagonal = hypot(size.width, size.height)
-        let grow = 1 - pow(1 - min(1, age / 0.9), 3)
-        let alpha = (scheme == .dark ? 0.16 : 0.12) * min(1, age / 0.15) * (age > 0.7 ? max(0, 1 - (age - 0.7) / 1.5) : 1)
+        let grow = 1 - pow(1 - min(1, age / 1.4), 3)
+        // Flash on launch, settle to a warm afterglow, then ease out with the shower.
+        let flash = 1 - 0.45 * smooth((age - 0.35) / 1.2)
+        let fade = 1 - smooth((age - 2.6) / (end - 2.6))
+        let alpha = (scheme == .dark ? 0.18 : 0.14) * smooth(age / 0.25) * flash * fade
         let radius = 40 + diagonal * grow
         let tint = ThemePalette.color(palette.accent)
         context.fill(Path(CGRect(origin: .zero, size: size)), with: .radialGradient(
