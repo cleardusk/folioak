@@ -436,6 +436,7 @@ extension CoreTests {
         try await fileRowDoubleClickTests()
         try await removalAnimationUITests()
         try await pageSwitchUITests()
+        try await windowDragRegionTests()
         let controller = MenuBarController(model: model, openWindow: {}, openSettings: {}, quit: {})
         try await Task.sleep(nanoseconds: 150_000_000)
         // Check the whole pointer sequence, including the mouse-up frame that
@@ -978,5 +979,42 @@ extension CoreTests {
             try expect(changed < 40, "\(from.rawValue) → \(to.rawValue) shows the destination without a fading previous page: \(changed) samples differ")
         }
         print("PASS page switch UI: library, downloads and media swap content without ghost frames")
+    }
+
+    // Blank chrome behaves like a title bar; sidebar items and header controls
+    // never hand their presses to window dragging.
+    @MainActor static func windowDragRegionTests() async throws {
+        let suite = "folioak-window-drag-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        let host = QuickTestHost(rootView: DownloaderView(model: model, page: .downloads).environment(\.colorScheme, .light))
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        host.layoutSubtreeIfNeeded()
+        var dragCount = 0
+        WindowDragRegion.Region.dragProbe = { dragCount += 1 }
+        defer { WindowDragRegion.Region.dragProbe = nil }
+        func drags(_ x: CGFloat, _ yFromTop: CGFloat) -> Bool {
+            let before = dragCount
+            let location = host.convert(NSPoint(x: x, y: host.isFlipped ? yFromTop : host.bounds.height - yFromTop), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+            }
+            return dragCount > before
+        }
+        // Coordinates follow the 960 pt workspace: sidebar 190 pt, header row 76 pt.
+        for (x, y, label) in [(CGFloat(100), CGFloat(380), "sidebar gap below navigation"), (160, 24, "sidebar top beside the toggle"),
+                              (600, 38, "page header blank space")] {
+            try expect(drags(x, y), "\(label) moves the window like a title bar")
+        }
+        for (x, y, label) in [(CGFloat(90), CGFloat(114), "downloads tab"), (90, 164, "library tab"), (90, 214, "media tab"),
+                              (37, 55, "sidebar toggle"), (230, 38, "back button")] {
+            try expect(!drags(x, y), "\(label) keeps its press instead of dragging the window")
+        }
+        print("PASS window drag regions: blank sidebar and header drag, navigation controls stay clickable")
     }
 }

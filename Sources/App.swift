@@ -1980,7 +1980,9 @@ final class WindowChrome: NSObject, NSToolbarDelegate {
         window.toolbar = workspace ? nil : toolbar
         window.standardWindowButton(.miniaturizeButton)?.isHidden = !window.styleMask.contains(.miniaturizable)
         window.standardWindowButton(.zoomButton)?.isHidden = !window.styleMask.contains(.resizable)
-        if workspace { window.isMovableByWindowBackground = true }
+        // The workspace marks its own blank chrome as draggable; moving by any
+        // background would also drag from SwiftUI buttons and rows.
+        window.isMovableByWindowBackground = false
         themeObservation = model.$theme.sink { [weak self] theme in self?.applyTheme(theme) }
     }
 

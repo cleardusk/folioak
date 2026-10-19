@@ -385,7 +385,7 @@ struct DownloaderView: View {
                             Spacer()
                         }.frame(height: WorkspaceMetrics.headerHeight)
                     } else { header }
-                }
+                }.background(WindowDragRegion(click: dismissEditing).padding(.horizontal, -24))
                 ZStack(alignment: .topLeading) {
                     workspaceContent
                         .opacity(workspaceActive ? 1 : 0)
@@ -547,8 +547,9 @@ struct DownloaderView: View {
                 }
             }
         }.padding(.horizontal, 12).padding(.bottom, 16).frame(width: collapsed ? 74 : 190)
+            // The drag region sits above the fill so blank sidebar space wins hit testing.
+            .background(WindowDragRegion(click: dismissEditing))
             .background(ThemePalette.color(palette.sidebar))
-            .contentShape(Rectangle()).onTapGesture(perform: dismissEditing)
     }
 
     private var navigationControls: some View {

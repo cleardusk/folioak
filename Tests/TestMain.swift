@@ -183,7 +183,7 @@ struct CoreTests {
             if CommandLine.arguments.contains("--picker-clicks-only") {
                 try await libraryDisplayPickerClickTests(); return
             }
-            if CommandLine.arguments.contains("--page-switch-only") { try await pageSwitchUITests(); return }
+            if CommandLine.arguments.contains("--page-switch-only") { try await pageSwitchUITests(); try await windowDragRegionTests(); return }
             if CommandLine.arguments.contains("--row-clicks-only") {
                 try await fileRowDoubleClickTests()
                 return
@@ -1045,7 +1045,7 @@ struct CoreTests {
         chrome = nil
         try expect(released == nil, "theme observation must not retain window chrome")
         let workspaceChrome = WindowChrome(window: window, model: model, title: "arXiv下载器", workspace: true)
-        try expect(window.toolbar == nil && window.standardWindowButton(.closeButton) != nil && window.isMovableByWindowBackground, "integrated workspace keeps native controls and window dragging without duplicate title")
+        try expect(window.toolbar == nil && window.standardWindowButton(.closeButton) != nil && !window.isMovableByWindowBackground, "integrated workspace keeps native controls and limits window dragging to blank chrome")
         try expect(window.standardWindowButton(.miniaturizeButton)?.isHidden == false && window.standardWindowButton(.zoomButton)?.isHidden == false, "main window keeps working minimize and zoom controls")
         let settings = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 620), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         let settingsChrome = WindowChrome(window: settings, model: model, title: "设置")
