@@ -437,6 +437,7 @@ extension CoreTests {
         try await removalAnimationUITests()
         try await pageSwitchUITests()
         try await windowDragRegionTests()
+        try await brandEasterEggTests()
         let controller = MenuBarController(model: model, openWindow: {}, openSettings: {}, quit: {})
         try await Task.sleep(nanoseconds: 150_000_000)
         // Check the whole pointer sequence, including the mouse-up frame that
@@ -1016,5 +1017,51 @@ extension CoreTests {
             try expect(!drags(x, y), "\(label) keeps its press instead of dragging the window")
         }
         print("PASS window drag regions: blank sidebar and header drag, navigation controls stay clickable")
+    }
+
+    @MainActor static func brandEasterEggTests() async throws {
+        let suite = "folioak-brand-egg-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        let host = QuickTestHost(rootView: DownloaderView(model: model, page: .downloads).environment(\.colorScheme, .light))
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        var drags = 0
+        WindowDragRegion.Region.dragProbe = { drags += 1 }
+        defer { WindowDragRegion.Region.dragProbe = nil }
+        // The leaf mark sits beside the 50 pt sidebar toggle in the 76 pt header row.
+        let location = host.convert(NSPoint(x: 80, y: host.isFlipped ? 55 : host.bounds.height - 55), to: nil)
+        func taps(_ count: Int, interval: UInt64) async throws {
+            for _ in 0..<count {
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    window.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+                }
+                try await Task.sleep(nanoseconds: interval)
+            }
+        }
+        let start = LeafBurst.triggered
+        try await taps(4, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start, "four quick taps keep the leaf burst hidden")
+        try await Task.sleep(nanoseconds: 700_000_000)
+        try await taps(4, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start, "a pause resets the tap count")
+        try await taps(1, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start + 1, "the fifth quick tap releases the leaf burst")
+        try await taps(2, interval: 120_000_000)
+        try expect(LeafBurst.triggered == start + 3, "every extra quick tap adds another burst")
+        try expect(drags == 0, "tapping the brand mark never drags the window")
+        if let directory = ProcessInfo.processInfo.environment["FOLIOAK_EGG_FRAMES"] {
+            for (index, delay) in [UInt64(0), 250, 600, 1100, 1800].enumerated() {
+                try await Task.sleep(nanoseconds: delay * 1_000_000)
+                let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                process.arguments = ["-x", "-o", "-l\(window.windowNumber)", "\(directory)/egg-\(index).png"]
+                try process.run(); process.waitUntilExit()
+            }
+        }
+        print("PASS brand easter egg: five quick taps burst, slower taps reset, extra taps stack and the mark stays clickable")
     }
 }

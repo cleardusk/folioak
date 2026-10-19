@@ -183,7 +183,7 @@ struct CoreTests {
             if CommandLine.arguments.contains("--picker-clicks-only") {
                 try await libraryDisplayPickerClickTests(); return
             }
-            if CommandLine.arguments.contains("--page-switch-only") { try await pageSwitchUITests(); try await windowDragRegionTests(); return }
+            if CommandLine.arguments.contains("--page-switch-only") { try await pageSwitchUITests(); try await windowDragRegionTests(); try await brandEasterEggTests(); return }
             if CommandLine.arguments.contains("--row-clicks-only") {
                 try await fileRowDoubleClickTests()
                 return

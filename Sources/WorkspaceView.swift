@@ -182,6 +182,9 @@ struct DownloaderView: View {
     @WorkspaceViewState private var libraryFilter = LibraryFilter.all
     @WorkspaceViewState private var librarySort = LibrarySort.newest
     @WorkspaceViewState private var libraryTag: String?
+    @WorkspaceViewState private var bursts: [LeafBurst] = []
+    @WorkspaceViewState private var showingFolioNote = false
+    @WorkspaceViewState private var folioNoteRequest = UUID()
     @Environment(\.displayScale) private var displayScale
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -413,6 +416,38 @@ struct DownloaderView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: scheme)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: model.theme)
         .ignoresSafeArea(.container, edges: .top)
+        .overlayPreferenceValue(BrandMarkAnchor.self) { anchor in
+            GeometryReader { proxy in
+                if let anchor, !bursts.isEmpty {
+                    let mark = proxy[anchor]
+                    LeafBurstOverlay(bursts: bursts, origin: CGPoint(x: mark.midX, y: mark.midY), palette: palette)
+                }
+            }
+        }
+        .overlay(alignment: .top) {
+            if showingFolioNote { FolioNote(palette: palette).padding(.top, 14).transition(.move(edge: .top).combined(with: .opacity)) }
+        }
+    }
+
+    private func celebrate(_ grand: Bool) {
+        guard !reduceMotion else {
+            if grand { showFolioNote() }
+            return
+        }
+        let burst = LeafBurst(grand: grand, accent: palette.accent)
+        bursts = Array((bursts + [burst]).suffix(4))
+        if grand { NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now); showFolioNote() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + LeafBurst.duration) { bursts.removeAll { $0.id == burst.id } }
+    }
+
+    private func showFolioNote() {
+        let request = UUID()
+        folioNoteRequest = request
+        withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.78)) { showingFolioNote = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+            guard folioNoteRequest == request else { return }
+            withAnimation(reduceMotion ? nil : .easeIn(duration: 0.25)) { showingFolioNote = false }
+        }
     }
 
     private var workspaceContent: some View {
@@ -472,11 +507,7 @@ struct DownloaderView: View {
                 } label: { SidebarToggleGlyph(expanded: !collapsed).frame(width: 50, height: 42).contentShape(Rectangle()) }
                     .buttonStyle(SidebarButtonStyle(palette: palette)).foregroundStyle(secondary)
                     .help(collapsed ? L("展开侧栏") : L("收起侧栏")).accessibilityLabel(collapsed ? L("展开侧栏") : L("收起侧栏"))
-                HStack(spacing: 7) {
-                    FolioakGlyph().foregroundStyle(accent).frame(width: 17, height: 17).accessibilityHidden(true)
-                    Text("Folioak").font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(ThemePalette.color(palette.text))
-                }.fixedSize()
+                BrandMark(palette: palette, tapped: dismissEditing, celebrate: celebrate).fixedSize()
                     .modifier(SidebarLabelFade(progress: collapsed ? 0 : 1))
                     .frame(width: collapsed ? 0 : nil, alignment: .leading).clipped()
                 Spacer(minLength: 0)

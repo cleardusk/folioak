@@ -120,3 +120,216 @@ private struct WelcomeFlow: Layout {
         return rows
     }
 }
+
+// Hidden delight: five quick taps on the sidebar mark scatter folios and oak
+// leaves that ripen from green to autumn as they fall ("Folio + Oak").
+struct BrandMarkAnchor: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>?
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) { value = value ?? nextValue() }
+}
+
+struct BrandMark: View {
+    let palette: ThemePalette
+    let tapped: () -> Void
+    let celebrate: (_ grand: Bool) -> Void
+    static let threshold = 5
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @WorkspaceViewState private var taps = 0
+    @WorkspaceViewState private var lastTap = Date.distantPast
+    @WorkspaceViewState private var spin = 0.0
+    @WorkspaceViewState private var tilt = 0.0
+    @WorkspaceViewState private var scale = 1.0
+
+    var body: some View {
+        HStack(spacing: 7) {
+            FolioakGlyph().foregroundStyle(ThemePalette.color(palette.accent)).frame(width: 17, height: 17)
+                .rotationEffect(.degrees(spin + tilt)).scaleEffect(scale)
+                .anchorPreference(key: BrandMarkAnchor.self, value: .bounds) { $0 }
+                .accessibilityHidden(true)
+            Text("Folioak").font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(ThemePalette.color(palette.text))
+        }.contentShape(Rectangle()).onTapGesture(perform: tap)
+    }
+
+    private func tap() {
+        tapped()
+        let now = Date()
+        taps = now.timeIntervalSince(lastTap) < 0.6 ? taps + 1 : 1
+        lastTap = now
+        guard taps >= Self.threshold else {
+            guard !reduceMotion else { return }
+            // Each tap winds the mark a little further so the build-up is felt.
+            let direction: Double = taps.isMultiple(of: 2) ? -1 : 1
+            withAnimation(.spring(response: 0.16, dampingFraction: 0.45)) { tilt = Double(taps) * 6 * direction; scale = 1 + Double(taps) * 0.07 }
+            settle(after: 0.16)
+            return
+        }
+        celebrate(taps == Self.threshold)
+        guard !reduceMotion else { return }
+        withAnimation(.spring(response: 0.7, dampingFraction: 0.6)) { spin += 360; tilt = 0 }
+        withAnimation(.spring(response: 0.18, dampingFraction: 0.5)) { scale = taps == Self.threshold ? 1.5 : 1.25 }
+        settle(after: 0.18)
+    }
+
+    private func settle(after delay: Double) {
+        let mark = taps
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard mark == taps else { return }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.5)) { tilt = 0; scale = 1 }
+        }
+    }
+}
+
+struct LeafBurst: Identifiable {
+    enum Kind { case leaf, page, spark }
+    struct Particle {
+        var kind: Kind, angle: Double, speed: Double, drag: Double, terminal: Double, wind: Double
+        var sway: Double, swayRate: Double, phase: Double, rotation: Double, spin: Double, flipRate: Double
+        var size: Double, life: Double, delay: Double, from: UInt32, to: UInt32
+    }
+    static let duration = 3.6
+    #if TESTING
+    static var triggered = 0
+    #endif
+    let id = UUID()
+    let start = Date()
+    let grand: Bool
+    let particles: [Particle]
+
+    init(grand: Bool, accent: UInt32) {
+        self.grand = grand
+        #if TESTING
+        Self.triggered += 1
+        #endif
+        let greens: [UInt32] = [accent, 0x2F9E63, 0x6DBE4B]
+        let autumn: [UInt32] = [0xF2CC5B, 0xE8B53A, 0xE07B2C, 0xC2502F, 0x9C6B3C]
+        particles = (0..<(grand ? 46 : 16)).map { index in
+            let roll = Double.random(in: 0..<1)
+            let kind: Kind = roll < 0.62 ? .leaf : roll < 0.84 ? .page : .spark
+            let from = kind == .page ? 0 : greens[index % greens.count]
+            // A quarter of the leaves stay green; the rest turn as they fall.
+            let to = kind == .page ? 0 : Double.random(in: 0..<1) < 0.25 ? from : autumn.randomElement()!
+            return Particle(kind: kind, angle: .random(in: -1.15...0.9), speed: .random(in: grand ? 240...700 : 160...420),
+                            drag: kind == .spark ? .random(in: 3.2...4.2) : .random(in: 1.7...2.6),
+                            terminal: kind == .spark ? .random(in: 10...30) : .random(in: 45...105), wind: .random(in: -8...28),
+                            sway: .random(in: 10...30), swayRate: .random(in: 1.6...3.0), phase: .random(in: 0...(2 * .pi)),
+                            rotation: .random(in: 0...(2 * .pi)), spin: .random(in: -3.2...3.2), flipRate: .random(in: 2.5...6.5),
+                            size: kind == .spark ? .random(in: 6...10) : kind == .page ? .random(in: 12...18) : .random(in: 12...22),
+                            life: kind == .spark ? .random(in: 0.9...1.6) : .random(in: 2.3...LeafBurst.duration - 0.2),
+                            delay: .random(in: 0...0.09), from: from, to: to)
+        }
+    }
+}
+
+struct LeafBurstOverlay: View {
+    let bursts: [LeafBurst]
+    let origin: CGPoint
+    let palette: ThemePalette
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            Canvas { context, _ in
+                let now = timeline.date
+                let leaf = context.resolve(FolioakGlyph.image.map { Image(nsImage: $0) } ?? Image(systemName: "leaf.fill"))
+                for burst in bursts {
+                    let age = now.timeIntervalSince(burst.start)
+                    if burst.grand { drawRipple(&context, age: age) }
+                    for particle in burst.particles { draw(particle, age: age - particle.delay, leaf: leaf, in: &context) }
+                }
+            }
+        }.allowsHitTesting(false).accessibilityHidden(true)
+    }
+
+    private func drawRipple(_ context: inout GraphicsContext, age: Double) {
+        for (offset, reach) in [(0.0, 74.0), (0.1, 46.0)] {
+            let t = (age - offset) / 0.65
+            guard t > 0, t < 1 else { continue }
+            let eased = 1 - pow(1 - t, 3), radius = 8 + reach * eased
+            let ring = Path(ellipseIn: CGRect(x: origin.x - radius, y: origin.y - radius, width: radius * 2, height: radius * 2))
+            context.stroke(ring, with: .color(ThemePalette.color(palette.accent).opacity(0.55 * (1 - t))), lineWidth: 2.2 * (1 - t) + 0.4)
+        }
+    }
+
+    private func draw(_ p: LeafBurst.Particle, age t: Double, leaf: GraphicsContext.ResolvedImage, in context: inout GraphicsContext) {
+        guard t > 0, t < p.life else { return }
+        // Air drag pulls each piece from its launch velocity to a slow,
+        // swaying terminal fall, like a leaf rather than a ball.
+        let decay = exp(-p.drag * t), settled = 1 - decay
+        let vx = cos(p.angle) * p.speed, vy = sin(p.angle) * p.speed
+        let x = origin.x + p.wind * t + (vx - p.wind) / p.drag * settled + p.sway * sin(p.swayRate * t + p.phase) * settled
+        let y = origin.y + p.terminal * t + (vy - p.terminal) / p.drag * settled
+        let progress = t / p.life
+        let fade = min(1, t / 0.08) * (progress > 0.7 ? max(0, 1 - (progress - 0.7) / 0.3) : 1)
+        var c = context
+        c.opacity = fade
+        c.translateBy(x: x, y: y)
+        c.rotate(by: .radians(p.rotation + p.spin * t))
+        let s = p.size
+        switch p.kind {
+        case .leaf:
+            c.scaleBy(x: cos(p.flipRate * t + p.phase), y: 1)
+            let ripen = min(1, max(0, (progress - 0.15) / 0.6))
+            let rect = CGRect(x: -s / 2, y: -s / 2, width: s, height: s)
+            // The glyph's alpha masks a solid fill so the leaf can ripen in color.
+            c.clipToLayer { $0.draw(leaf, in: rect) }
+            c.fill(Path(rect), with: .color(Self.blend(p.from, p.to, ripen * ripen * (3 - 2 * ripen))))
+        case .page:
+            c.scaleBy(x: cos(p.flipRate * t + p.phase), y: 1)
+            let rect = CGRect(x: -s * 0.38, y: -s / 2, width: s * 0.76, height: s)
+            let sheet = Path(roundedRect: rect, cornerRadius: 1.6)
+            c.fill(sheet, with: .color(ThemePalette.color(scheme == .dark ? 0xE7EEE9 : 0xFFFDF6)))
+            c.stroke(sheet, with: .color(ThemePalette.color(palette.accent).opacity(0.8)), lineWidth: 1)
+            for line in 0..<3 {
+                let lineY = rect.minY + s * (0.28 + Double(line) * 0.2)
+                let width = rect.width * (line == 2 ? 0.4 : 0.64)
+                c.fill(Path(CGRect(x: rect.minX + rect.width * 0.18, y: lineY, width: width, height: 0.9)),
+                       with: .color(ThemePalette.color(palette.accent).opacity(0.5)))
+            }
+        case .spark:
+            c.opacity = fade * (0.55 + 0.45 * sin(t * 18 + p.phase))
+            c.fill(Self.star(s), with: .color(Self.blend(p.from, 0xF2CC5B, progress)))
+        }
+    }
+
+    private static func star(_ size: Double) -> Path {
+        var path = Path()
+        for index in 0..<8 {
+            let radius = index.isMultiple(of: 2) ? size / 2 : size * 0.14
+            let angle = Double(index) * .pi / 4 - .pi / 2
+            let point = CGPoint(x: cos(angle) * radius, y: sin(angle) * radius)
+            if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        path.closeSubpath()
+        return path
+    }
+
+    private static func blend(_ a: UInt32, _ b: UInt32, _ t: Double) -> Color {
+        func channel(_ shift: UInt32) -> Double {
+            let x = Double((a >> shift) & 255), y = Double((b >> shift) & 255)
+            return (x + (y - x) * t) / 255
+        }
+        return Color(.sRGB, red: channel(16), green: channel(8), blue: channel(0))
+    }
+}
+
+struct FolioNote: View {
+    @ObservedObject private var localization = AppLocalization.shared
+    let palette: ThemePalette
+
+    var body: some View {
+        HStack(spacing: 10) {
+            FolioakGlyph().foregroundStyle(ThemePalette.color(palette.accent)).frame(width: 20, height: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Folio + Oak").font(.system(size: 13, weight: .semibold, design: .rounded))
+                Text(L("每一页，都是一片叶子。")).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
+            }
+        }
+        .padding(.leading, 14).padding(.trailing, 18).padding(.vertical, 9)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(ThemePalette.color(palette.border).opacity(0.8), lineWidth: 1))
+        .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+    }
+}
