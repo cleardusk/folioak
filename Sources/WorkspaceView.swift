@@ -190,7 +190,9 @@ struct DownloaderView: View {
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     private var accent: Color { ThemePalette.color(palette.accent) }
     private var recordTransition: AnyTransition {
-        reduceMotion ? .identity : .asymmetric(insertion: .opacity, removal: .opacity.animation(.easeOut(duration: 0.10)))
+        // No animation is attached here: record mutations animate through
+        // `recordAnimation`, while page navigation swaps in a single frame.
+        reduceMotion ? .identity : .opacity
     }
     private var listSelectionActive: Bool { listFocused && !inputFocused && !searchFocused }
     private var selectedID: UUID? { selection.primary }

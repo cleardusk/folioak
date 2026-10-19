@@ -435,6 +435,7 @@ extension CoreTests {
         }
         try await fileRowDoubleClickTests()
         try await removalAnimationUITests()
+        try await pageSwitchUITests()
         let controller = MenuBarController(model: model, openWindow: {}, openSettings: {}, quit: {})
         try await Task.sleep(nanoseconds: 150_000_000)
         // Check the whole pointer sequence, including the mouse-up frame that
@@ -924,5 +925,58 @@ extension CoreTests {
             try expect(regions().isEmpty && !host.gestureRecognizers.contains { $0 is NSClickGestureRecognizer }, "last-row transition cleans up every native recognizer")
         }
         print("PASS row removal UI: three lists, fade/reflow intermediate frames, batch removal, empty state and native recognizer cleanup")
+    }
+
+    // Record transitions belong to record mutations. Navigation must swap the
+    // content column in one frame instead of fading the previous page over it.
+    @MainActor static func pageSwitchUITests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-page-switch-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "folioak-page-switch-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let model = DownloadModel(preferences: preferences)
+        for index in 0..<6 {
+            let file = root.appendingPathComponent("file-\(index).pdf")
+            try createPDF(at: file, shade: CGFloat(index + 1) / 8)
+            let source = URL(string: "https://example.com/switch-\(index).pdf")!
+            model.upsertPaper(DownloadItem(original: source.absoluteString, directURL: source, state: .saved, savedURL: file,
+                documentTitle: "Page switch record \(index + 1)", finishedAt: Date().addingTimeInterval(Double(-index))))
+        }
+        model.navigation = WorkspaceNavigation(page: .library)
+        let host = QuickTestHost(rootView: DownloaderView(model: model, page: .library).environment(\.colorScheme, .light))
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        func content() -> NSBitmapImageRep? {
+            host.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            // Exclude the sidebar, whose selection indicator animates by design.
+            let rect = NSRect(x: 240, y: 0, width: host.bounds.width - 240, height: host.bounds.height)
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: rect) else { return nil }
+            host.cacheDisplay(in: rect, to: bitmap); return bitmap
+        }
+        func differing(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> Int {
+            var count = 0
+            for x in stride(from: 0, to: min(a.pixelsWide, b.pixelsWide), by: 3) {
+                for y in stride(from: 0, to: min(a.pixelsHigh, b.pixelsHigh), by: 3) {
+                    guard let p = a.colorAt(x: x, y: y), let q = b.colorAt(x: x, y: y) else { continue }
+                    if abs(p.redComponent - q.redComponent) + abs(p.greenComponent - q.greenComponent) + abs(p.blueComponent - q.blueComponent) > 0.06 { count += 1 }
+                }
+            }
+            return count
+        }
+        for (from, to) in [(WorkspacePage.library, WorkspacePage.downloads), (.downloads, .library), (.library, .media), (.media, .downloads)] {
+            if model.navigation.current.page != from { model.navigation.visit(WorkspaceRoute(page: from)); try await Task.sleep(nanoseconds: 400_000_000) }
+            model.navigation.visit(WorkspaceRoute(page: to))
+            try await Task.sleep(nanoseconds: 30_000_000)
+            guard let early = content() else { throw TestFailure.failed("page switch snapshot") }
+            try await Task.sleep(nanoseconds: 400_000_000)
+            guard let settled = content() else { throw TestFailure.failed("page switch snapshot") }
+            let changed = differing(early, settled)
+            try expect(changed < 40, "\(from.rawValue) → \(to.rawValue) shows the destination without a fading previous page: \(changed) samples differ")
+        }
+        print("PASS page switch UI: library, downloads and media swap content without ghost frames")
     }
 }
