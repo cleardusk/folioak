@@ -437,14 +437,14 @@ struct DownloaderView: View {
         let burst = LeafBurst(grand: grand, accent: palette.accent)
         bursts = Array((bursts + [burst]).suffix(4))
         if grand { NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now); showFolioNote() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + LeafBurst.duration) { bursts.removeAll { $0.id == burst.id } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + burst.duration) { bursts.removeAll { $0.id == burst.id } }
     }
 
     private func showFolioNote() {
         let request = UUID()
         folioNoteRequest = request
         withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.78)) { showingFolioNote = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) {
             guard folioNoteRequest == request else { return }
             withAnimation(reduceMotion ? nil : .easeIn(duration: 0.25)) { showingFolioNote = false }
         }

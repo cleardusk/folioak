@@ -1055,7 +1055,7 @@ extension CoreTests {
         try expect(LeafBurst.triggered == start + 3, "every extra quick tap adds another burst")
         try expect(drags == 0, "tapping the brand mark never drags the window")
         if let directory = ProcessInfo.processInfo.environment["FOLIOAK_EGG_FRAMES"] {
-            for (index, delay) in [UInt64(0), 250, 600, 1100, 1800].enumerated() {
+            for (index, delay) in [UInt64(0), 300, 500, 800, 1200, 1500, 1800].enumerated() {
                 try await Task.sleep(nanoseconds: delay * 1_000_000)
                 let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
                 process.arguments = ["-x", "-o", "-l\(window.windowNumber)", "\(directory)/egg-\(index).png"]

@@ -121,8 +121,8 @@ private struct WelcomeFlow: Layout {
     }
 }
 
-// Hidden delight: five quick taps on the sidebar mark scatter folios and oak
-// leaves that ripen from green to autumn as they fall ("Folio + Oak").
+// Hidden delight: five quick taps on the sidebar mark fill the window with
+// folios and oak leaves that ripen from green to autumn as they fall ("Folio + Oak").
 struct BrandMarkAnchor: PreferenceKey {
     static var defaultValue: Anchor<CGRect>?
     static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) { value = value ?? nextValue() }
@@ -183,41 +183,75 @@ struct BrandMark: View {
 struct LeafBurst: Identifiable {
     enum Kind { case leaf, page, spark }
     struct Particle {
-        var kind: Kind, angle: Double, speed: Double, drag: Double, terminal: Double, wind: Double
+        var kind: Kind, sky: Bool, column: Double, angle: Double, reach: Double, drag: Double, fall: Double, wind: Double
         var sway: Double, swayRate: Double, phase: Double, rotation: Double, spin: Double, flipRate: Double
-        var size: Double, life: Double, delay: Double, from: UInt32, to: UInt32
+        var size: Double, life: Double, delay: Double, rest: Double, from: UInt32, to: UInt32
     }
-    static let duration = 3.6
     #if TESTING
     static var triggered = 0
     #endif
     let id = UUID()
     let start = Date()
     let grand: Bool
+    let duration: Double
     let particles: [Particle]
 
+    // The grand burst is a gust from the mark followed by a canopy shower
+    // across the whole window; leaves settle on the bottom edge, then fade.
+    // Extra taps add smaller gusts. Distances are window fractions.
     init(grand: Bool, accent: UInt32) {
         self.grand = grand
+        duration = grand ? 7.4 : 4.6
         #if TESTING
         Self.triggered += 1
         #endif
-        let greens: [UInt32] = [accent, 0x2F9E63, 0x6DBE4B]
-        let autumn: [UInt32] = [0xF2CC5B, 0xE8B53A, 0xE07B2C, 0xC2502F, 0x9C6B3C]
-        particles = (0..<(grand ? 46 : 16)).map { index in
+        let greens: [UInt32] = [accent, 0x2F9E63, 0x6DBE4B, 0x1F6B45]
+        let autumn: [UInt32] = [0xF2CC5B, 0xE8B53A, 0xE07B2C, 0xC2502F, 0x9C6B3C, 0xD9893B]
+        let duration = duration
+        func particle(_ index: Int, sky: Bool) -> Particle {
             let roll = Double.random(in: 0..<1)
-            let kind: Kind = roll < 0.62 ? .leaf : roll < 0.84 ? .page : .spark
+            let kind: Kind = sky ? (roll < 0.8 ? .leaf : .page) : roll < 0.6 ? .leaf : roll < 0.8 ? .page : .spark
             let from = kind == .page ? 0 : greens[index % greens.count]
-            // A quarter of the leaves stay green; the rest turn as they fall.
-            let to = kind == .page ? 0 : Double.random(in: 0..<1) < 0.25 ? from : autumn.randomElement()!
-            return Particle(kind: kind, angle: .random(in: -1.15...0.9), speed: .random(in: grand ? 240...700 : 160...420),
-                            drag: kind == .spark ? .random(in: 3.2...4.2) : .random(in: 1.7...2.6),
-                            terminal: kind == .spark ? .random(in: 10...30) : .random(in: 45...105), wind: .random(in: -8...28),
-                            sway: .random(in: 10...30), swayRate: .random(in: 1.6...3.0), phase: .random(in: 0...(2 * .pi)),
-                            rotation: .random(in: 0...(2 * .pi)), spin: .random(in: -3.2...3.2), flipRate: .random(in: 2.5...6.5),
-                            size: kind == .spark ? .random(in: 6...10) : kind == .page ? .random(in: 12...18) : .random(in: 12...22),
-                            life: kind == .spark ? .random(in: 0.9...1.6) : .random(in: 2.3...LeafBurst.duration - 0.2),
-                            delay: .random(in: 0...0.09), from: from, to: to)
+            // A fifth of the leaves stay green; the rest turn as they fall.
+            let to = kind == .page ? 0 : Double.random(in: 0..<1) < 0.2 ? from : autumn.randomElement()!
+            let delay = sky ? Double.random(in: 0.12...1.9) : .random(in: 0...0.08)
+            let spark = kind == .spark
+            return Particle(kind: kind, sky: sky, column: .random(in: -0.08...1.0), angle: .random(in: -1.25...1.45),
+                            reach: spark ? .random(in: 0.12...0.42) : grand ? .random(in: 0.3...1.05) : .random(in: 0.18...0.55),
+                            drag: spark ? .random(in: 3.2...4.2) : .random(in: 1.6...2.4),
+                            fall: spark ? .random(in: 0.01...0.04) : .random(in: 0.2...0.36), wind: .random(in: -10...42),
+                            sway: .random(in: 14...42), swayRate: .random(in: 1.3...2.6), phase: .random(in: 0...(2 * .pi)),
+                            rotation: .random(in: 0...(2 * .pi)), spin: .random(in: -2.8...2.8), flipRate: .random(in: 2.2...5.5),
+                            size: spark ? .random(in: 6...11) : kind == .page ? .random(in: 13...20) : .random(in: 13...26),
+                            life: spark ? .random(in: 0.9...1.8) : duration - delay - .random(in: 0...0.9),
+                            delay: delay, rest: .random(in: 3...22), from: from, to: to)
         }
+        particles = (0..<(grand ? 64 : 22)).map { particle($0, sky: false) } + (0..<(grand ? 120 : 0)).map { particle($0, sky: true) }
+    }
+}
+
+// Tinted copies of the leaf glyph, quantized so ripening reuses bitmaps.
+enum LeafTint {
+    private static var cache: [UInt32: NSImage] = [:]
+    private static let lock = NSLock()
+    static func image(_ hex: UInt32) -> NSImage? {
+        lock.lock(); defer { lock.unlock() }
+        if let image = cache[hex] { return image }
+        guard let base = FolioakGlyph.image,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64, bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { return nil }
+        let rect = NSRect(x: 0, y: 0, width: 64, height: 64)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        base.draw(in: rect)
+        ThemePalette.nativeColor(hex).set()
+        rect.fill(using: .sourceAtop)
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: rect.size)
+        image.addRepresentation(rep)
+        cache[hex] = image
+        return image
     }
 }
 
@@ -229,53 +263,93 @@ struct LeafBurstOverlay: View {
 
     var body: some View {
         TimelineView(.animation) { timeline in
-            Canvas { context, _ in
+            Canvas { context, size in
                 let now = timeline.date
-                let leaf = context.resolve(FolioakGlyph.image.map { Image(nsImage: $0) } ?? Image(systemName: "leaf.fill"))
+                var leaves: [UInt32: GraphicsContext.ResolvedImage] = [:]
+                let resolver = context
+                func leaf(_ hex: UInt32) -> GraphicsContext.ResolvedImage? {
+                    if let image = leaves[hex] { return image }
+                    guard let tinted = LeafTint.image(hex) else { return nil }
+                    let image = resolver.resolve(Image(nsImage: tinted)); leaves[hex] = image; return image
+                }
+                for burst in bursts where burst.grand { drawGlow(&context, size: size, age: now.timeIntervalSince(burst.start)) }
                 for burst in bursts {
                     let age = now.timeIntervalSince(burst.start)
                     if burst.grand { drawRipple(&context, age: age) }
-                    for particle in burst.particles { draw(particle, age: age - particle.delay, leaf: leaf, in: &context) }
+                    for particle in burst.particles { draw(particle, age: age - particle.delay, size: size, leaf: leaf, in: &context) }
                 }
             }
         }.allowsHitTesting(false).accessibilityHidden(true)
     }
 
+    // A soft wash of light sweeps out from the mark as the gust leaves it.
+    private func drawGlow(_ context: inout GraphicsContext, size: CGSize, age: Double) {
+        guard age > 0, age < 2.2 else { return }
+        let diagonal = hypot(size.width, size.height)
+        let grow = 1 - pow(1 - min(1, age / 0.9), 3)
+        let alpha = (scheme == .dark ? 0.16 : 0.12) * min(1, age / 0.15) * (age > 0.7 ? max(0, 1 - (age - 0.7) / 1.5) : 1)
+        let radius = 40 + diagonal * grow
+        let tint = ThemePalette.color(palette.accent)
+        context.fill(Path(CGRect(origin: .zero, size: size)), with: .radialGradient(
+            Gradient(stops: [.init(color: Color(.sRGB, red: 1, green: 0.86, blue: 0.5).opacity(alpha), location: 0),
+                             .init(color: tint.opacity(alpha * 0.7), location: 0.45), .init(color: tint.opacity(0), location: 1)]),
+            center: origin, startRadius: 0, endRadius: radius))
+    }
+
     private func drawRipple(_ context: inout GraphicsContext, age: Double) {
-        for (offset, reach) in [(0.0, 74.0), (0.1, 46.0)] {
-            let t = (age - offset) / 0.65
+        for (offset, reach) in [(0.0, 120.0), (0.12, 70.0), (0.24, 40.0)] {
+            let t = (age - offset) / 0.75
             guard t > 0, t < 1 else { continue }
             let eased = 1 - pow(1 - t, 3), radius = 8 + reach * eased
             let ring = Path(ellipseIn: CGRect(x: origin.x - radius, y: origin.y - radius, width: radius * 2, height: radius * 2))
-            context.stroke(ring, with: .color(ThemePalette.color(palette.accent).opacity(0.55 * (1 - t))), lineWidth: 2.2 * (1 - t) + 0.4)
+            context.stroke(ring, with: .color(ThemePalette.color(palette.accent).opacity(0.55 * (1 - t))), lineWidth: 2.4 * (1 - t) + 0.4)
         }
     }
 
-    private func draw(_ p: LeafBurst.Particle, age t: Double, leaf: GraphicsContext.ResolvedImage, in context: inout GraphicsContext) {
+    private func draw(_ p: LeafBurst.Particle, age t: Double, size: CGSize, leaf: (UInt32) -> GraphicsContext.ResolvedImage?,
+                      in context: inout GraphicsContext) {
         guard t > 0, t < p.life else { return }
         // Air drag pulls each piece from its launch velocity to a slow,
         // swaying terminal fall, like a leaf rather than a ball.
-        let decay = exp(-p.drag * t), settled = 1 - decay
-        let vx = cos(p.angle) * p.speed, vy = sin(p.angle) * p.speed
-        let x = origin.x + p.wind * t + (vx - p.wind) / p.drag * settled + p.sway * sin(p.swayRate * t + p.phase) * settled
-        let y = origin.y + p.terminal * t + (vy - p.terminal) / p.drag * settled
+        let diagonal = hypot(size.width, size.height), terminal = p.fall * size.height
+        let start = p.sky ? CGPoint(x: p.column * size.width, y: -24) : origin
+        let speed = p.reach * diagonal * p.drag
+        let vx = p.sky ? p.wind : cos(p.angle) * speed, vy = p.sky ? terminal : sin(p.angle) * speed
+        func position(_ t: Double) -> CGPoint {
+            let settled = 1 - exp(-p.drag * t)
+            return CGPoint(x: start.x + p.wind * t + (vx - p.wind) / p.drag * settled + p.sway * sin(p.swayRate * t + p.phase) * settled,
+                           y: start.y + terminal * t + (vy - terminal) / p.drag * settled)
+        }
+        var time = t, point = position(t)
+        let floor = size.height - p.rest
+        let landed = p.kind != .spark && point.y > floor
+        if landed {
+            // Falling is monotonic after the apex; search for the landing moment.
+            var low = vy < 0 ? log((terminal - vy) / terminal) / p.drag : 0, high = t
+            for _ in 0..<18 { let mid = (low + high) / 2; if position(mid).y > floor { high = mid } else { low = mid } }
+            time = high; point = CGPoint(x: position(high).x, y: floor)
+        }
         let progress = t / p.life
-        let fade = min(1, t / 0.08) * (progress > 0.7 ? max(0, 1 - (progress - 0.7) / 0.3) : 1)
+        let fade = min(1, t / 0.08) * (p.kind == .spark ? (progress > 0.6 ? max(0, 1 - (progress - 0.6) / 0.4) : 1)
+                                                      : min(1, (p.life - t) / 0.9))
         var c = context
         c.opacity = fade
-        c.translateBy(x: x, y: y)
-        c.rotate(by: .radians(p.rotation + p.spin * t))
+        c.translateBy(x: point.x, y: point.y)
+        c.rotate(by: .radians(p.rotation + p.spin * time))
+        let flip = cos(p.flipRate * time + p.phase)
+        // Settled pieces lie face up instead of freezing edge-on.
+        let face = landed ? (flip < 0 ? -1 : 1) * max(0.6, abs(flip)) : flip
         let s = p.size
         switch p.kind {
         case .leaf:
-            c.scaleBy(x: cos(p.flipRate * t + p.phase), y: 1)
-            let ripen = min(1, max(0, (progress - 0.15) / 0.6))
+            c.scaleBy(x: face, y: 1)
+            let ripen = min(1, max(0, (time / max(1, p.life - 1) - 0.1) / 0.6))
+            let step = (ripen * ripen * (3 - 2 * ripen) * 10).rounded() / 10
             let rect = CGRect(x: -s / 2, y: -s / 2, width: s, height: s)
-            // The glyph's alpha masks a solid fill so the leaf can ripen in color.
-            c.clipToLayer { $0.draw(leaf, in: rect) }
-            c.fill(Path(rect), with: .color(Self.blend(p.from, p.to, ripen * ripen * (3 - 2 * ripen))))
+            if let image = leaf(Self.blend(p.from, p.to, step)) { c.draw(image, in: rect) }
+            else { c.fill(Path(ellipseIn: rect.insetBy(dx: s * 0.2, dy: 0)), with: .color(ThemePalette.color(Self.blend(p.from, p.to, step)))) }
         case .page:
-            c.scaleBy(x: cos(p.flipRate * t + p.phase), y: 1)
+            c.scaleBy(x: face, y: 1)
             let rect = CGRect(x: -s * 0.38, y: -s / 2, width: s * 0.76, height: s)
             let sheet = Path(roundedRect: rect, cornerRadius: 1.6)
             c.fill(sheet, with: .color(ThemePalette.color(scheme == .dark ? 0xE7EEE9 : 0xFFFDF6)))
@@ -288,7 +362,7 @@ struct LeafBurstOverlay: View {
             }
         case .spark:
             c.opacity = fade * (0.55 + 0.45 * sin(t * 18 + p.phase))
-            c.fill(Self.star(s), with: .color(Self.blend(p.from, 0xF2CC5B, progress)))
+            c.fill(Self.star(s), with: .color(ThemePalette.color(Self.blend(p.from, 0xF2CC5B, progress))))
         }
     }
 
@@ -304,12 +378,12 @@ struct LeafBurstOverlay: View {
         return path
     }
 
-    private static func blend(_ a: UInt32, _ b: UInt32, _ t: Double) -> Color {
-        func channel(_ shift: UInt32) -> Double {
+    private static func blend(_ a: UInt32, _ b: UInt32, _ t: Double) -> UInt32 {
+        func channel(_ shift: UInt32) -> UInt32 {
             let x = Double((a >> shift) & 255), y = Double((b >> shift) & 255)
-            return (x + (y - x) * t) / 255
+            return UInt32((x + (y - x) * t).rounded()) << shift
         }
-        return Color(.sRGB, red: channel(16), green: channel(8), blue: channel(0))
+        return channel(16) | channel(8) | channel(0)
     }
 }
 
