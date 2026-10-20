@@ -212,10 +212,47 @@ struct DeepSeekResolver: SmartResolving {
             for row in rows.prefix(5) {
                 guard let text = row["url"] as? String, let url = URL(string: text),
                       let title = row["title"] as? String else { continue }
-                let detail = (row["summary"] as? String) ?? (row["snippet"] as? String) ?? ""
+                var evidence: [String] = []
+                for field in ["summary", "snippet"] {
+                    guard let rawValue = row[field] as? String else { continue }
+                    let value = String(rawValue.trimmingCharacters(in: .whitespacesAndNewlines).prefix(6_000))
+                    if !value.isEmpty && !evidence.contains(value) { evidence.append(value) }
+                }
+                let detail = evidence.joined(separator: "\n")
                 if let resource = register(url, title: title, detail: detail, origin: .search) { found.append(resource.json) }
+                // Search snippets can cite an attachment whose URL differs from
+                // the result page. Register only URLs actually present in that
+                // evidence; the model must still match their nearby context.
+                for link in Self.snippetLinks(detail) where link.url != url {
+                    if let resource = register(link.url, title: link.url.lastPathComponent,
+                                               detail: link.context, origin: .search),
+                       !found.contains(where: { $0["id"] as? String == resource.candidate.id }) {
+                        found.append(resource.json.merging(["observed_in": url.absoluteString]) { _, new in new })
+                    }
+                }
             }
-            return ["resources": found, "notice": "网页标题和摘要并非经过核验的论文元数据；搜索候选需要用户选择。"]
+            return ["resources": found, "notice": "结果页面与片段中引用的附件可能是不同作品；必须依据相邻标题、作者、年份和版本核对，不能仅因链接可下载就选择。"]
+        }
+
+        static func snippetLinks(_ text: String) -> [(url: URL, context: String)] {
+            let detector = try! NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+            let raw = text as NSString
+            var links: [(url: URL, context: String)] = [], seen = Set<URL>()
+            for match in detector.matches(in: text, range: NSRange(location: 0, length: raw.length)).prefix(20) {
+                guard var value = match.url?.absoluteString, value.utf8.count <= 2048 else { continue }
+                // Data detectors can retain a Markdown wrapper after a path
+                // that itself has balanced parentheses.
+                while value.hasSuffix(")"), value.filter({ $0 == ")" }).count > value.filter({ $0 == "(" }).count {
+                    value.removeLast()
+                }
+                guard let url = URL(string: value), PublicHTTPS.allows(url), isFile(url), seen.insert(url).inserted else { continue }
+                let start = max(0, match.range.location - 300)
+                let end = min(raw.length, NSMaxRange(match.range) + 140)
+                let context = raw.substring(with: NSRange(location: start, length: end - start))
+                links.append((url, String(context.prefix(600))))
+                if links.count == 2 { break }
+            }
+            return links
         }
 
         mutating func inspect(_ args: [String: Any]) async throws -> [String: Any] {
@@ -281,13 +318,16 @@ struct DeepSeekResolver: SmartResolving {
                     .map { !Self.isFile($0.candidate.url) } ?? true
             }
             let remaining = unresolved + limitations.filter { !unresolved.contains($0) }
-            return SmartResolution(candidates: resources.filter(\.downloadable).map(\.candidate), selections: selections,
+            let matched = Set(selections.map(\.candidateID))
+            return SmartResolution(candidates: resources.filter {
+                $0.candidate.origin == .supplied || matched.contains($0.candidate.id)
+            }.map(\.candidate), selections: selections,
                 unresolved: remaining, needsReview: discovered || !remaining.isEmpty || unknownPage,
                 modelCalls: modelCalls, toolCalls: toolCalls)
         }
 
         func fallback() -> SmartResolution {
-            SmartResolution(candidates: resources.filter(\.downloadable).map(\.candidate), selections: [],
+            SmartResolution(candidates: resources.filter { $0.candidate.origin == .supplied }.map(\.candidate), selections: [],
                 unresolved: [L("已达到解析时间或调用上限，请核对已有候选或补充线索。")] + limitations, needsReview: true,
                 modelCalls: modelCalls, toolCalls: toolCalls)
         }
@@ -297,7 +337,7 @@ struct DeepSeekResolver: SmartResolving {
             request.httpMethod = "POST"
             request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
             let (data, response) = try await requestData(request, through: api)
             switch response.statusCode {
             case 200: break
@@ -354,8 +394,14 @@ struct DeepSeekResolver: SmartResolving {
         For supplied links, availability, file validation, audio extraction and checking existing local files are the application's responsibility.
         Represent these ordinary conditions with format and skip_existing; do NOT mark them unresolved merely because you cannot access the local library or verify the link.
         Do not search or inspect supplied direct file/video links just to verify availability.
-        For unclear paper clues, search once with a concise query (<=128 Unicode characters), preferring official paper sources.
-        Search ranks and snippets do not prove identity; discovery results will be shown for user review. Select the strongest candidates.
+        Expand informal names or abbreviations to the likely formal title while retaining the user's distinctive alias and including the original institution or publisher when known. Keep queries concise (<=128 Unicode characters).
+        Prefer original author or publisher sources; a clearly identified copy from a university or other reliable source can also match.
+        When several links identify the same work, prefer the original publisher's current page or CDN link over links from old repository commits or historical citations. If a publisher landing page is available, inspect it for the current download link.
+        Select a discovered resource only when its observed title and nearby evidence identify the requested work, including any specified author, year or version.
+        A high search rank, a matching keyword in references, or a downloadable file extension does NOT establish identity.
+        Snippet links carry their own nearby context and observed_in page; a citing article's title is not the cited attachment's title.
+        If the first search has only weak or unrelated results, use the remaining read call for a more precise search. If identity remains unsupported, select nothing and state what is missing.
+        Discovery selections are matching candidates for user review, not immediate downloads. Include genuine matches even when the user asks to choose later; do not include unrelated alternatives.
         inspect_page reads the static HTML of an existing candidate and registers its links. Use it for a project page or to inspect a search landing page.
         A resource with downloadable=false is a page to inspect, not a download target.
         format controls MEDIA output only: inherit uses the user's media default; video explicitly keeps video; audio requests audio extraction.

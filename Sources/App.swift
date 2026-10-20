@@ -1260,6 +1260,7 @@ final class DownloadModel: ObservableObject {
         let namingSnapshot = AssetNamingSnapshot(rules: namingRules, paperStyle: naming)
         for selection in selections {
             guard let candidate = candidates[selection.candidateID],
+                  resolution.allowsSelection(of: candidate),
                   PublicHTTPS.allows(candidate.url),
                   let source = try? DownloadSource.parse(candidate.url.absoluteString) else {
                 throw DownloadError.limit("候选资源已失效，请重新查找。")

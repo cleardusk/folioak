@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 
 #if TESTING
 private final class SmartLiveCredentials: SmartCredentialStorage {
@@ -108,6 +109,42 @@ extension CoreTests {
         try expect(messages.last?["role"] as? String == "tool" &&
                    (messages.last?["content"] as? String)?.contains("1706.03762") == true,
                    "the next decision observes the real tool result")
+        let unrelated = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": "requested original paper"])),
+            .init(["results": [["title": "Unrelated training system", "url": "https://www.cs.princeton.edu/deepspeed.pdf",
+                                "summary": "This different paper cites the requested work in its references."]]]),
+            .init(terminal([], unresolved: ["未找到目标论文"]))
+        ])
+        let rejected = try await DeepSeekResolver(api: unrelated).resolve("下载指定的原始论文", apiKey: key, progress: { _ in })
+        try expect(rejected.candidates.isEmpty && rejected.selections.isEmpty && !rejected.unresolved.isEmpty,
+                   "a rejected but downloadable search hit is never exposed as a selectable candidate")
+        let cited = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": "Original Formal Title"])),
+            .init(["results": [["title": "A collection of different papers", "url": "https://example.com/notes.md",
+                                "summary": "", "snippet": "Original Formal Title — Ada Example (2019). [Official PDF](https://papers.example.edu/original.pdf)."]]]),
+            .init(terminal([selection("r2")]))
+        ])
+        let citation = try await DeepSeekResolver(api: cited).resolve("下载这篇原始论文", apiKey: key, progress: { _ in })
+        try expect(citation.candidates.count == 1 && citation.candidates[0].url.absoluteString == "https://papers.example.edu/original.pdf" &&
+                   citation.candidates[0].title == "original.pdf" && citation.candidates[0].detail.contains("Ada Example"),
+                   "an observed snippet attachment retains nearby identity evidence without inheriting the citing page's title")
+        let citedRequests = await cited.requests
+        let citedPayload = try JSONSerialization.jsonObject(with: citedRequests[2].httpBody!) as! [String: Any]
+        let citedMessages = citedPayload["messages"] as! [[String: Any]]
+        try expect((citedMessages.last?["content"] as? String)?.contains("observed_in") == true &&
+                   (citedMessages.last?["content"] as? String)?.contains("Original Formal Title") == true,
+                   "nonempty snippets and citation provenance reach the decision after an empty summary")
+        let refined = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": "short alias"])),
+            .init(["results": [["title": "Different work", "url": "https://example.com/unrelated.pdf", "summary": "Cites the original work"]]]),
+            .init(call("search_resources", ["query": "Original Formal Title Ada Example 2019"])),
+            .init(["results": [["title": "Original Formal Title", "url": "https://papers.example.edu/original.pdf", "summary": "Ada Example, 2019"]]]),
+            .init(terminal([selection("r2")], unresolved: ["未找到附件"]))
+        ])
+        let refinement = try await DeepSeekResolver(api: refined).resolve("下载原始论文和附件", apiKey: key, progress: { _ in })
+        try expect(refinement.modelCalls == 3 && refinement.toolCalls == 2 && refinement.candidates.count == 1 &&
+                   refinement.candidates[0].url.lastPathComponent == "original.pdf" && refinement.unresolved == ["未找到附件"],
+                   "a refined search discards the weak hit while retaining a matched paper and its missing attachment")
         let openReview = try ScriptedSmartTransport([
             .init(call("search_resources", ["query": "OpenReview paper"])),
             .init(["results": [["title": "Paper", "url": "https://openreview.net/forum?id=abc123", "summary": "Paper"]]]),
@@ -203,15 +240,16 @@ extension CoreTests {
         } catch SmartResolverError.invalidResponse {}
 
         let limit = try ScriptedSmartTransport([
-            .init(call("search_resources", ["query": "first"])), .init(["results": []]),
+            .init(call("search_resources", ["query": "first"])),
+            .init(["results": [["title": "Unverified result", "url": "https://example.com/unverified.pdf", "summary": "Unknown identity"]]]),
             .init(call("search_resources", ["query": "second"])), .init(["results": []]),
             .init(call("search_resources", ["query": "third"]))
         ])
         let limited = try await DeepSeekResolver(api: limit).resolve("找一篇论文", apiKey: key, progress: { _ in })
         let limitRequests = await limit.requests
         try expect(limited.modelCalls == 3 && limited.toolCalls == 2 && limitRequests.count == 5 &&
-                   limited.needsReview && limited.selections.isEmpty && !limited.unresolved.isEmpty,
-                   "call limits stop before executing a third read-only tool")
+                   limited.needsReview && limited.selections.isEmpty && limited.candidates.isEmpty && !limited.unresolved.isEmpty,
+                   "call limits stop before a third read and never expose an unverified discovered file")
 
         let slow = try ScriptedSmartTransport([.init(terminal([selection("r1")]), delay: 500_000_000)])
         let timed = try await DeepSeekResolver(api: slow, budget: 0.01).resolve(
@@ -351,6 +389,9 @@ extension CoreTests {
         let samples: [(String, String)] = [
             ("conditional", "https://example.com/first.mp4 https://example.com/second.mp4 只下载第二个的音频，已有的跳过"),
             ("search", "找到论文 Attention Is All You Need，返回候选让我选择。"),
+            ("alias-gpt1-first", "下载 gpt-1 论文"),
+            ("alias-gpt1-repeat", "下载 gpt-1 论文"),
+            ("alias-gpt2", "下载 GPT-2 论文"),
             ("page", "读取 https://jonbarron.info/mipnerf360/ ，找到这个项目的论文和补充材料。没有找到的材料明确说明。")
         ]
         for (name, input) in samples {
@@ -367,15 +408,38 @@ extension CoreTests {
                            result.selections == [SmartSelection(candidateID: "r2", format: .audio, skipExisting: true)],
                            "live conditional interpretation must select only the second link as audio")
             } else {
-                let origin: SmartCandidate.Origin = name == "search" ? .search : .page
+                let origin: SmartCandidate.Origin = name == "page" ? .page : .search
                 try expect(result.needsReview && result.candidates.contains(where: { $0.origin == origin }),
                            "live discovery returns candidates from the observed search or page")
+                if name.hasPrefix("alias-gpt1") {
+                    try await verifySearchPaper(result, title: "Improving Language Understanding by Generative Pre-Training")
+                } else if name == "alias-gpt2" {
+                    try await verifySearchPaper(result, title: "Language Models are Unsupervised Multitask Learners")
+                }
             }
         }
         #if TESTING
         try await smartDownloadLiveTest(apiKey: key)
         #endif
         print("PASS smart live samples (sample timings are observations, not latency guarantees)")
+    }
+
+    private static func verifySearchPaper(_ result: SmartResolution, title: String) async throws {
+        let selected = Set(result.selections.map(\.candidateID))
+        let candidates = result.candidates.filter { selected.contains($0.id) }
+        try expect(!candidates.isEmpty, "live alias search must propose an identified paper")
+        func normalized(_ text: String) -> String { text.lowercased().filter { $0.isLetter || $0.isNumber } }
+        for candidate in candidates {
+            let (file, response) = try await URLSessionTransport(policy: .externalPDF).download(
+                for: URLRequest(url: candidate.url), progress: { _ in })
+            defer { try? FileManager.default.removeItem(at: file) }
+            try expect(response.statusCode == 200, "live search paper is publicly downloadable")
+            let pages = try PaperStorage.validatePDF(at: file)
+            let firstPage = PDFDocument(url: file)?.page(at: 0)?.string ?? ""
+            try expect(normalized(firstPage).contains(normalized(title)),
+                       "live alias search must resolve the requested paper's actual first-page title")
+            print("LIVE smart identity: verified first-page title, PDF pages=\(pages)")
+        }
     }
 
     #if TESTING

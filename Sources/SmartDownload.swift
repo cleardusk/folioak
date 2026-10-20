@@ -64,7 +64,8 @@ import Combine
                     let review = result.needsReview || !result.unresolved.isEmpty ||
                         result.candidates.contains { $0.origin != .supplied }
                     if review {
-                        self.message = result.candidates.isEmpty ? "未找到可下载的资源，请补充线索后重试。" : nil
+                        self.message = result.candidates.isEmpty && result.unresolved.isEmpty
+                            ? "未找到可下载的资源，请补充线索后重试。" : nil
                     } else { self.acceptSelection() }
                 } catch {
                     guard let self, self.sessionID == id, !Task.isCancelled else { return }
@@ -87,7 +88,7 @@ import Combine
     }
 
     func acceptSelection() {
-        guard let model, let result = resolution, let id = sessionID, !resolving else { return }
+        guard let model, let result = resolution, let id = sessionID, !resolving, !selections.isEmpty else { return }
         do {
             let receipt = try model.submitSmartDownload(result, selections: selections, sessionID: id,
                                                        quick: quick, defaultFormat: defaultFormat)
@@ -106,15 +107,24 @@ import Combine
         } catch { failed = true; message = error.localizedDescription }
     }
 
+    func canSelect(_ candidate: SmartCandidate) -> Bool {
+        resolution?.allowsSelection(of: candidate) == true &&
+            selections.count + selectionOptions(for: candidate).count <= SmartInput.targetLimit
+    }
+
+    private func selectionOptions(for candidate: SmartCandidate) -> [SmartSelection] {
+        let proposed = resolution?.selections ?? []
+        let original = proposed.filter { $0.candidateID == candidate.id }
+        if !original.isEmpty { return original }
+        // Only additional user-supplied links inherit common proposal options.
+        let formats = Set(proposed.map(\.format))
+        return [SmartSelection(candidateID: candidate.id, format: formats.count == 1 ? proposed[0].format : .inherit,
+                               skipExisting: !proposed.isEmpty && proposed.allSatisfy(\.skipExisting))]
+    }
+
     func setSelected(_ candidate: SmartCandidate, selected: Bool) {
-        if selected, !selections.contains(where: { $0.candidateID == candidate.id }),
-           selections.count < SmartInput.targetLimit {
-            // Unselected alternatives inherit the original proposal's common
-            // options only when every proposed target agreed on those options.
-            let proposed = resolution?.selections ?? []
-            let formats = Set(proposed.map(\.format))
-            selections.append(SmartSelection(candidateID: candidate.id, format: formats.count == 1 ? proposed[0].format : .inherit,
-                                              skipExisting: !proposed.isEmpty && proposed.allSatisfy(\.skipExisting)))
+        if selected, !selections.contains(where: { $0.candidateID == candidate.id }), canSelect(candidate) {
+            selections += selectionOptions(for: candidate)
         } else if !selected { selections.removeAll { $0.candidateID == candidate.id } }
     }
 }

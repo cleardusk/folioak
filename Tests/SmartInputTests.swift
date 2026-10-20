@@ -172,6 +172,36 @@ extension CoreTests {
                    "accepting a partial selection enqueues once and keeps unmet requirements visible")
         await reviewed.cancelAndWait()
 
+        // A raw search/page observation must not become a download just because
+        // it has a supported file extension or a UI tries to select it.
+        for origin in [SmartCandidate.Origin.search, .page] {
+            let resolver = DelayedSmartResolver(), transport = SmartInputTransport(pdf: pdf)
+            let model = DownloadModel(engine: DownloadEngine(transport: transport, pdfTransport: transport,
+                requestInterval: 0, retryDelay: 0), preferences: preferences,
+                smartSettings: settings, smartResolver: resolver)
+            let unrelated = SmartCandidate(id: "unrelated", title: "Unrelated paper",
+                url: URL(string: "https://example.org/unrelated.pdf")!, detail: "", origin: origin)
+            let result = SmartResolution(candidates: [unrelated], selections: [],
+                unresolved: ["未找到匹配的论文"], needsReview: true, modelCalls: 2, toolCalls: 1)
+            model.input = "查找指定论文"
+            model.start()
+            try await awaitSmart { await resolver.inputs.count == 1 }
+            await resolver.complete(0, with: result)
+            try await awaitSmart { model.smartInput.resolution != nil }
+            model.smartInput.setSelected(unrelated, selected: true)
+            try expect(model.smartInput.selections.isEmpty,
+                       "unmatched discovery cannot be checked in the review")
+            try rejects({
+                _ = try model.submitSmartDownload(result,
+                    selections: [SmartSelection(candidateID: unrelated.id, format: .inherit, skipExisting: false)],
+                    sessionID: UUID(), quick: false, defaultFormat: .automatic)
+            }, "host rejects unmatched discovery even if a caller supplies its ID")
+            try expect(model.items.isEmpty && !model.busy && model.input == "查找指定论文",
+                       "unmatched discovery preserves the draft and empty queue")
+            try expect(await transport.requests.isEmpty, "unmatched discovery starts no download")
+            model.smartInput.cancel()
+        }
+
         let actionResolver = DelayedSmartResolver(), actionTransport = SmartInputTransport(pdf: pdf)
         await actionTransport.suspend()
         let actionModel = DownloadModel(engine: DownloadEngine(transport: actionTransport, pdfTransport: actionTransport,
@@ -186,9 +216,13 @@ extension CoreTests {
         let first = proposal("first.pdf", review: true), second = proposal("chosen.pdf", review: true)
         let choice = SmartCandidate(id: "chosen", title: "Chosen", url: second.candidates[0].url, detail: "", origin: .search)
         await actionResolver.complete(0, with: SmartResolution(candidates: first.candidates + [choice],
-            selections: first.selections, unresolved: [], needsReview: true, modelCalls: 2, toolCalls: 1))
+            selections: first.selections + [SmartSelection(candidateID: choice.id, format: .inherit, skipExisting: false)],
+            unresolved: [], needsReview: true, modelCalls: 2, toolCalls: 1))
         try await awaitSmart { actionModel.smartInput.resolution != nil }
-        actionModel.smartInput.selections = [SmartSelection(candidateID: "chosen", format: .inherit, skipExisting: true)]
+        actionModel.smartInput.setSelected(choice, selected: false)
+        actionModel.smartInput.setSelected(choice, selected: true)
+        actionModel.smartInput.setSelected(first.candidates[0], selected: false)
+        actionModel.smartInput.selections[0].skipExisting = true
         actionModel.start()
         let actionCalls = await actionResolver.inputs.count
         try expect(actionModel.items.first?.original == choice.url.absoluteString &&

@@ -30,6 +30,13 @@ struct SmartResolution: Sendable {
     let needsReview: Bool
     let modelCalls: Int
     let toolCalls: Int
+
+    // Search observations are not download choices until the resolver has
+    // matched them. User-supplied links remain available for manual selection.
+    func allowsSelection(of candidate: SmartCandidate) -> Bool {
+        candidates.contains(candidate) &&
+            (candidate.origin == .supplied || selections.contains { $0.candidateID == candidate.id })
+    }
 }
 
 struct SmartSubmission {

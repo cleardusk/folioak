@@ -63,7 +63,8 @@ private struct SmartUINoNetwork: HTTPTransport {
         host.cacheDisplay(in: host.bounds, to: bitmap)
         return bitmap
     }
-    func verify(_ name: String, labels: [String], uniqueLabels: [String] = [], snapshots: Bool) throws {
+    func verify(_ name: String, labels: [String], uniqueLabels: [String] = [],
+                absentLabels: [String] = [], snapshots: Bool) throws {
         let bitmap = try image()
         if snapshots {
             let folder = URL(fileURLWithPath: "build/qa/smart-input", isDirectory: true)
@@ -89,6 +90,10 @@ private struct SmartUINoNetwork: HTTPTransport {
         for label in uniqueLabels {
             try expect(normalized(text).components(separatedBy: normalized(label)).count == 2,
                        "one smart UI action \(name): \(label); actual: \(text)")
+        }
+        for label in absentLabels {
+            try expect(!normalized(text).contains(normalized(label)),
+                       "absent smart UI action \(name): \(label); actual: \(text)")
         }
     }
 }
@@ -150,6 +155,11 @@ extension CoreTests {
                 try await waitForReview(model.smartInput)
                 try expect(model.smartInput.selections.filter { $0.candidateID == "talk" }.count == 2,
                            "review preserves both requested formats")
+                model.smartInput.setSelected(candidates[0], selected: false)
+                model.smartInput.setSelected(candidates[0], selected: true)
+                try expect(model.smartInput.selections.filter { $0.candidateID == "talk" } ==
+                           result.selections.filter { $0.candidateID == "talk" },
+                           "reselecting a matched resource restores its own formats and skip-existing options")
 
                 let status = SmartUISurface(SmartInputStatusView(state: model.smartInput, palette: palette, compact: true)
                     .padding(12).frame(width: 380).background(ThemePalette.color(palette.canvas))
@@ -245,6 +255,43 @@ extension CoreTests {
         try error.verify("error", labels: [L("智能服务暂时不可用，请稍后重试。")], snapshots: snapshots)
         error.window.close()
         failed.smartInput.cancel()
+
+        let notFound = makeModel(resolution: SmartResolution(candidates: [], selections: [],
+            unresolved: ["未找到匹配的论文，请补充作者或标题。"], needsReview: true, modelCalls: 3, toolCalls: 2))
+        notFound.input = "查找论文"
+        notFound.start()
+        try await waitForReview(notFound.smartInput)
+        let emptyReview = SmartUISurface(SmartInputStatusView(state: notFound.smartInput,
+            palette: notFound.theme.palette(dark: false)).padding(12), size: NSSize(width: 380, height: 130))
+        try await emptyReview.settle()
+        try expect(notFound.smartInput.message == nil && notFound.items.isEmpty,
+                   "no-match result keeps a single explanation and never creates a queue")
+        try emptyReview.verify("no-match", labels: ["未找到匹配的论文", L("取消")],
+            absentLabels: [L("下载所选"), L("已选 0 / 10")], snapshots: snapshots)
+        emptyReview.window.close()
+        notFound.start()
+        try expect(!notFound.smartInput.failed && notFound.smartInput.message == nil && notFound.items.isEmpty,
+                   "main submission with no matches is a no-op")
+        let emptyQuickState = QuickDownloadState(model: notFound)
+        emptyQuickState.draft = "查找论文"
+        emptyQuickState.submit()
+        try await waitForReview(emptyQuickState.smart)
+        let emptyQuick = SmartUISurface(QuickDownloadView(state: emptyQuickState, model: notFound,
+            openWindow: {}, openSettings: {}, quit: {}, close: {}), size: NSSize(width: 380, height: 540))
+        try await emptyQuick.settle()
+        guard let emptyEditor = SmartUISurface.descendants(emptyQuick.host).compactMap({ $0 as? QuickLinkEditor.Editor }).first,
+              let submit = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: emptyQuick.window.windowNumber,
+                context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+            throw TestFailure.failed("empty quick review mounts its native editor")
+        }
+        try expect(emptyEditor.performKeyEquivalent(with: submit) && !emptyQuickState.smart.failed &&
+                   emptyQuickState.smart.message == nil && emptyQuickState.smart.resolution != nil &&
+                   emptyQuickState.draft == "查找论文" && notFound.items.isEmpty,
+                   "Command Return on a no-match quick review preserves the explanation and draft")
+        emptyQuick.window.close()
+        emptyQuickState.smart.cancel()
+        notFound.smartInput.cancel()
 
         let longResult = SmartResolution(candidates: [candidates[1]],
             selections: [SmartSelection(candidateID: candidates[1].id, format: .inherit, skipExisting: false)],

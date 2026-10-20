@@ -59,7 +59,9 @@ struct SmartInputStatusView: View {
                     }
                     if !resolution.unresolved.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(L("未完成")).font(.system(size: 11, weight: .medium))
+                            if !resolution.candidates.isEmpty {
+                                Text(L("未完成")).font(.system(size: 11, weight: .medium))
+                            }
                             ScrollView {
                                 VStack(alignment: .leading, spacing: 4) {
                                     ForEach(Array(resolution.unresolved.enumerated()), id: \.offset) { _, requirement in
@@ -72,19 +74,23 @@ struct SmartInputStatusView: View {
                             .accessibilityIdentifier("smart-input-unresolved")
                     }
                     HStack(spacing: 12) {
-                        Text(L("已选 \(state.selections.count) / 10"))
-                            .font(.system(size: 11)).monospacedDigit().foregroundStyle(secondary)
+                        if !resolution.candidates.isEmpty {
+                            Text(L("已选 \(state.selections.count) / 10"))
+                                .font(.system(size: 11)).monospacedDigit().foregroundStyle(secondary)
+                        }
                         Spacer(minLength: 4)
                         Button(L("取消"), action: state.cancel)
                             .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(secondary)
                             .padding(.horizontal, 4).frame(minHeight: 36)
                             .keyboardShortcut(.cancelAction)
                             .accessibilityIdentifier("smart-input-cancel")
-                        Button(L("下载所选"), action: state.acceptSelection)
-                            .buttonStyle(PrimaryActionStyle(palette: palette))
-                            .keyboardShortcut(submitShortcut)
-                            .disabled(state.selections.isEmpty || state.selections.count > SmartInput.targetLimit)
-                            .accessibilityIdentifier("smart-input-accept")
+                        if !resolution.candidates.isEmpty {
+                            Button(L("下载所选"), action: state.acceptSelection)
+                                .buttonStyle(PrimaryActionStyle(palette: palette))
+                                .keyboardShortcut(submitShortcut)
+                                .disabled(state.selections.isEmpty || state.selections.count > SmartInput.targetLimit)
+                                .accessibilityIdentifier("smart-input-accept")
+                        }
                     }.padding(.top, 4)
                 }
             }
@@ -104,11 +110,11 @@ struct SmartInputStatusView: View {
                     .lineLimit(3).fixedSize(horizontal: false, vertical: true)
             }
             .toggleStyle(.checkbox)
-            .disabled(!selected && state.selections.count >= SmartInput.targetLimit)
+            .disabled(!selected && !state.canSelect(candidate))
             .accessibilityIdentifier("smart-input-candidate-" + candidate.id)
             VStack(alignment: .leading, spacing: 4) {
-                Link(candidate.url.host ?? candidate.url.absoluteString, destination: candidate.url)
-                    .font(.system(size: 11)).foregroundStyle(secondary).lineLimit(1)
+                Link(sourceLabel(candidate), destination: candidate.url)
+                    .font(.system(size: 11)).foregroundStyle(secondary).lineLimit(1).truncationMode(.middle)
                     .accessibilityLabel(L("查看来源") + " · " + candidate.title)
                 if !candidate.detail.isEmpty {
                     Text(candidate.origin == .supplied && candidate.detail == "用户提供的资源" ? L(candidate.detail) : candidate.detail)
@@ -140,6 +146,12 @@ struct SmartInputStatusView: View {
                 }
             }.padding(.leading, 20)
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sourceLabel(_ candidate: SmartCandidate) -> String {
+        let host = candidate.url.host ?? candidate.url.absoluteString
+        guard !candidate.url.pathExtension.isEmpty else { return host }
+        return host + " · " + candidate.url.lastPathComponent
     }
 
     private func format(_ index: Int, candidateID: String) -> Binding<SmartFormat> {
