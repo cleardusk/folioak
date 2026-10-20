@@ -709,35 +709,65 @@ extension CoreTests {
             view.layoutSubtreeIfNeeded()
         }
         try expect(LogScrollPosition(scroll: scroll).canScroll && LogScrollPosition(scroll: scroll).atBottom, "long variable-height logs start at latest entry; clip=\(scroll.contentView.bounds), content=\(String(describing: scroll.documentView?.bounds))")
-        func clickJump(settles: Bool = true) async {
+        func pressJump() {
             let point = NSPoint(x: view.bounds.maxX - 18, y: view.bounds.maxY - 18)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 window.sendEvent(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                     context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
             }
-            if settles { await settle() }
         }
-        await clickJump(settles: false)
-        try await Task.sleep(nanoseconds: 90_000_000)
-        let upwardPosition = scroll.contentView.bounds.minY
-        try expect(!LogScrollPosition(scroll: scroll).atTop && !LogScrollPosition(scroll: scroll).atBottom,
-                   "upward log jump exposes an intermediate frame")
-        await clickJump(settles: false)
-        try await Task.sleep(nanoseconds: 90_000_000)
-        try expect(scroll.contentView.bounds.minY < upwardPosition, "repeated arrow click continues upward until arrival")
-        await settle()
-        try expect(LogScrollPosition(scroll: scroll).atTop, "real log button reaches earliest entry after lazy row reflow")
-        await clickJump(settles: false)
-        try await Task.sleep(nanoseconds: 90_000_000)
-        let downwardPosition = scroll.contentView.bounds.minY
-        try expect(!LogScrollPosition(scroll: scroll).atTop && !LogScrollPosition(scroll: scroll).atBottom,
-                   "downward log jump exposes an intermediate frame")
-        await clickJump(settles: false)
-        try await Task.sleep(nanoseconds: 90_000_000)
-        try expect(scroll.contentView.bounds.minY > downwardPosition, "repeated arrow click continues downward until arrival")
-        await settle()
-        try expect(LogScrollPosition(scroll: scroll).atBottom, "arrow switches destination only after reaching the endpoint")
+        func clickJump() async { pressJump(); await settle() }
+        func animatedButtonJump(toBottom: Bool) async throws {
+            let start = scroll.contentView.bounds.minY
+            let began = ContinuousClock.now
+            var frames: [CGFloat] = []
+            var intermediate = false
+            var repeatedAt: CGFloat?
+            var repeatFrame = 0
+            var repeatClick: DispatchWorkItem?
+            // Observe actual native frames: a single sleep can resume after the
+            // entire animation when LazyVStack layout occupies the main thread.
+            let token = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+                object: scroll.contentView, queue: nil) { _ in
+                let metrics = LogScrollPosition(scroll: scroll)
+                if frames.count < 256 { frames.append(scroll.contentView.bounds.minY) }
+                guard !metrics.atTop && !metrics.atBottom,
+                      observer(view)?.followingLatest == toBottom else { return }
+                intermediate = true
+                guard repeatClick == nil else { return }
+                let work = DispatchWorkItem {
+                    let current = LogScrollPosition(scroll: scroll)
+                    guard !current.atTop && !current.atBottom else { return }
+                    repeatedAt = scroll.contentView.bounds.minY
+                    repeatFrame = frames.count
+                    pressJump()
+                }
+                repeatClick = work
+                // Keep native input out of the bounds-notification callback,
+                // but repeat from an observed moving frame, not a timed guess.
+                DispatchQueue.main.async(execute: work)
+            }
+            defer { NotificationCenter.default.removeObserver(token); repeatClick?.cancel() }
+            pressJump()
+            let deadline = began.advanced(by: .seconds(2))
+            while ContinuousClock.now < deadline {
+                let metrics = LogScrollPosition(scroll: scroll)
+                if repeatedAt != nil && (toBottom ? metrics.atBottom : metrics.atTop) { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            let direction = toBottom ? "downward" : "upward"
+            let diagnostics = "start=\(start), end=\(scroll.contentView.bounds.minY), repeated=\(String(describing: repeatedAt)), frames=\(frames.count), first=\(Array(frames.prefix(3))), last=\(Array(frames.suffix(3))), elapsed=\(began.duration(to: .now))"
+            try expect(intermediate, "\(direction) log jump exposes an intermediate frame: \(diagnostics)")
+            try expect(repeatedAt.map { origin in
+                frames.dropFirst(repeatFrame).contains { toBottom ? $0 > origin + 2 : $0 < origin - 2 }
+            } == true, "repeated arrow click continues \(direction) until arrival: \(diagnostics)")
+            await settle()
+            try expect(toBottom ? LogScrollPosition(scroll: scroll).atBottom : LogScrollPosition(scroll: scroll).atTop,
+                       "real log button reaches its endpoint after lazy row reflow: \(diagnostics)")
+        }
+        try await animatedButtonJump(toBottom: false)
+        try await animatedButtonJump(toBottom: true)
         await clickJump()
         try expect(LogScrollPosition(scroll: scroll).atTop, "arrival enables the next upward jump")
         // Deliver a real wheel event rather than synthesizing a live-scroll notification.

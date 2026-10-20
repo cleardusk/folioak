@@ -126,6 +126,9 @@ struct ControlFeedback: ViewModifier {
 }
 
 struct DownloaderView: View {
+    #if TESTING
+    static var selectionProbe: ((UUID, Set<UUID>, NSEvent.ModifierFlags) -> Void)?
+    #endif
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     private let initialPage: WorkspacePage?
@@ -477,7 +480,14 @@ struct DownloaderView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 16) {
                 if page == .downloads { composer }
-                if page == .logs { logContent } else {
+                if page == .logs { logContent }
+                else if page == .downloads && model.smartInput.resolution != nil {
+                    SmartInputStatusView(state: model.smartInput, palette: palette,
+                        submitShortcut: KeyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)),
+                                                   modifiers: model.shortcuts[.download].swiftModifiers))
+                        .padding(.horizontal, WorkspaceMetrics.Space.inset)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
                     papers.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.recordAnimation)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -494,6 +504,9 @@ struct DownloaderView: View {
     private func selectItem(_ id: UUID) {
         selection.select(id, visible: visibleItems.map(\.id), modifiers: NSApp.currentEvent?.modifierFlags ?? [],
                          multiple: libraryCollection != nil)
+        #if TESTING
+        Self.selectionProbe?(id, selection.ids, NSApp.currentEvent?.modifierFlags ?? [])
+        #endif
         inputFocused = false; listFocus = UUID()
     }
 
@@ -725,9 +738,10 @@ struct DownloaderView: View {
 
     private var composer: some View {
         let recognition = InputRecognition(model.input)
+        let reviewing = model.smartInput.resolution != nil
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: WorkspaceMetrics.Space.compact) {
-                Text(L("添加链接")).font(WorkspaceMetrics.TypeScale.title)
+                Text(L(model.smartSettings.enabled ? "添加资源" : "添加链接")).font(WorkspaceMetrics.TypeScale.title)
                 Spacer()
                 if model.hasMediaInput && model.mediaFormat == .audio {
                     Button { model.mediaFormat = .automatic } label: {
@@ -738,20 +752,27 @@ struct DownloaderView: View {
                 downloadActions
             }.buttonStyle(.plain)
                 .padding(.leading, WorkspaceMetrics.Space.inset).padding(.trailing, WorkspaceMetrics.Space.page)
-                .frame(height: WorkspaceMetrics.controlHeight)
-                .padding(.top, WorkspaceMetrics.Space.regular)
+                .frame(height: reviewing ? 28 : WorkspaceMetrics.controlHeight)
+                .padding(.top, reviewing ? WorkspaceMetrics.Space.compact : WorkspaceMetrics.Space.regular)
             LinkInput(model: model, focused: $inputFocused, palette: palette)
-                .frame(height: WorkspaceMetrics.inputHeight)
-                .padding(.horizontal, WorkspaceMetrics.Space.compact).padding(.top, WorkspaceMetrics.Space.compact)
+                .frame(height: reviewing ? 48 : WorkspaceMetrics.inputHeight)
+                .padding(.horizontal, WorkspaceMetrics.Space.compact)
+                .padding(.top, reviewing ? WorkspaceMetrics.Space.small : WorkspaceMetrics.Space.compact)
+            if !reviewing {
+                SmartInputStatusView(state: model.smartInput, palette: palette)
+                    .padding(.horizontal, WorkspaceMetrics.Space.inset)
+            }
             HStack(spacing: WorkspaceMetrics.Space.regular) {
                 DirectoryMenu(model: model, palette: palette)
-                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                    .frame(maxWidth: .infinity, minHeight: reviewing ? 28 : 40, alignment: .leading)
                 Spacer(minLength: WorkspaceMetrics.Space.compact)
-                InputRecognitionChips(recognition: recognition, palette: palette)
+                if !model.smartSettings.enabled || SmartInput.isDirect(model.input) {
+                    InputRecognitionChips(recognition: recognition, palette: palette)
+                }
                 primaryAction(recognition: recognition)
             }.padding(.horizontal, WorkspaceMetrics.Space.inset)
-                .padding(.top, WorkspaceMetrics.Space.regular)
-                .padding(.bottom, WorkspaceMetrics.Space.section)
+                .padding(.top, reviewing ? WorkspaceMetrics.Space.small : WorkspaceMetrics.Space.regular)
+                .padding(.bottom, reviewing ? WorkspaceMetrics.Space.compact : WorkspaceMetrics.Space.section)
         }
         .background(ThemePalette.color(palette.surface).contentShape(Rectangle()).onTapGesture {
             if model.busy { dismissEditing() } else { model.focusInput() }
@@ -774,7 +795,9 @@ struct DownloaderView: View {
     }
 
     @ViewBuilder private func primaryAction(recognition: InputRecognition) -> some View {
-        if model.busy {
+        if model.smartInput.resolving {
+            EmptyView()
+        } else if model.busy {
             Button(action: model.cancel) {
                 HStack(spacing: 6) {
                     if model.cancelling { ProgressView().controlSize(.small).tint(ThemePalette.color(palette.onAction)); Text(L("正在取消")) }
@@ -784,18 +807,21 @@ struct DownloaderView: View {
                 .keyboardShortcut(searchFocused ? nil : .cancelAction).disabled(model.cancelling)
                 .help(model.cancelling ? L("正在取消") : L("取消下载（Esc）"))
                 .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
-        } else {
+        } else if model.smartInput.resolution == nil {
             let count = recognition.total
+            let actionLabel = model.smartSettings.enabled && !SmartInput.isDirect(model.input) ? L("智能下载") :
+                count == 0 ? L("开始下载") : L("下载 \(count) 项")
             Button(action: model.start) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down").font(.system(size: 12, weight: .bold))
-                    Text(count == 0 ? L("开始下载") : L("下载 \(count) 项")).monospacedDigit()
+                    Text(actionLabel).monospacedDigit()
                 }
             }
                 .buttonStyle(PrimaryActionStyle(palette: palette))
                 .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
-                .disabled(count == 0).help(L("开始下载（\(model.shortcuts[.download].label)）"))
-                .accessibilityLabel(L("开始下载"))
+                .disabled(count == 0)
+                .help(L("开始下载（\(model.shortcuts[.download].label)）"))
+                .accessibilityLabel(actionLabel)
         }
     }
 

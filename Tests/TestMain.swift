@@ -95,6 +95,9 @@ actor MockTransport: HTTPTransport {
 struct CoreTests {
     @MainActor static func main() {
         setbuf(stdout, nil)
+        // Native fixtures need a window-capable host, including after another
+        // fixture deactivates the app. Accessory avoids a test Dock icon.
+        NSApplication.shared.setActivationPolicy(.accessory)
         // Native sheets can stop a run-loop iteration. Swift's async-main drain
         // then exits with status 0, so keep the host alive until the suite returns.
         var completed = false
@@ -112,6 +115,18 @@ struct CoreTests {
         AppLocalization.shared.language = .chinese
         print("TEST language: system=\(AppLanguage.system.code()), suite=\(L10n.language.rawValue)")
         do {
+            if CommandLine.arguments.contains("--smart-live") {
+                try await smartResolverLiveTests(); return
+            }
+            if CommandLine.arguments.contains("--smart-only") || !CommandLine.arguments.contains(where: { $0.hasSuffix("-only") || $0.hasSuffix("-live") }) {
+                try smartSettingsTests()
+                try await smartResolverTests()
+                try await smartInputTests()
+                try await smartInputUITests(snapshots: CommandLine.arguments.contains("--snapshots"))
+            }
+            if CommandLine.arguments.contains("--smart-only") {
+                return
+            }
             if CommandLine.arguments.contains("--trace-only") {
                 try await interactionTraceTests()
                 if CommandLine.arguments.contains("--snapshots") { try await interactionTraceSnapshots() }
@@ -895,7 +910,10 @@ struct CoreTests {
     }
 
     @MainActor static func resourceTests(root: URL, pdf: URL) async throws {
-        NSApplication.shared.setActivationPolicy(.prohibited)
+        let app = NSApplication.shared
+        let previousPolicy = app.activationPolicy()
+        app.setActivationPolicy(.prohibited)
+        defer { app.setActivationPolicy(previousPolicy) }
         let suiteName = "arxiv-stress-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suiteName)!
         defer { preferences.removePersistentDomain(forName: suiteName) }
@@ -931,7 +949,9 @@ struct CoreTests {
         let preferences = UserDefaults(suiteName: suiteName)!
         defer { preferences.removePersistentDomain(forName: suiteName) }
         let app = NSApplication.shared
+        let previousPolicy = app.activationPolicy()
         app.setActivationPolicy(.prohibited)
+        defer { app.setActivationPolicy(previousPolicy) }
         let model = DownloadModel(preferences: preferences)
         let view = NSHostingView(rootView: DownloaderView(model: model))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
@@ -1068,7 +1088,9 @@ struct CoreTests {
         let preferences = UserDefaults(suiteName: suiteName)!
         defer { preferences.removePersistentDomain(forName: suiteName) }
         let app = NSApplication.shared
+        let previousPolicy = app.activationPolicy()
         app.setActivationPolicy(.prohibited)
+        defer { app.setActivationPolicy(previousPolicy) }
         let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/qa")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         func capture<V: View>(_ content: V, width: Int, height: Int? = nil, name: String, title: String = "arXiv下载器") throws {

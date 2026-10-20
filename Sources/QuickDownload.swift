@@ -3,14 +3,20 @@ import SwiftUI
 import Combine
 
 @MainActor final class QuickDownloadState: ObservableObject {
-    @Published var draft = "" { didSet { message = nil; failed = false } }
+    @Published var draft = "" { didSet { message = nil; failed = false; smart.inputChanged(draft) } }
     @Published private(set) var message: String?
     @Published private(set) var failed = false
     @Published var focusRequest = UUID()
     @Published private(set) var resultError: String?
     let model: DownloadModel
+    let smart: SmartDownloadState
+    private var smartChanges: AnyCancellable?
 
-    init(model: DownloadModel) { self.model = model }
+    init(model: DownloadModel) {
+        self.model = model
+        smart = SmartDownloadState(model: model, quick: true)
+        smartChanges = smart.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+    }
 
     var recentItems: [DownloadItem] {
         Array(model.downloads.filter { $0.preservesInput == true }
@@ -18,6 +24,7 @@ import Combine
     }
     var status: String {
         if model.busy { return model.summary }
+        if smart.resolving || smart.resolution != nil { return smart.progress?.label ?? "就绪" }
         return recentItems.first?.state.label ?? "就绪"
     }
     func open(_ item: DownloadItem, reveal: Bool = false) {
@@ -36,6 +43,21 @@ import Combine
     }
 
     func submit() {
+        if smart.resolving { return }
+        if smart.resolution != nil {
+            smart.acceptSelection()
+            return
+        }
+        if model.smartSettings.enabled && !SmartInput.isDirect(draft) {
+            message = nil; failed = false; resultError = nil
+            let original = draft
+            smart.submit(original) { [weak self] fullyResolved in
+                guard fullyResolved, self?.draft == original else { return }
+                self?.draft = ""
+            }
+            return
+        }
+        smart.cancel()
         do {
             let count = try model.submitQuickDownload(draft)
             resultError = nil
@@ -75,10 +97,10 @@ struct QuickDownloadView: View {
                     .accessibilityLabel(L("更多操作"))
             }
             ZStack(alignment: .topLeading) {
-                QuickLinkEditor(text: $state.draft, focusRequest: state.focusRequest, submit: state.submit, close: close, rejected: state.inputTooLarge, captureTrace: { accepted in model.trace.user(accepted ? .inputCaptured : .inputRejected, context: .quickPanel, outcome: accepted ? .succeeded : .failed) })
-                    .frame(height: 112)
+                QuickLinkEditor(text: $state.draft, focusRequest: state.focusRequest, submit: state.submit, close: close, rejected: state.inputTooLarge, captureTrace: { accepted in model.trace.user(accepted ? .inputCaptured : .inputRejected, context: .quickPanel, outcome: accepted ? .succeeded : .failed) }, captureInput: model.captureInput)
+                    .frame(height: state.smart.resolution == nil ? 112 : 72)
                 if state.draft.isEmpty {
-                    Text(L("粘贴链接，每行一条"))
+                    Text(L(model.smartSettings.enabled ? "粘贴链接，或描述想保存的资料" : "粘贴链接，每行一条"))
                         .font(.system(size: 13)).foregroundStyle(ThemePalette.color(palette.secondary))
                         .padding(.horizontal, 9).padding(.vertical, 8).allowsHitTesting(false)
                 }
@@ -92,19 +114,22 @@ struct QuickDownloadView: View {
                 }.buttonStyle(.plain).foregroundStyle(ThemePalette.color(palette.secondary))
                     .help(model.directory.path).accessibilityLabel(L("打开保存位置"))
                 Spacer(minLength: 0)
-                Button(L(model.busy ? "加入队列" : "开始下载"), action: state.submit)
-                    .buttonStyle(QuietButtonStyle(palette: palette))
-                    .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling)
-                    .help(L("⌘ Return 下载"))
-                    .accessibilityIdentifier("quick-download-submit")
+                if state.smart.resolution == nil {
+                    Button(L(model.busy ? "加入队列" : "开始下载"), action: state.submit)
+                        .buttonStyle(QuietButtonStyle(palette: palette))
+                        .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling || state.smart.resolving)
+                        .help(L("⌘ Return 下载"))
+                        .accessibilityIdentifier("quick-download-submit")
+                }
             }
+            SmartInputStatusView(state: state.smart, palette: palette, compact: true)
             if let message = state.message, state.failed || state.recentItems.contains(where: { !$0.state.terminal }) {
                 Label(L(message), systemImage: state.failed ? "exclamationmark.circle" : "checkmark.circle")
                     .font(.system(size: 12)).foregroundStyle(state.failed ? UIColors.error : UIColors.success)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("quick-download-feedback")
             }
-            if !state.recentItems.isEmpty {
+            if !state.recentItems.isEmpty && state.smart.resolution == nil {
                 Divider()
                 VStack(alignment: .leading, spacing: 10) {
                     Text(L("最近下载")).font(.system(size: 11)).foregroundStyle(ThemePalette.color(palette.secondary))
@@ -235,6 +260,7 @@ struct QuickLinkEditor: NSViewRepresentable {
     let close: () -> Void
     let rejected: () -> Void
     var captureTrace: ((Bool) -> Void)? = nil
+    var captureInput: (String) throws -> String = PaperInput.captured
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -255,6 +281,8 @@ struct QuickLinkEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? Editor else { return }
         editor.submit = submit; editor.close = close; editor.captureTrace = captureTrace
+        editor.captureInput = captureInput
+        editor.rejected = rejected
         editor.textColor = .labelColor; editor.insertionPointColor = .labelColor
         editor.setAccessibilityLabel(L("下载链接"))
         if editor.string != text { editor.string = text; editor.undoManager?.removeAllActions() }
@@ -282,8 +310,10 @@ struct QuickLinkEditor: NSViewRepresentable {
     final class Editor: NSTextView {
         var submit: () -> Void = {}
         var close: () -> Void = {}
+        var rejected: () -> Void = {}
         var focusRequest: UUID?
         var captureTrace: ((Bool) -> Void)?
+        var captureInput: (String) throws -> String = PaperInput.captured
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
             let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
             if (event.keyCode == 36 || event.keyCode == 76) && modifiers == .command { submit(); return true }
@@ -296,11 +326,11 @@ struct QuickLinkEditor: NSViewRepresentable {
             super.keyDown(with: event)
         }
         override func paste(_ sender: Any?) {
-            guard let raw = NSPasteboard.general.string(forType: .string), let captured = try? PaperInput.captured(raw) else {
-                super.paste(sender); return
-            }
-            insertText(captured, replacementRange: selectedRange())
-            captureTrace?(true)
+            guard let raw = NSPasteboard.general.string(forType: .string) else { return }
+            do {
+                insertText(try captureInput(raw), replacementRange: selectedRange())
+                captureTrace?(true)
+            } catch { captureTrace?(false); rejected() }
         }
     }
 }

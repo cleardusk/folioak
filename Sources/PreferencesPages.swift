@@ -7,8 +7,8 @@ struct WorkspaceSettingsView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.colorSchemeContrast) private var contrast
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
-    private let categories = ["通用", "命名规则", "快捷键", "浏览器认证"]
-    private let identifiers = ["general", "naming", "shortcuts", "authentication"]
+    private let categories = ["通用", "命名规则", "快捷键", "浏览器认证", "智能输入"]
+    private let identifiers = ["general", "naming", "shortcuts", "authentication", "smart-input"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -16,7 +16,9 @@ struct WorkspaceSettingsView: View {
                 FilterTabs(options: categories, selection: Binding(get: { model.settingsTab }, set: { category in
                     guard let index = categories.firstIndex(of: category), model.settingsTab != category else { return }
                     model.settingsTab = category
-                    model.trace.user(.pageChanged, context: .settings, detail: index == 0 ? .general : index == 1 ? .naming : index == 2 ? .shortcuts : .authentication)
+                    if index < 4 {
+                        model.trace.user(.pageChanged, context: .settings, detail: index == 0 ? .general : index == 1 ? .naming : index == 2 ? .shortcuts : .authentication)
+                    }
                 }), title: { L($0) }, palette: palette, accessibilityIdentifier: { category in
                     "preferences-category-" + identifiers[categories.firstIndex(of: category) ?? 0]
                 })
@@ -40,6 +42,10 @@ struct WorkspaceSettingsView: View {
                     .frame(maxWidth: 680, alignment: .leading).padding(.trailing, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .modifier(PreferencesCategoryVisibility(visible: model.settingsTab == "浏览器认证"))
+                SmartSettingsView(settings: model.smartSettings, palette: palette)
+                    .frame(maxWidth: 680, alignment: .leading).padding(.trailing, 16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(PreferencesCategoryVisibility(visible: model.settingsTab == "智能输入"))
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .foregroundStyle(ThemePalette.color(palette.text)).tint(ThemePalette.color(palette.accent))

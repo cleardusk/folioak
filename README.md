@@ -26,13 +26,17 @@ Folioak checks for stable updates daily while running. Automatic checks can be d
 2. Find saved files in the document or media library. Switch between list and grid, double-click to open, or press Space to preview. Clearing download history keeps library entries and files.
 3. Set your save location, language, and appearance in Settings. Naming Rules supports `{title}`, `{date}`, `{source}`, and `{id}` with a live preview; existing files are never overwritten.
 
+**Intelligent Input (v3):** save your own DeepSeek API key in Settings → Intelligent Input and enable it. Describe a paper, select links with conditions such as “only the second video's audio,” or ask for a project's paper and supplementary files. Both the main window and menu bar support this. Plain links and identifiers stay local. Search and page discoveries require review before downloading; format and skip-existing options apply to each output, and missing materials remain explicit.
+
+Each request has at most three model calls, two search/static-page calls, and a 15-second parsing budget. Downloads are separate, and the budget does not guarantee a successful match. Page inspection supports public static links without login, scripts, or recursive crawling. Local skipping requires a matching source, explicit version, output format, and existing file; unversioned arXiv requests still use the engine to check the current version.
+
 New installations save to `~/Downloads/Folioak`, organized by file type. Settings → General → PDF folder can send new papers and PDFs directly to a separate folder (off by default); existing files stay in place. The [CLI](CLI-README.md) shares these settings, with explicit `-o` / `--output` taking priority for all files in that run.
 
 Themes include the original six palettes plus **VS Code, One Dark, Dracula, Nord, Solarized, and Gruvbox**, each with light and dark appearances. Settings categories use the library's sliding underline, with horizontal scrolling, arrow-key navigation, and Reduce Motion support.
 
 **Site limits:** media downloads are anonymous by default. For supported sites that need sign-in, enable Settings → Browser Authentication and choose an already signed-in browser. Access and quality still depend on the site, network, and account. Playlists, profiles, and image-only posts are unsupported. Keep access parameters in Xiaohongshu video share links (`xhslink.com` short links also work); use full `/video/ID/` URLs for Toutiao.
 
-**Privacy:** preferences, history, and logs stay on this Mac; there is no uploaded telemetry, cloud sync, or background folder scanning. Optional interaction recording is off by default and excludes input text, filenames, full URLs, and cookies. Browser authentication may request macOS permissions and create temporary browser database copies; Cookie contents are not stored in preferences, history, or logs. See [security and privacy details (中文)](SECURITY-AUDIT.md).
+**Privacy:** preferences, history, and logs stay on this Mac; there is no uploaded telemetry, cloud sync, or background folder scanning. When Intelligent Input is enabled, submitted intelligent requests, search queries, and page content used for interpretation are sent to DeepSeek. API keys stay in macOS Keychain. Optional interaction recording is off by default and excludes input text, filenames, full URLs, and cookies. Browser authentication may request macOS permissions and create temporary browser database copies; Cookie contents are not stored in preferences, history, or logs. See [security and privacy details (中文)](SECURITY-AUDIT.md).
 
 ## Develop
 

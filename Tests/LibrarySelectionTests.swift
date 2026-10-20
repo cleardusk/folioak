@@ -173,33 +173,32 @@ extension CoreTests {
             var found = false
             var titles: [String] = []
             var trackedMenu: NSMenu?
-            var actionFinished = false
+            var actionIndex: Int?
             var trackingEnded = false
-            var dispatchAction: Timer?
+            var dismissMenu: Timer?
             let point = NSPoint(x: view.bounds.width - 40, y: view.isFlipped ? 38 : view.bounds.height - 38)
             let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { notification in
                 guard let menu = notification.object as? NSMenu, trackedMenu == nil else { return }
                 trackedMenu = menu
                 titles = menu.items.map(\.title)
                 let index = menu.items.firstIndex(where: { $0.title == title })
+                actionIndex = index
                 found = index.map { menu.items[$0].isEnabled } ?? false
                 // Cancelling synchronously inside didBeginTracking leaves a
-                // SwiftUI Menu pressed and prevents later openings. Let AppKit
-                // enter tracking before dispatching this native menu action.
-                let action = Timer(timeInterval: 0, repeats: false) { _ in
-                    if perform, found, let index { menu.performActionForItem(at: index) }
+                // SwiftUI Menu pressed. Dismiss after tracking starts; dispatch
+                // the captured native action only after tracking has ended.
+                let dismissal = Timer(timeInterval: 0, repeats: false) { _ in
                     menu.cancelTrackingWithoutAnimation()
-                    actionFinished = true
                 }
-                dispatchAction = action
-                RunLoop.main.add(action, forMode: .eventTracking)
+                dismissMenu = dismissal
+                RunLoop.main.add(dismissal, forMode: .eventTracking)
             }
             let endObserver = NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: nil) { notification in
                 guard let menu = notification.object as? NSMenu, menu === trackedMenu else { return }
                 trackingEnded = true
             }
             defer {
-                dispatchAction?.invalidate()
+                dismissMenu?.invalidate()
                 NotificationCenter.default.removeObserver(observer)
                 NotificationCenter.default.removeObserver(endObserver)
             }
@@ -208,16 +207,27 @@ extension CoreTests {
             // and its responder restoration on slower AppKit/CI environments.
             for _ in 0..<20 {
                 await settle()
-                if actionFinished && trackingEnded { break }
+                if trackingEnded { break }
             }
-            if !found || !actionFinished || !trackingEnded {
+            dismissMenu?.invalidate()
+            if !found || !trackingEnded {
                 try snapshot("menu-failure")
                 print("LIBRARY MENU AFTER", page.rawValue, language.rawValue, scheme, title,
-                      "actionFinished", actionFinished, "trackingEnded", trackingEnded, "hit", String(describing: view.hitTest(point)),
+                      "trackingEnded", trackingEnded, "hit", String(describing: view.hitTest(point)),
                       "responder", String(describing: window.firstResponder), "actualKey", NSApp.keyWindow === window)
             }
             try expect(found, "native \(page.rawValue) menu exposes enabled \(title): \(titles)")
-            try expect(actionFinished && trackingEnded, "native library menu finishes tracking before the next UI action")
+            try expect(trackingEnded, "native library menu finishes tracking before the next UI action")
+            if perform {
+                guard let menu = trackedMenu, let index = actionIndex else {
+                    throw TestFailure.failed("native library menu retains its verified action")
+                }
+                // A native menu may end before a zero-delay tracking timer runs.
+                // Keep action delivery in the ordinary test flow so it cannot
+                // be lost when tracking closes or a resulting sheet takes focus.
+                menu.performActionForItem(at: index)
+                await settle()
+            }
         }
         func search(_ query: String) async throws {
             model.searchRequest = UUID()
