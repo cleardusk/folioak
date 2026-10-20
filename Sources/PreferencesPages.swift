@@ -42,7 +42,8 @@ struct WorkspaceSettingsView: View {
                     .frame(maxWidth: 680, alignment: .leading).padding(.trailing, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .modifier(PreferencesCategoryVisibility(visible: model.settingsTab == "浏览器认证"))
-                SmartSettingsView(settings: model.smartSettings, palette: palette)
+                SmartSettingsView(settings: model.smartSettings, palette: palette,
+                                  isActive: model.settingsTab == "智能输入" && model.preferencesPage == .settings)
                     .frame(maxWidth: 680, alignment: .leading).padding(.trailing, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .modifier(PreferencesCategoryVisibility(visible: model.settingsTab == "智能输入"))

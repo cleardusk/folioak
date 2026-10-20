@@ -46,12 +46,12 @@ import Combine
     }
 
     func submit() {
-        if smart.resolving { return }
+        if smart.resolving || smart.needsSetup { return }
         if smart.resolution != nil {
             smart.acceptSelection()
             return
         }
-        if model.smartSettings.enabled && !SmartInput.isDirect(draft) {
+        if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !SmartInput.isDirect(draft) {
             message = nil; failed = false; resultError = nil
             let original = draft
             smart.submit(original) { [weak self] fullyResolved in
@@ -111,7 +111,7 @@ struct QuickDownloadView: View {
                             .help(state.draft)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 } else if state.draft.isEmpty {
-                    Text(L(model.smartSettings.enabled ? "粘贴链接，或描述想保存的资料" : "粘贴链接，每行一条"))
+                    Text(L("粘贴链接，或描述想保存的资料"))
                         .font(.system(size: 13)).foregroundStyle(ThemePalette.color(palette.secondary))
                         .padding(.horizontal, 9).padding(.vertical, 8).allowsHitTesting(false)
                 }
@@ -133,7 +133,7 @@ struct QuickDownloadView: View {
                 if reviewing {
                     SmartInputReviewActionsView(state: state.smart, palette: palette, onEdit: returnToEditing)
                 } else if !state.smart.resolving {
-                    Button(L(model.smartSettings.enabled && !SmartInput.isDirect(state.draft) && !state.draft.isEmpty
+                    Button(L(!SmartInput.isDirect(state.draft) && !state.draft.isEmpty
                              ? "查找资源" : model.busy ? "加入队列" : "开始下载"), action: state.submit)
                         .buttonStyle(QuietButtonStyle(palette: palette))
                         .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling || state.smart.resolving)
@@ -190,6 +190,14 @@ struct QuickDownloadView: View {
         .foregroundStyle(ThemePalette.color(palette.text))
         .background(ThemePalette.color(palette.canvas))
         .environment(\.locale, L10n.locale)
+        .sheet(isPresented: Binding(get: { state.smart.needsSetup }, set: { if !$0 && state.smart.needsSetup { state.smart.cancel() } })) {
+            SmartConnectionForm(settings: model.smartSettings, palette: palette, continuesRequest: true,
+                                requiresNewKey: state.smart.requiresNewKey,
+                                connectionOwner: state.smart.setupConnectionOwner,
+                                onConnected: state.smart.resumeAfterSetup, onCancel: state.smart.cancel)
+                .padding(20).frame(width: 340)
+                .background(ThemePalette.color(palette.canvas))
+        }
     }
 
     private func returnToEditing() {
@@ -460,6 +468,9 @@ struct QuickLinkEditor: NSViewRepresentable {
         if button.isHighlighted != selected { button.highlight(selected) }
     }
     func popoverWillShow(_ notification: Notification) { setStatusSelected(true); state.model.trace.record(.quickPanelShown, context: .quickPanel) }
+    func popoverWillClose(_ notification: Notification) {
+        if state.smart.needsSetup { state.smart.cancel() }
+    }
     func popoverDidClose(_ notification: Notification) { setStatusSelected(actionMenuIsOpen); state.model.trace.record(.quickPanelHidden, context: .quickPanel) }
     func menuWillOpen(_ menu: NSMenu) { actionMenuIsOpen = true; setStatusSelected(true) }
     func menuDidClose(_ menu: NSMenu) { actionMenuIsOpen = false; setStatusSelected(popover.isShown) }

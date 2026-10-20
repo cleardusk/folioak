@@ -1,5 +1,24 @@
 import Foundation
 
+enum SmartThinkingEffort: String, CaseIterable, Sendable {
+    case off, low, high, max
+
+    var label: String {
+        switch self {
+        case .off: return "关闭（省用量）"
+        case .low: return "低"
+        case .high: return "高"
+        case .max: return "最高"
+        }
+    }
+    var deadline: TimeInterval {
+        switch self { case .off: return 15; case .low: return 25; case .high: return 45; case .max: return 60 }
+    }
+    var maxOutputTokens: Int {
+        switch self { case .off: return 1200; case .low: return 2400; case .high: return 4800; case .max: return 8000 }
+    }
+}
+
 // The model proposes a selection. Only DownloadModel can accept a download.
 enum SmartFormat: String, Codable, Sendable, CaseIterable {
     case inherit, video, audio
@@ -30,6 +49,14 @@ struct SmartSelection: Equatable, Sendable {
     var skipExisting: Bool
 }
 
+// API-reported counts only. Missing or incomplete usage is not estimated.
+struct SmartTokenUsage: Equatable, Sendable {
+    let inputTokens: Int
+    let outputTokens: Int
+    let totalTokens: Int
+    let cacheHitTokens: Int?
+}
+
 struct SmartResolution: Sendable {
     let candidates: [SmartCandidate]
     let selections: [SmartSelection]
@@ -37,6 +64,14 @@ struct SmartResolution: Sendable {
     let needsReview: Bool
     let modelCalls: Int
     let toolCalls: Int
+    let usage: SmartTokenUsage?
+
+    init(candidates: [SmartCandidate], selections: [SmartSelection], unresolved: [String],
+         needsReview: Bool, modelCalls: Int, toolCalls: Int, usage: SmartTokenUsage? = nil) {
+        self.candidates = candidates; self.selections = selections; self.unresolved = unresolved
+        self.needsReview = needsReview; self.modelCalls = modelCalls; self.toolCalls = toolCalls
+        self.usage = usage
+    }
 
     // Search observations are not download choices until the resolver has
     // matched them. User-supplied links remain available for manual selection.
@@ -65,8 +100,15 @@ enum SmartProgress: Sendable {
 }
 
 protocol SmartResolving {
-    func resolve(_ input: String, apiKey: String,
+    func resolve(_ input: String, apiKey: String, thinking: SmartThinkingEffort,
                  progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution
+}
+
+extension SmartResolving {
+    func resolve(_ input: String, apiKey: String,
+                 progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution {
+        try await resolve(input, apiKey: apiKey, thinking: .off, progress: progress)
+    }
 }
 
 enum SmartInput {

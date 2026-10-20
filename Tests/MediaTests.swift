@@ -414,26 +414,40 @@ extension CoreTests {
         preferences.set(legacyFolder.path, forKey: "saveDirectory")
         preferences.set(root.appendingPathComponent("legacy-media").path, forKey: "mediaSaveDirectory")
         let home = root.appendingPathComponent("test-home", isDirectory: true)
+        let newerDefault = home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
         let defaults = DownloadPreferences(preferences, home: home)
-        try expect(defaults.directory.path.hasSuffix("/Downloads/Folioak") && preferences.string(forKey: "saveDirectory") == legacyFolder.path,
+        try expect(defaults.directory == newerDefault && preferences.string(forKey: "saveDirectory") == legacyFolder.path,
                    "one new default root does not reinterpret or overwrite legacy paths")
+        try expect(preferences.string(forKey: "downloadRootDirectory") == nil &&
+                   !FileManager.default.fileExists(atPath: newerDefault.path),
+                   "reading an unconfigured default does not write preferences or create folders")
         let oldDefault = home.appendingPathComponent("Downloads/Leafpick", isDirectory: true)
         try FileManager.default.createDirectory(at: oldDefault, withIntermediateDirectories: true)
-        try expect(DownloadPreferences(preferences, home: home).directory == oldDefault,
-                   "an existing old default without a preference survives renaming")
-        let newerDefault = home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
+        let marker = oldDefault.appendingPathComponent("existing-file.txt")
+        try Data("preserved".utf8).write(to: marker)
+        try expect(DownloadPreferences(preferences, home: home).directory == newerDefault,
+                   "an unconfigured Leafpick folder cannot override the fresh Folioak default")
         let previousDefault = home.appendingPathComponent("Downloads/Leafpeak", isDirectory: true)
         try FileManager.default.createDirectory(at: newerDefault, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: previousDefault, withIntermediateDirectories: true)
-        try expect(DownloadPreferences(preferences, home: home).directory == oldDefault,
-                   "installing a new default folder does not divert an existing old folder")
-        try FileManager.default.removeItem(at: oldDefault)
-        try expect(DownloadPreferences(preferences, home: home).directory == previousDefault,
-                   "the most recent legacy brand folder is retained when it exists alone")
-        preferences.set(legacyFolder.path, forKey: "downloadRootDirectory")
-        try expect(DownloadPreferences(preferences, home: home).directory.path == legacyFolder.path,
-                   "an explicit root takes precedence over the old default")
+        try expect(DownloadPreferences(preferences, home: home).directory == newerDefault,
+                   "legacy folders alongside Folioak do not infer a saved configuration")
+        for configured in [oldDefault, previousDefault, legacyFolder, root.appendingPathComponent("custom-not-created")] {
+            preferences.set(configured.path, forKey: "downloadRootDirectory")
+            let restored = DownloadPreferences(preferences, home: home)
+            try expect(restored.directory.path == configured.path &&
+                       preferences.string(forKey: "downloadRootDirectory") == configured.path,
+                       "explicit old-brand and custom roots remain unchanged even before their folder exists")
+            let reopened = DownloadModel(engine: DownloadEngine(), preferences: preferences)
+            try expect(reopened.directory.path == configured.path &&
+                       preferences.string(forKey: "downloadRootDirectory") == configured.path,
+                       "app initialization preserves the configured root across product renames")
+        }
+        try expect(try Data(contentsOf: marker) == Data("preserved".utf8),
+                   "default resolution never moves or modifies existing legacy files")
         preferences.removeObject(forKey: "downloadRootDirectory")
+        try expect(DownloadPreferences(preferences, home: home).directory == newerDefault,
+                   "removing a saved root returns to Folioak instead of rediscovering old folders")
         let folder = root.appendingPathComponent("organized", isDirectory: true), next = root.appendingPathComponent("next-organized", isDirectory: true)
         let pdf = root.appendingPathComponent("category.pdf"); try createPDF(at: pdf)
         let engine = DownloadEngine(transport: MockTransport(sourcePDF: pdf), pdfTransport: MockTransport(sourcePDF: image), requestInterval: 0, retryDelay: 0)

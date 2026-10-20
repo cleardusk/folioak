@@ -119,7 +119,7 @@ struct CoreTests {
                 try await smartResolverLiveTests(); return
             }
             if CommandLine.arguments.contains("--smart-only") || !CommandLine.arguments.contains(where: { $0.hasSuffix("-only") || $0.hasSuffix("-live") }) {
-                try smartSettingsTests()
+                try await smartSettingsTests()
                 try await smartResolverTests()
                 try await smartInputTests()
                 try await smartInputUITests(snapshots: CommandLine.arguments.contains("--snapshots"))
@@ -143,6 +143,12 @@ struct CoreTests {
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
                 defer { try? FileManager.default.removeItem(at: root) }
                 let pdf = root.appendingPathComponent("fixture.pdf"); try createPDF(at: pdf)
+                let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8,
+                    samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+                let image = root.appendingPathComponent("fixture.png")
+                try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+                try await categoryDestinationTests(root: root, image: image)
+                try await cliTests(root: root, pdf: pdf)
                 try await pdfDirectoryTests(root: root, pdf: pdf)
                 try await genericPDFTests(root: root, pdf: pdf)
                 try await WorkspacePreferencesTests.run(snapshots: CommandLine.arguments.contains("--snapshots"))

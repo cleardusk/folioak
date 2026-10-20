@@ -405,10 +405,174 @@ extension CoreTests {
         } catch SmartResolverError.rateLimited {}
         let throttledRequests = await throttledSearch.requests
         try expect(throttledRequests.count == 2, "rate-limited search never triggers an immediate retry")
+        try await smartThinkingTests()
         #if TESTING
         try await smartAPITransportTests()
         #endif
         print("PASS smart resolver protocol, observations, static page extraction, budgets and cancellation")
+    }
+
+    private static func smartThinkingTests() async throws {
+        func usage(_ input: Int, _ output: Int, _ cache: Int) -> [String: Any] {
+            ["prompt_tokens": input, "completion_tokens": output, "total_tokens": input + output,
+             "prompt_cache_hit_tokens": cache]
+        }
+        func call(_ name: String, _ arguments: [String: Any], reasoning: Any? = nil,
+                  content: String? = nil, usage: [String: Any]? = nil) throws -> [String: Any] {
+            let encoded = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+            var message: [String: Any] = ["role": "assistant", "content": content as Any? ?? NSNull(),
+                "tool_calls": [["id": "thinking-call", "type": "function",
+                                "function": ["name": name, "arguments": encoded]]]]
+            if let reasoning { message["reasoning_content"] = reasoning }
+            var response: [String: Any] = ["choices": [["finish_reason": "tool_calls", "message": message]]]
+            if let usage { response["usage"] = usage }
+            return response
+        }
+        func terminal(_ id: String, title: String = "", usage: [String: Any]? = nil) throws -> [String: Any] {
+            try call("enqueue_download", ["selections": [["candidate_id": id, "title": title,
+                "format": "inherit", "skip_existing": false]], "unresolved": []],
+                reasoning: "private terminal reasoning", usage: usage)
+        }
+        func payload(_ request: URLRequest) throws -> [String: Any] {
+            try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+        }
+        let key = "synthetic-test-key"
+        let input = "下载 https://example.com/paper.pdf"
+        for effort in SmartThinkingEffort.allCases {
+            let api = try ScriptedSmartTransport([.init(terminal("r1", usage: usage(100, 20, 60)))])
+            let result = try await DeepSeekResolver(api: api).resolve(input, apiKey: key, thinking: effort, progress: { _ in })
+            let requests = await api.requests
+            let body = try payload(requests[0])
+            try expect((body["thinking"] as? [String: String])?["type"] == (effort == .off ? "disabled" : "enabled") &&
+                       body["max_tokens"] as? Int == effort.maxOutputTokens,
+                       "every thinking setting uses its explicit API mode and bounded completion allowance")
+            try expect(body["tool_choice"] as? String == (effort == .off ? "required" : "auto"),
+                       "thinking uses auto because the live API rejects required tool choice")
+            try expect(effort == .off
+                       ? body["reasoning_effort"] == nil && body["temperature"] as? Int == 0
+                       : body["reasoning_effort"] as? String == effort.rawValue && body["temperature"] == nil,
+                       "disabled thinking has no effort; enabled thinking never sends unsupported temperature")
+            try expect(requests[0].timeoutInterval <= effort.deadline && requests[0].timeoutInterval > effort.deadline - 2,
+                       "the request gets the selected overall deadline, including high and max beyond fifteen seconds")
+            try expect(result.selections.count == 1 &&
+                       result.usage == SmartTokenUsage(inputTokens: 100, outputTokens: 20, totalTokens: 120, cacheHitTokens: 60),
+                       "each mode returns the proposal and actual numeric usage")
+        }
+        let capped = try ScriptedSmartTransport([.init(terminal("r1"))])
+        _ = try await DeepSeekResolver(api: capped, budget: 2).resolve(input, apiKey: key, thinking: .max, progress: { _ in })
+        let cappedRequests = await capped.requests
+        try expect(cappedRequests[0].timeoutInterval <= 2, "an injected deadline is never enlarged by the thinking setting")
+        let prose = try ScriptedSmartTransport([.init(["choices": [["finish_reason": "stop",
+            "message": ["role": "assistant", "content": "A plain-text answer is not a download proposal.",
+                        "reasoning_content": "private reasoning"]]]])])
+        do {
+            _ = try await DeepSeekResolver(api: prose).resolve(input, apiKey: key, thinking: .low, progress: { _ in })
+            throw TestFailure.failed("thinking auto tool choice accepted a plain-text answer")
+        } catch SmartResolverError.invalidResponse {}
+        let proseRequests = await prose.requests
+        try expect(proseRequests.count == 1, "thinking still requires a valid tool proposal and never retries prose automatically")
+
+        let firstReasoning = "\nPRIVATE-FIRST 思考\tkeep exact whitespace\r\n"
+        let secondReasoning = "PRIVATE-SECOND\nretain both earlier reasoning turns"
+        let firstContent = " \n"
+        let api = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": "Bounded Paper"], reasoning: firstReasoning,
+                       content: firstContent, usage: usage(100, 10, 50))),
+            .init(["results": [["title": "Bounded Paper project", "url": "https://example.com/project", "summary": "Project"]],
+                   "usage": usage(900, 90, 900)]),
+            .init(call("inspect_page", ["candidate_id": "r1"], reasoning: secondReasoning, usage: usage(200, 20, 100))),
+            .init(terminal("r2", title: "Bounded Paper", usage: usage(300, 30, 150)))
+        ])
+        let pages = ScriptedSmartTransport([.init(html: "<a href='/bounded.pdf'>Bounded Paper</a>")])
+        let result = try await DeepSeekResolver(api: api, pages: pages).resolve("找到 Bounded Paper", apiKey: key,
+            thinking: .high, progress: { _ in })
+        let requests = await api.requests
+        let secondMessages = try payload(requests[2])["messages"] as! [[String: Any]]
+        let thirdMessages = try payload(requests[3])["messages"] as! [[String: Any]]
+        let secondAssistants = secondMessages.filter { $0["role"] as? String == "assistant" }
+        let thirdAssistants = thirdMessages.filter { $0["role"] as? String == "assistant" }
+        try expect(secondAssistants.count == 1 && thirdAssistants.count == 2 &&
+                   secondAssistants[0]["reasoning_content"] as? String == firstReasoning &&
+                   thirdAssistants[0]["reasoning_content"] as? String == firstReasoning &&
+                   thirdAssistants[1]["reasoning_content"] as? String == secondReasoning &&
+                   thirdAssistants[0]["content"] as? String == firstContent,
+                   "every thinking continuation replays all original reasoning and content without normalization or truncation")
+        try expect(result.usage == SmartTokenUsage(inputTokens: 600, outputTokens: 60, totalTokens: 660, cacheHitTokens: 300),
+                   "usage sums model turns only, excluding the search tool's independent response")
+        try expect(result.candidates.first?.observedTitle == "Bounded Paper" &&
+                   result.candidates.allSatisfy { !$0.title.contains("PRIVATE") && $0.detail.isEmpty } &&
+                   result.unresolved.allSatisfy { !$0.contains("PRIVATE") },
+                   "private reasoning never enters presentation fields")
+
+        let invalidReasonings: [Any?] = [nil, NSNull(), ["invalid": true]]
+        for reasoning in invalidReasonings {
+            let invalid = try ScriptedSmartTransport([
+                .init(call("search_resources", ["query": "paper"], reasoning: reasoning))
+            ])
+            do {
+                _ = try await DeepSeekResolver(api: invalid).resolve("找到论文", apiKey: key, thinking: .low, progress: { _ in })
+                throw TestFailure.failed("thinking tool turn without valid reasoning was accepted")
+            } catch SmartResolverError.invalidResponse {}
+            let requests = await invalid.requests
+            try expect(requests.count == 1, "missing reasoning stops before read tools or an invalid API continuation")
+        }
+        let emptyReasoning = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": "paper"], reasoning: "")),
+            .init(["results": [["title": "Paper", "url": "https://example.com/paper.pdf"]]]),
+            .init(terminal("r1", title: "Paper"))
+        ])
+        let emptyResult = try await DeepSeekResolver(api: emptyReasoning).resolve("找到论文", apiKey: key,
+            thinking: .low, progress: { _ in })
+        let emptyRequests = await emptyReasoning.requests
+        let emptyMessages = try payload(emptyRequests[2])["messages"] as! [[String: Any]]
+        try expect(emptyMessages.first(where: { $0["role"] as? String == "assistant" })?["reasoning_content"] as? String == "" &&
+                   emptyResult.usage == nil, "empty but valid reasoning is preserved; absent usage remains unknown")
+        let invalidCounts: [Any] = [true, -1, 1.5, "100", Int.max]
+        for invalidCount in invalidCounts {
+            var invalidUsage = usage(100, 20, 60)
+            invalidUsage["prompt_tokens"] = invalidCount
+            let malformed = try ScriptedSmartTransport([.init(terminal("r1", usage: invalidUsage))])
+            let value = try await DeepSeekResolver(api: malformed).resolve(input, apiKey: key, progress: { _ in })
+            try expect(value.selections.count == 1 && value.usage == nil,
+                       "malformed token counters do not become invented usage or invalidate an otherwise valid proposal")
+        }
+        let partial = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": "paper"], usage: usage(100, 10, 50))),
+            .init(["results": [["title": "Paper", "url": "https://example.com/paper.pdf"]]]),
+            .init(terminal("r1", title: "Paper"))
+        ])
+        let partialResult = try await DeepSeekResolver(api: partial).resolve("找到论文", apiKey: key, progress: { _ in })
+        try expect(partialResult.usage == nil, "partial usage is not presented as the complete request total")
+        let slow = try ScriptedSmartTransport([.init(terminal("r1", usage: usage(100, 10, 50)), delay: 300_000_000)])
+        let timed = try await DeepSeekResolver(api: slow, budget: 0.01).resolve(input, apiKey: key,
+            thinking: .max, progress: { _ in })
+        let cancelled = await slow.cancelled
+        try expect(timed.needsReview && timed.selections.isEmpty && timed.usage == nil && cancelled,
+                   "max thinking still cancels at the injected deadline and never reports incomplete usage or success")
+
+        // Duplicate search rows must neither consume extra context nor replace
+        // the original title evidence with another attachment's nearby name.
+        for proposed in ["Beta Paper", "Alpha Paper"] {
+            let repeated = try ScriptedSmartTransport([
+                .init(call("search_resources", ["query": "two papers"])),
+                .init(["results": [
+                    ["title": "Paper collection", "url": "https://example.com/collection",
+                     "summary": "Alpha Paper [PDF](https://example.com/a.pdf)\nBeta Paper [PDF](https://example.com/b.pdf)"],
+                    ["title": "Alpha Paper", "url": "https://example.com/b.pdf", "summary": "Unrelated duplicate title"]
+                ]]),
+                .init(terminal("r3", title: proposed))
+            ])
+            let repeatedResult = try await DeepSeekResolver(api: repeated).resolve("找到 Beta Paper", apiKey: key, progress: { _ in })
+            let repeatedRequests = await repeated.requests
+            let messages = try payload(repeatedRequests[2])["messages"] as! [[String: Any]]
+            let observation = try JSONSerialization.jsonObject(with: Data((messages.last!["content"] as! String).utf8)) as! [String: Any]
+            let observed = observation["resources"] as! [[String: Any]]
+            try expect(observed.count == 3 && Set(observed.compactMap { $0["id"] as? String }).count == 3 &&
+                       repeatedResult.candidates.first?.url.absoluteString == "https://example.com/b.pdf" &&
+                       repeatedResult.candidates.first?.observedTitle == (proposed == "Beta Paper" ? proposed : nil),
+                       "duplicate result IDs are sent once without replacing identity or borrowing an adjacent attachment title")
+        }
+        print("PASS thinking modes, deadlines, exact reasoning continuation, numeric usage and evidence-preserving deduplication")
     }
 
     #if TESTING
@@ -510,13 +674,18 @@ extension CoreTests {
             } else if !text.contains("=") { key = text.trimmingCharacters(in: .whitespacesAndNewlines) }
         }
         guard !key.isEmpty else { throw TestFailure.failed("live API check requires a configured key") }
-        let samples: [(String, String)] = [
-            ("conditional", "https://example.com/first.mp4 https://example.com/second.mp4 只下载第二个的音频，已有的跳过"),
-            ("search", "找到论文 Attention Is All You Need，返回候选让我选择。"),
-            ("alias-gpt1-first", "下载 gpt-1 论文"),
-            ("alias-gpt1-repeat", "下载 gpt-1 论文"),
-            ("alias-gpt2", "下载 GPT-2 论文"),
-            ("page", "读取 https://jonbarron.info/mipnerf360/ ，找到这个项目的论文和补充材料。没有找到的材料明确说明。")
+        try await DeepSeekCredentialValidator().validate(key)
+        print("PASS live key verification via authenticated model listing (no draft or model generation)")
+        let samples: [(String, String, SmartThinkingEffort)] = [
+            ("conditional", "https://example.com/first.mp4 https://example.com/second.mp4 只下载第二个的音频，已有的跳过", .off),
+            ("search", "找到论文 Attention Is All You Need，返回候选让我选择。", .off),
+            ("alias-gpt1-first", "下载 gpt-1 论文", .off),
+            ("alias-gpt1-repeat", "下载 gpt-1 论文", .off),
+            ("alias-gpt2", "下载 GPT-2 论文", .off),
+            ("page", "读取 https://jonbarron.info/mipnerf360/ ，找到这个项目的论文和补充材料。没有找到的材料明确说明。", .off),
+            ("thinking-low", "读取 https://jonbarron.info/mipnerf360/ ，只找这个项目的论文 PDF。", .low),
+            ("thinking-high", "读取 https://jonbarron.info/mipnerf360/ ，只找这个项目的论文 PDF。", .high),
+            ("thinking-max", "读取 https://jonbarron.info/mipnerf360/ ，只找这个项目的论文 PDF。", .max)
         ]
         var failures: [String] = []
         func record(_ name: String, _ error: Error) {
@@ -527,24 +696,33 @@ extension CoreTests {
             else { detail = "request or download failed" }
             print("FAIL live \(name): \(detail)")
         }
-        for (name, input) in samples {
+        for (name, input, effort) in samples {
             do {
                 let started = ContinuousClock.now
-                let result = try await DeepSeekResolver().resolve(input, apiKey: key, progress: { _ in })
+                let result = try await DeepSeekResolver().resolve(input, apiKey: key, thinking: effort, progress: { _ in })
                 let duration = started.duration(to: .now)
                 let elapsed = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
                 print(String(format: "LIVE smart %@: %.2fs, model=%d, tools=%d, candidates=%d, proposed=%d, review=%@, unresolved=%d",
                              name, elapsed, result.modelCalls, result.toolCalls, result.candidates.count, result.selections.count,
                              result.needsReview ? "yes" : "no", result.unresolved.count))
+                if let usage = result.usage {
+                    let cache = usage.cacheHitTokens.map(String.init) ?? "unknown"
+                    print("LIVE usage \(name): effort=\(effort.rawValue), input=\(usage.inputTokens), output=\(usage.outputTokens), cache_hit=\(cache), total=\(usage.totalTokens)")
+                } else { print("LIVE usage \(name): unavailable or incomplete") }
                 try expect(result.modelCalls <= 3 && result.toolCalls <= 2, "live call budgets are enforced")
                 if name == "conditional" {
                     try expect(result.modelCalls == 1 && result.toolCalls == 0 && !result.needsReview &&
                                result.selections == [SmartSelection(candidateID: "r2", format: .audio, skipExisting: true)],
                                "live conditional interpretation must select only the second link as audio")
                 } else {
-                    let origin: SmartCandidate.Origin = name == "page" ? .page : .search
+                    let origin: SmartCandidate.Origin = name == "page" || effort != .off ? .page : .search
                     try expect(result.needsReview && result.candidates.contains(where: { $0.origin == origin }),
                                "live discovery returns candidates from the observed search or page")
+                    if effort != .off {
+                        try expect(result.modelCalls >= 2 && result.toolCalls >= 1 && !result.selections.isEmpty &&
+                                   result.unresolved.isEmpty && result.usage != nil,
+                                   "each live thinking setting completes a real tool continuation with reported usage")
+                    }
                     if name.hasPrefix("alias-gpt1") {
                         try await verifySearchPaper(result, title: "Improving Language Understanding by Generative Pre-Training")
                     } else if name == "alias-gpt2" {

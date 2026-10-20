@@ -486,11 +486,11 @@ extension CoreTests {
         FixtureProtocol.install(.init(body: body), path: "/ui.pdf")
         let model = DownloadModel(engine: engine, preferences: preferences, opener: { _ in true })
         let link = "https://example.com/ui.pdf?x=a,b;c"
-        model.input = link + "\n" + link + "#page=1\nbad-link"
+        model.input = link + "\n" + link + "#page=1"
         model.start()
         let deadline = ContinuousClock().now.advanced(by: .seconds(5))
         while model.busy { try await Task.sleep(nanoseconds: 10_000_000); if ContinuousClock().now > deadline { throw TestFailure.failed("generic UI queue stalled") } }
-        try expect(model.successes == 1 && model.duplicateCount == 1 && model.input == "bad-link" && model.items[0].directURL != nil, "UI generic dedup and per-file input clearing")
+        try expect(model.successes == 1 && model.duplicateCount == 1 && model.input.isEmpty && model.items[0].directURL != nil, "UI generic dedup and completed direct-input clearing")
         try expect(model.items[0].canRetry == false && model.items[0].title == model.items[0].savedURL!.deletingPathExtension().lastPathComponent, "UI generic title matches saved filename")
         model.openSource(model.items[0]); try expect(model.notice == nil, "UI generic source menu")
         FixtureProtocol.install(.init(body: body), path: "/release.pdf")

@@ -82,14 +82,11 @@ struct DownloadPreferences {
     let naming: NamingStyle
     let namingRules: AssetNamingRules
     init(_ preferences: UserDefaults, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
-        let oldDefault = ["Leafpick", "Leafpeak"].map { home.appendingPathComponent("Downloads/\($0)", isDirectory: true) }.first {
-            var isDirectory: ObjCBool = false
-            return FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDirectory) && isDirectory.boolValue
-        }
-        // Keep legacy folder preferences and existing file URLs intact. Their
-        // meanings differ from the new root and cannot be safely inferred.
+        // Saved roots survive product renames. An old folder on disk alone is
+        // not a configured preference; fresh installations use the current name.
+        // Legacy per-type preferences and existing file URLs remain untouched.
         directory = preferences.string(forKey: "downloadRootDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? oldDefault ?? home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
+            ?? home.appendingPathComponent("Downloads/Folioak", isDirectory: true)
         pdfDirectory = preferences.string(forKey: "pdfDownloadDirectory").flatMap {
             $0.hasPrefix("/") ? URL(fileURLWithPath: $0, isDirectory: true) : nil
         }

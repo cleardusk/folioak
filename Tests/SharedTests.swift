@@ -41,6 +41,24 @@ extension CoreTests {
         try expect(terminalCode == 0 && terminal.output.isEmpty && terminal.errors.contains("已存在") && terminal.errors.contains("\u{1b}[32m"), "TTY compact colored results without full file paths")
         try expect(NSDictionary(dictionary: before).isEqual(to: prefs.dictionaryRepresentation()), "CLI overrides do not write shared/UI preferences")
         try expect(!FileManager.default.fileExists(atPath: original.path), "CLI override does not create the shared default directory")
+        for name in ["Leafpick", "Custom Saved Folder"] {
+            let configured = root.appendingPathComponent("cli-configured").appendingPathComponent(name)
+            prefs.set(configured.path, forKey: "downloadRootDirectory")
+            let savedPreferences = prefs.dictionaryRepresentation()
+            let configuredConsole = CapturedConsole()
+            let configuredOptions = try CLIOptions.parse(["2501.12345v2", "--json"])
+            let configuredCode = await CLIRunner.run(configuredOptions, version: "test", engine: engine, preferences: prefs,
+                stdout: { configuredConsole.stdout($0) }, stderr: { configuredConsole.stderr($0) })
+            let configuredReport = try JSONSerialization.jsonObject(with: Data(configuredConsole.output.utf8)) as! [String: Any]
+            let configuredRows = configuredReport["results"] as! [[String: Any]]
+            let savedPath = configuredRows.first?["path"] as? String ?? ""
+            try expect(configuredCode == 0 && URL(fileURLWithPath: savedPath).deletingLastPathComponent().path ==
+                       configured.appendingPathComponent("Papers").path,
+                       "CLI uses the saved \(name) root instead of the fresh-install default")
+            try expect(NSDictionary(dictionary: savedPreferences).isEqual(to: prefs.dictionaryRepresentation()),
+                       "CLI preserves configured destinations without migration writes")
+        }
+        prefs.set(original.path, forKey: "downloadRootDirectory")
         for args in [[], ["--unknown"], ["-o"], ["--naming", "bad"], ["-o", "--json"], ["2501.12345", "--output="], ["2501.12345", "-o", "a", "-o", "b"]] {
             try rejects({ _ = try CLIOptions.parse(args) }, "CLI invalid arguments accepted")
         }

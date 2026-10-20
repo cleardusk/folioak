@@ -20,14 +20,15 @@ enum SmartResolverError: LocalizedError {
 // credential store, or persistent configuration.
 final class SmartAPITransport: NSObject, HTTPTransport, URLSessionTaskDelegate, @unchecked Sendable {
     private let session: URLSession
-    override init() {
+    override convenience init() { self.init(timeout: SmartInput.deadline) }
+    init(timeout: TimeInterval) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
-        configuration.timeoutIntervalForRequest = SmartInput.deadline
-        configuration.timeoutIntervalForResource = SmartInput.deadline
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
         session = URLSession(configuration: configuration)
         super.init()
     }
@@ -65,17 +66,17 @@ final class SmartAPITransport: NSObject, HTTPTransport, URLSessionTaskDelegate, 
 }
 
 struct DeepSeekResolver: SmartResolving {
-    private let api: HTTPTransport
+    private let api: HTTPTransport?
     private let pages: HTTPTransport
-    private let budget: TimeInterval
+    private let budget: TimeInterval?
 
-    init(api: HTTPTransport? = nil, pages: HTTPTransport? = nil, budget: TimeInterval = SmartInput.deadline) {
-        self.api = api ?? SmartAPITransport()
+    init(api: HTTPTransport? = nil, pages: HTTPTransport? = nil, budget: TimeInterval? = nil) {
+        self.api = api
         self.pages = pages ?? URLSessionTransport(policy: .externalPDF)
-        self.budget = min(SmartInput.deadline, max(0.001, budget))
+        self.budget = budget.map { $0.isFinite ? min(SmartThinkingEffort.max.deadline, max(0.001, $0)) : SmartInput.deadline }
     }
 
-    func resolve(_ input: String, apiKey: String,
+    func resolve(_ input: String, apiKey: String, thinking: SmartThinkingEffort = .off,
                  progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution {
         guard !apiKey.isEmpty, apiKey.utf8.count <= 512, !apiKey.contains(where: \.isWhitespace) else {
             throw SmartResolverError.configuration
@@ -83,7 +84,9 @@ struct DeepSeekResolver: SmartResolving {
         guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, input.utf8.count <= SmartInput.inputLimit else {
             throw DownloadError.limit("智能请求最多 8 KB，请缩短后重试。")
         }
-        var run = Run(api: api, pages: pages, key: apiKey, deadline: ContinuousClock.now.advanced(by: .seconds(budget)), progress: progress)
+        let duration = min(thinking.deadline, budget ?? thinking.deadline)
+        var run = Run(api: api ?? SmartAPITransport(timeout: duration), pages: pages, key: apiKey,
+            thinking: thinking, deadline: ContinuousClock.now.advanced(by: .seconds(duration)), progress: progress)
         return try await run.resolve(input)
     }
 
@@ -128,6 +131,7 @@ struct DeepSeekResolver: SmartResolving {
         let api: HTTPTransport
         let pages: HTTPTransport
         let key: String
+        let thinking: SmartThinkingEffort
         let deadline: ContinuousClock.Instant
         let progress: @Sendable (SmartProgress) -> Void
         var resources: [Resource] = []
@@ -136,6 +140,31 @@ struct DeepSeekResolver: SmartResolving {
         var toolCalls = 0
         var discovered = false
         var limitations: [String] = []
+        var usages: [SmartTokenUsage] = []
+
+        var usage: SmartTokenUsage? {
+            guard modelCalls > 0, usages.count == modelCalls else { return nil }
+            let cacheHits = usages.compactMap(\.cacheHitTokens)
+            return SmartTokenUsage(inputTokens: usages.reduce(0) { $0 + $1.inputTokens },
+                outputTokens: usages.reduce(0) { $0 + $1.outputTokens },
+                totalTokens: usages.reduce(0) { $0 + $1.totalTokens },
+                cacheHitTokens: cacheHits.count == usages.count ? cacheHits.reduce(0, +) : nil)
+        }
+
+        mutating func recordUsage(_ value: Any?) {
+            func count(_ value: Any?) -> Int? {
+                guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      number.doubleValue.isFinite, number.doubleValue >= 0, number.doubleValue <= 1_000_000,
+                      number.doubleValue.rounded() == number.doubleValue else { return nil }
+                return number.intValue
+            }
+            guard let values = value as? [String: Any],
+                  let input = count(values["prompt_tokens"]), let output = count(values["completion_tokens"]),
+                  let total = count(values["total_tokens"]), total == input + output else { return }
+            let cache = count(values["prompt_cache_hit_tokens"])
+            usages.append(SmartTokenUsage(inputTokens: input, outputTokens: output, totalTokens: total,
+                cacheHitTokens: cache.flatMap { $0 <= input ? $0 : nil }))
+        }
 
         mutating func resolve(_ input: String) async throws -> SmartResolution {
             let separated = SmartInput.separatingCommands(input)
@@ -158,11 +187,15 @@ struct DeepSeekResolver: SmartResolving {
                     guard ContinuousClock.now < deadline else { throw SmartResolverError.timeout }
                     progress(modelCalls == 0 ? .understanding : .checking)
                     modelCalls += 1
-                    let response = try await post("/chat/completions", [
-                        "model": "deepseek-flash", "thinking": ["type": "disabled"],
-                        "messages": messages, "tools": Self.tools, "tool_choice": "required",
-                        "max_tokens": 1200, "temperature": 0, "stream": false
-                    ])
+                    var payload: [String: Any] = [
+                        "model": "deepseek-flash", "thinking": ["type": thinking == .off ? "disabled" : "enabled"],
+                        "messages": messages, "tools": Self.tools, "tool_choice": thinking == .off ? "required" : "auto",
+                        "max_tokens": thinking.maxOutputTokens, "stream": false
+                    ]
+                    if thinking == .off { payload["temperature"] = 0 }
+                    else { payload["reasoning_effort"] = thinking.rawValue }
+                    let response = try await post("/chat/completions", payload)
+                    recordUsage(response["usage"])
                     guard let choices = response["choices"] as? [[String: Any]], choices.count == 1,
                           ["tool_calls", "stop"].contains(choices[0]["finish_reason"] as? String ?? ""),
                           let message = choices[0]["message"] as? [String: Any],
@@ -179,7 +212,18 @@ struct DeepSeekResolver: SmartResolving {
                     if name == "enqueue_download" { return try proposal(args) }
                     guard ["search_resources", "inspect_page"].contains(name) else { throw SmartResolverError.invalidResponse }
                     guard modelCalls < 3, toolCalls < 2 else { throw SmartResolverError.timeout }
-                    messages.append(["role": "assistant", "content": NSNull(), "tool_calls": [call]])
+                    let content = message["content"] ?? NSNull()
+                    guard content is String || content is NSNull else { throw SmartResolverError.invalidResponse }
+                    var assistant: [String: Any] = ["role": "assistant", "content": content, "tool_calls": [call]]
+                    if thinking != .off {
+                        // Thinking tool turns require the complete original
+                        // reasoning on every continuation. It stays in this run.
+                        guard let reasoning = message["reasoning_content"] as? String else {
+                            throw SmartResolverError.invalidResponse
+                        }
+                        assistant["reasoning_content"] = reasoning
+                    }
+                    messages.append(assistant)
                     toolCalls += 1
                     discovered = true
                     let observation: [String: Any]
@@ -258,7 +302,8 @@ struct DeepSeekResolver: SmartResolving {
                     if !value.isEmpty && !evidence.contains(value) { evidence.append(value) }
                 }
                 let detail = evidence.joined(separator: "\n")
-                if let resource = register(url, title: title, detail: detail, origin: .search) { found.append(resource.json) }
+                if let resource = register(url, title: title, detail: detail, origin: .search),
+                   !found.contains(where: { $0["id"] as? String == resource.candidate.id }) { found.append(resource.json) }
                 // Search snippets can cite an attachment whose URL differs from
                 // the result page. Register only URLs actually present in that
                 // evidence; the model must still match their nearby context.
@@ -381,13 +426,13 @@ struct DeepSeekResolver: SmartResolving {
                     url: candidate.url, detail: "", origin: candidate.origin, observedTitle: titles[candidate.id])
             }, selections: selections,
                 unresolved: remaining, needsReview: discovered || !remaining.isEmpty || unknownPage,
-                modelCalls: modelCalls, toolCalls: toolCalls)
+                modelCalls: modelCalls, toolCalls: toolCalls, usage: usage)
         }
 
         func fallback() -> SmartResolution {
             SmartResolution(candidates: resources.filter { $0.candidate.origin == .supplied }.map(\.candidate), selections: [],
                 unresolved: [L("已达到解析时间或调用上限，请核对已有候选或补充线索。")] + limitations, needsReview: true,
-                modelCalls: modelCalls, toolCalls: toolCalls)
+                modelCalls: modelCalls, toolCalls: toolCalls, usage: usage)
         }
 
         func post(_ path: String, _ body: [String: Any]) async throws -> [String: Any] {

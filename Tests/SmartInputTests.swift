@@ -2,9 +2,14 @@ import Foundation
 
 private final class SmartInputCredentials: SmartCredentialStorage {
     private var key: String?
-    func read() throws -> String? { key }
+    private(set) var reads = 0
+    func read() throws -> String? { reads += 1; return key }
     func write(_ key: String) throws { self.key = key }
     func delete() throws { key = nil }
+}
+
+private struct AcceptedSmartCredential: SmartCredentialValidating {
+    func validate(_ key: String) async throws { try Task.checkCancellation() }
 }
 
 // Deliberately ignores cancellation: the UI must reject late results even when
@@ -12,7 +17,7 @@ private final class SmartInputCredentials: SmartCredentialStorage {
 private actor DelayedSmartResolver: SmartResolving {
     private(set) var inputs: [String] = []
     private var pending: [Int: CheckedContinuation<SmartResolution, Never>] = [:]
-    func resolve(_ input: String, apiKey: String,
+    func resolve(_ input: String, apiKey: String, thinking: SmartThinkingEffort,
                  progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution {
         let index = inputs.count
         inputs.append(input)
@@ -82,7 +87,7 @@ extension CoreTests {
         let captureModel = DownloadModel(preferences: preferences, smartSettings: settings)
         try expect(try captureModel.captureInput(prose) == prose, "enabled capture retains full original intent and whitespace")
         settings.enabled = false
-        try expect(try captureModel.captureInput(prose) == PaperInput.captured(prose), "disabled capture retains legacy parsing")
+        try expect(try captureModel.captureInput(prose) == prose, "unconfigured capture preserves intent until explicit consent")
         settings.enabled = true
         try rejects({ _ = try captureModel.captureInput(String(repeating: "x", count: ResourceLimits.inputBytes + 1)) },
                     "capture remains bounded before any network request")
@@ -105,6 +110,69 @@ extension CoreTests {
         try await waitForQueue(direct)
         try expect(await directResolver.inputs.isEmpty, "direct submission never calls the model")
         try expect(direct.successes == 1, "enabled intelligent mode preserves native direct downloads")
+
+        // Setup belongs to the submitted intent. It must neither contact a
+        // model before consent nor replay a stale/main-window draft from Quick.
+        for entry in ["main", "quick", "cancel", "edit", "disabled", "stale-key"] {
+            let setupSuite = "folioak-smart-setup-" + UUID().uuidString
+            let setupPreferences = UserDefaults(suiteName: setupSuite)!
+            defer { setupPreferences.removePersistentDomain(forName: setupSuite) }
+            let setupCredentials = SmartInputCredentials()
+            let setupSettings = SmartSettings(setupPreferences, credentials: setupCredentials,
+                                               validator: AcceptedSmartCredential())
+            let resolver = DelayedSmartResolver(), transport = SmartInputTransport(pdf: pdf)
+            let model = DownloadModel(engine: DownloadEngine(transport: transport, pdfTransport: transport,
+                requestInterval: 0, retryDelay: 0), preferences: setupPreferences,
+                smartSettings: setupSettings, smartResolver: resolver)
+            model.directory = root.appendingPathComponent("setup-" + entry)
+            if entry == "main" {
+                model.input = "https://example.org/cold-direct.pdf"
+                model.start()
+                try await waitForQueue(model)
+                try expect(model.successes == 1 && setupCredentials.reads == 0 && !model.smartInput.needsSetup,
+                           "cold direct download never reads credentials or asks for setup")
+            }
+            if entry == "disabled" { try setupSettings.saveKey("sk-already-saved") }
+            if entry == "stale-key" {
+                try setupSettings.saveKey("sk-removed-outside-app")
+                setupSettings.enabled = true
+                try setupCredentials.delete()
+            }
+            let original = "下载指定论文，只要第二版 https://example.org/setup.pdf"
+            model.input = original
+            let quick = QuickDownloadState(model: model)
+            let state = entry == "quick" ? quick.smart : model.smartInput
+            if entry == "quick" {
+                model.input = "主窗口尚未提交的需求"
+                quick.draft = original
+                quick.submit()
+                quick.submit()
+            } else { model.start(); model.start() }
+            let beforeConnection = await resolver.inputs
+            try expect(state.needsSetup && !state.resolving && beforeConnection.isEmpty,
+                       "unconfigured or disabled input offers setup without sending any request")
+            if entry == "cancel" { state.cancel() }
+            if entry == "edit" { model.input = "改过的需求" }
+            if entry == "disabled" { try await setupSettings.connectSavedKey() }
+            else { try await setupSettings.connect("sk-verified-setup-fixture") }
+            state.resumeAfterSetup()
+            state.resumeAfterSetup()
+            if entry == "cancel" || entry == "edit" {
+                try expect(await resolver.inputs.isEmpty, "cancelled or edited intent cannot resume after connection")
+                try expect(model.input == (entry == "edit" ? "改过的需求" : original), "setup cancellation preserves draft")
+            } else {
+                try await awaitSmart { await resolver.inputs.count == 1 }
+                try expect(await resolver.inputs == [original], "setup resumes exactly the original request once")
+                await resolver.complete(0, with: proposal("setup.pdf", review: true))
+                try await awaitSmart { state.resolution != nil }
+                try expect(!state.needsSetup && !state.resolving, "connected request reaches review")
+                if entry == "quick" {
+                    try expect(model.input == "主窗口尚未提交的需求" && quick.draft == original,
+                               "Quick setup never sends or overwrites the main draft")
+                }
+            }
+            state.cancel()
+        }
 
         for boundary in ["cancel", "edit", "disable", "quit"] {
             let resolver = DelayedSmartResolver(), transport = SmartInputTransport(pdf: pdf)
@@ -276,11 +344,9 @@ extension CoreTests {
             smartSettings: settings, smartResolver: quickResolver)
         quickModel.directory = root.appendingPathComponent("quick-review")
         let quick = QuickDownloadState(model: quickModel)
-        settings.enabled = false
         quick.draft = "查找论文和补充材料"
-        quick.submit()
-        try expect(quick.failed, "fixture begins with a rejected native request")
-        settings.enabled = true
+        quick.inputTooLarge()
+        try expect(quick.failed, "fixture begins with a rejected oversized paste")
         quick.submit()
         try expect(!quick.failed && quick.message == nil && quick.resultError == nil,
                    "intelligent routing clears obsolete quick-panel errors")

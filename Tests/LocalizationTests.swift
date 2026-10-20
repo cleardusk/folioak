@@ -70,7 +70,9 @@ extension CoreTests {
         }
         try expect(pickerTitles(in: namingSettings).contains("Year & Month + Title") && pickerTitles(in: settings).contains("System"), "native picker menus update to English")
         try expect(editor(in: view) === input && input.selectedRange() == NSRange(location: 2, length: 3), "language changes preserve the native editor and selection")
-        try expect(input.accessibilityLabel() == "Download links, one per line" && LinkTextView.example == "Paste paper or media links", "native labels and placeholder update immediately")
+        try expect(input.accessibilityLabel() == "Download request" && input.naturalLanguageInput &&
+                   L("粘贴链接，或描述想保存的资料") == "Paste links or describe what you want to save",
+                   "native request label and natural-language placeholder update immediately")
         try expect(L("设置") == "Settings" && L("自动重试 2/3") == "Retrying 2/3", "labels and dynamic state translate")
         try expect(L(DownloadError.invalidLink("123").localizedDescription).hasPrefix("Unrecognized input."), "historical errors translate at presentation")
         try expect(L("保存失败：所选目录不存在，请重新选择。") == "Could not save: The selected folder does not exist. Choose another folder.", "nested stored errors translate")

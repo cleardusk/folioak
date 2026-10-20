@@ -839,7 +839,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func captureInput(_ text: String) throws -> String {
-        try smartSettings.enabled ? SmartInput.preserved(text) : PaperInput.captured(text)
+        try SmartInput.preserved(text)
     }
 
     func importLinks() {
@@ -1134,12 +1134,12 @@ final class DownloadModel: ObservableObject {
     }
 
     func start() {
-        guard !busy, !isTerminating, mainSmartState?.resolving != true else { return }
+        guard !busy, !isTerminating, mainSmartState?.resolving != true, mainSmartState?.needsSetup != true else { return }
         if mainSmartState?.resolution != nil {
             mainSmartState?.acceptSelection()
             return
         }
-        if smartSettings.enabled && !SmartInput.isDirect(input) {
+        if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !SmartInput.isDirect(input) {
             notice = nil
             let original = input
             smartInput.submit(original) { [weak self] fullyResolved in
@@ -1959,10 +1959,10 @@ struct LinkInput: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? LinkTextView else { return }
-        editor.naturalLanguageInput = model.smartSettings.enabled
-        let inputFont = model.smartSettings.enabled ? NSFont.systemFont(ofSize: 13) : NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        editor.naturalLanguageInput = true
+        let inputFont = NSFont.systemFont(ofSize: 13)
         if editor.font != inputFont { editor.font = inputFont }
-        editor.setAccessibilityLabel(L(model.smartSettings.enabled ? "下载请求" : "下载链接，每行一个"))
+        editor.setAccessibilityLabel(L("下载请求"))
         editor.needsDisplay = true
         editor.isEditable = !model.busy
         let textColor = ThemePalette.nativeColor(palette.text)

@@ -112,7 +112,9 @@ extension CoreTests {
         try expect(state.failed && !state.draft.isEmpty && model.items.count == 2, "duplicate active source is rejected with draft retained")
         state.draft = "https://example.com/new.pdf\ninvalid-link"
         state.submit()
-        try expect(state.failed && model.items.count == 2, "mixed invalid quick input is rejected atomically")
+        try expect(state.smart.needsSetup && model.items.count == 2 && !state.draft.isEmpty,
+                   "ambiguous quick input requests consent without partially adding a batch")
+        state.smart.cancel()
         let tooMany = (0..<200).map { "https://example.com/capacity-\($0).pdf" }.joined(separator: "\n")
         try rejects({ _ = try model.submitQuickDownload(tooMany) }, "aggregate queue capacity is enforced")
         try expect(model.items.count == 2, "rejected capacity does not replace running tasks")
@@ -307,13 +309,14 @@ extension CoreTests {
                 guard let editor = focusedEditor else {
                     throw TestFailure.failed("quick editor receives focus: language=\(language.rawValue), scheme=\(scheme), realKey=\(NSApp.keyWindow === window), responder=\(String(describing: window.firstResponder))")
                 }
-                editor.insertText("invalid-link", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+                editor.insertText("下载 GPT-1 论文", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
                 try expect(editor.undoManager?.canUndo == true, "native typing creates a real undo action before submission")
                 try await Task.sleep(nanoseconds: 30_000_000)
                 let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
                     windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
                 try expect(window.performKeyEquivalent(with: event), "window responder chain consumes Command Return before the main menu")
-                try expect(state.failed && state.draft == "invalid-link", "Command Return invokes panel submission and retains invalid input")
+                try expect(state.smart.needsSetup && state.draft == "下载 GPT-1 论文",
+                           "Command Return requests setup while retaining the unconfigured intelligent draft")
                 state.draft = ""
                 try await Task.sleep(nanoseconds: 30_000_000)
                 try expect(!editor.undoManager!.canUndo, "external clear discards stale native text undo actions")

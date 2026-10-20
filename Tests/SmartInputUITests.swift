@@ -4,16 +4,30 @@ import Vision
 
 private final class SmartUICredentials: SmartCredentialStorage {
     private var value: String?
-    func read() throws -> String? { value }
-    func write(_ key: String) throws { value = key }
+    private(set) var reads = 0
+    private(set) var writes = 0
+    func read() throws -> String? { reads += 1; return value }
+    func write(_ key: String) throws { writes += 1; value = key }
     func delete() throws { value = nil }
+}
+
+private actor SmartUIConnectionValidator: SmartCredentialValidating {
+    var suspended = false
+    private(set) var calls = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+    init(suspended: Bool = false) { self.suspended = suspended }
+    func validate(_ key: String) async throws {
+        calls += 1
+        if suspended { await withCheckedContinuation { continuation = $0 } }
+    }
+    func release() { continuation?.resume(); continuation = nil }
 }
 
 private struct SmartUIResolver: SmartResolving {
     enum Mode { case review, pending, failure }
     let result: SmartResolution
     var mode = Mode.review
-    func resolve(_ input: String, apiKey: String,
+    func resolve(_ input: String, apiKey: String, thinking: SmartThinkingEffort,
                  progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution {
         if mode == .failure { throw SmartResolverError.unavailable }
         if mode == .pending {
@@ -21,6 +35,16 @@ private struct SmartUIResolver: SmartResolving {
             try await Task.sleep(nanoseconds: 30_000_000_000)
         }
         return result
+    }
+}
+
+private actor SmartUIRecordingResolver: SmartResolving {
+    private(set) var calls = 0
+    func resolve(_ input: String, apiKey: String, thinking: SmartThinkingEffort,
+                 progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution {
+        calls += 1
+        return SmartResolution(candidates: [], selections: [], unresolved: [],
+                               needsReview: true, modelCalls: 0, toolCalls: 0)
     }
 }
 
@@ -33,12 +57,17 @@ private struct SmartUINoNetwork: HTTPTransport {
     }
 }
 
+private final class SmartUIPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 @MainActor private final class SmartUISurface {
     let host: NSHostingView<AnyView>
     let window: NSPanel
     init(_ view: some View, size: NSSize) {
         host = NSHostingView(rootView: AnyView(view))
-        window = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+        window = SmartUIPanel(contentRect: NSRect(origin: .zero, size: size),
                          styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
@@ -56,16 +85,17 @@ private struct SmartUINoNetwork: HTTPTransport {
         if height > 0 { window.setContentSize(NSSize(width: width, height: height)) }
     }
     static func descendants(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(descendants) }
-    func image() throws -> NSBitmapImageRep {
-        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+    func image(in view: NSView? = nil) throws -> NSBitmapImageRep {
+        let view = view ?? host
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             throw TestFailure.failed("smart UI bitmap allocation")
         }
-        host.cacheDisplay(in: host.bounds, to: bitmap)
+        view.cacheDisplay(in: view.bounds, to: bitmap)
         return bitmap
     }
     func verify(_ name: String, labels: [String], uniqueLabels: [String] = [],
-                absentLabels: [String] = [], snapshots: Bool) throws {
-        let bitmap = try image()
+                absentLabels: [String] = [], snapshots: Bool, in view: NSView? = nil) throws {
+        let bitmap = try image(in: view)
         if snapshots {
             let folder = URL(fileURLWithPath: "build/qa/smart-input", isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -95,6 +125,58 @@ private struct SmartUINoNetwork: HTTPTransport {
             try expect(!normalized(text).contains(normalized(label)),
                        "absent smart UI action \(name): \(label); actual: \(text)")
         }
+    }
+    func enterKey(_ key: String, in view: NSView? = nil) throws {
+        guard let field = Self.descendants(view ?? host).compactMap({ $0 as? NSSecureTextField })
+            .first(where: { $0.isEnabled && !$0.isHiddenOrHasHiddenAncestor }) else {
+            throw TestFailure.failed("connection form has an enabled native secure field")
+        }
+        field.selectText(nil)
+        guard let editor = field.currentEditor() as? NSTextView else {
+            throw TestFailure.failed("connection secure field has its native editor")
+        }
+        editor.insertText(key, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+    }
+    func returnKey(in view: NSView? = nil) async throws {
+        guard let targetWindow = (view ?? host).window,
+              let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: targetWindow.windowNumber,
+                context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+            throw TestFailure.failed("connection Return key event")
+        }
+        targetWindow.makeKeyAndOrderFront(nil)
+        try expect(NSApp.keyWindow === targetWindow && targetWindow.firstResponder is NSTextView,
+                   "native connection Return targets the focused secure editor")
+        NSApp.sendEvent(event)
+        try await settle()
+    }
+    func press(_ label: String, in view: NSView? = nil) async throws {
+        let view = view ?? host
+        guard let image = try image(in: view).cgImage, let targetWindow = view.window else {
+            throw TestFailure.failed("connection control surface is visible")
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        request.recognitionLevel = .accurate
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        func normalized(_ value: String) -> String {
+            String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+        }
+        guard let observation = request.results?.first(where: {
+            normalized($0.topCandidates(1).first?.string ?? "") == normalized(label)
+        }) else { throw TestFailure.failed("visible connection action: " + label) }
+        let box = observation.boundingBox
+        let point = NSPoint(x: box.midX * view.bounds.width,
+                            y: (view.isFlipped ? 1 - box.midY : box.midY) * view.bounds.height)
+        targetWindow.makeKeyAndOrderFront(nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: targetWindow.windowNumber, context: nil, eventNumber: 0,
+                clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!)
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        try await settle()
     }
 }
 
@@ -217,7 +299,10 @@ extension CoreTests {
                     size: NSSize(width: 540, height: 380))
                 try await configuration.settle()
                 try configuration.verify("settings-" + name,
-                                         labels: [L("启用智能输入"), L("保存"), L("移除 Key")], snapshots: snapshots)
+                                         labels: [L("已连接"), L("停用"), L("更换 Key"), L("移除 Key"),
+                                                  L("思考强度"), L("关闭（省用量）")], snapshots: snapshots)
+                try expect(!SmartUISurface.descendants(configuration.host).contains { $0 is NSSecureTextField },
+                           "connected settings never display or read the saved credential")
                 configuration.window.close()
                 model.smartInput.cancel()
 
@@ -230,7 +315,7 @@ extension CoreTests {
                            "smart settings keep minimum main-window size")
                 try fullSettings.verify("main-settings-" + name,
                                         labels: [L("通用"), L("命名规则"), L("快捷键"), L("浏览器认证"), L("智能输入"),
-                                                 L("启用智能输入"), L("保存"), L("移除 Key")], snapshots: snapshots)
+                                                 L("已连接"), L("更换 Key"), L("移除 Key")], snapshots: snapshots)
                 fullSettings.window.close()
 
                 let paperModel = makeModel(resolution: paperResult)
@@ -369,6 +454,203 @@ extension CoreTests {
         longQuick.window.close()
         partialQuick.smart.cancel()
         partial.smartInput.cancel()
+        try await smartConnectionUITests(snapshots: snapshots)
         print("PASS smart input native UI: bilingual light/dark review, two output formats, unmet requirements, minimum main window, compact quick panel, settings, progress and errors")
+    }
+
+    @MainActor private static func smartConnectionUITests(snapshots: Bool) async throws {
+        let suite = "folioak-smart-connection-ui-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        preferences.set(false, forKey: "updates.automatic")
+        preferences.set(false, forKey: "showsMenuBarIcon")
+        let palette = AppTheme.grove.palette(dark: false)
+        AppLocalization.shared.language = .english
+        NSApp.appearance = NSAppearance(named: .aqua)
+        let credentials = SmartUICredentials()
+        let validator = SmartUIConnectionValidator()
+        let settings = SmartSettings(preferences, credentials: credentials, validator: validator)
+        var connected = 0
+        let form = SmartUISurface(SmartConnectionForm(settings: settings, palette: palette,
+            continuesRequest: true, onConnected: { connected += 1 }, onCancel: {})
+            .padding(20).frame(width: 380), size: NSSize(width: 380, height: 280))
+        form.fitHeight(width: 380)
+        try await form.settle()
+        try form.verify("connection-new-key", labels: [L("DeepSeek API Key"), L("获取 Key"), L("连接并继续"), L("取消")],
+                        snapshots: snapshots)
+        try expect(credentials.reads == 0 && credentials.writes == 0 && !settings.enabled,
+                   "opening connection never reads, saves or enables a credential")
+        try form.enterKey("sk-ui-native-entry")
+        try await form.settle()
+        try await form.returnKey()
+        try expect(settings.hasKey && settings.enabled && credentials.writes == 1 && connected == 1,
+                   "native SecureField and Connect validate, save, enable and continue once")
+        settings.enabled = false
+        try await form.settle()
+        try expect(!SmartUISurface.descendants(form.host).contains { $0 is NSSecureTextField } && credentials.reads == 0,
+                   "saved disabled connection does not expose or pre-read the key")
+        try await form.press(L("连接并继续"))
+        try expect(settings.enabled && credentials.reads == 1 && credentials.writes == 1 && connected == 2,
+                   "saved-key connection validates without requiring entry or rewriting credentials")
+        form.window.close()
+
+        // These fixtures use the real sheets and native controls, with in-memory
+        // credentials and an injected validator. They never reach Keychain or HTTP.
+        try settings.clearKey()
+        settings.enabled = false
+        let pendingValidator = SmartUIConnectionValidator(suspended: true)
+        let pendingCredentials = SmartUICredentials()
+        let pendingSettings = SmartSettings(preferences, credentials: pendingCredentials, validator: pendingValidator)
+        let emptyResult = SmartResolution(candidates: [], selections: [], unresolved: [],
+                                          needsReview: true, modelCalls: 0, toolCalls: 0)
+        func makeModel() -> DownloadModel {
+            DownloadModel(engine: DownloadEngine(transport: SmartUINoNetwork(), pdfTransport: SmartUINoNetwork(),
+                                                 requestInterval: 0, retryDelay: 0),
+                preferences: preferences, opener: { _ in false }, smartSettings: pendingSettings,
+                smartResolver: SmartUIResolver(result: emptyResult))
+        }
+        let configurationModel = makeModel()
+        configurationModel.language = .english
+        configurationModel.settingsTab = "智能输入"
+        configurationModel.preferencesPage = .settings
+        let configuration = SmartUISurface(DownloaderView(model: configurationModel),
+                                          size: NSSize(width: 780, height: 540))
+        try await configuration.settle()
+        for leavesPage in [false, true] {
+            configurationModel.preferencesPage = .settings
+            configurationModel.settingsTab = "智能输入"
+            try await configuration.settle()
+            try configuration.enterKey("sk-ui-cancel-before-save")
+            try await configuration.settle()
+            try await configuration.press(L("连接"))
+            let calls = await pendingValidator.calls
+            try expect(calls == (leavesPage ? 2 : 1), "native connection starts validation")
+            if leavesPage { configurationModel.preferencesPage = nil }
+            else { configurationModel.settingsTab = "通用" }
+            try await configuration.settle()
+            try expect(SmartUISurface.descendants(configuration.host).compactMap { $0 as? NSSecureTextField }
+                .allSatisfy { $0.stringValue.isEmpty }, "leaving settings clears native temporary key text")
+            await pendingValidator.release()
+            try await configuration.settle()
+            try expect(!pendingSettings.enabled && !pendingSettings.hasKey && pendingCredentials.writes == 0,
+                       "hidden settings reject late validation even when validator ignores cancellation")
+        }
+        configuration.window.close()
+
+        for language in [AppLanguage.chinese, .english] {
+            let model = makeModel()
+            model.language = language
+            let scheme = language == .chinese ? ColorScheme.light : .dark
+            NSApp.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+            let main = SmartUISurface(DownloaderView(model: model).environment(\.colorScheme, scheme),
+                                      size: NSSize(width: 780, height: 540))
+            try await main.settle()
+            model.input = "下载 gpt-1 论文"
+            model.start()
+            try await main.settle()
+            guard let sheet = main.window.attachedSheet?.contentView else {
+                throw TestFailure.failed("first smart request presents the main connection sheet")
+            }
+            try expect(SmartUISurface.descendants(sheet).compactMap { $0 as? NSSecureTextField }
+                .contains { $0.placeholderString == L("DeepSeek API Key") &&
+                    $0.currentEditor() != nil && $0.currentEditor() === sheet.window?.firstResponder },
+                       "main setup gives the native secure field initial focus")
+            try main.verify("connection-main-" + language.rawValue,
+                labels: ["API Key", L("获取 Key"), L("连接并继续"), L("取消")],
+                snapshots: snapshots, in: sheet)
+            try expect(sheet.bounds.width <= 420 && sheet.bounds.height < 400,
+                       "main connection sheet remains compact and all actions fit")
+            try await main.press(L("取消"), in: sheet)
+            try expect(!model.smartInput.needsSetup && model.input == "下载 gpt-1 论文",
+                       "cancelling the actual main sheet preserves the request")
+            main.window.close()
+
+            let quickState = QuickDownloadState(model: model)
+            quickState.draft = "下载 gpt-1 论文"
+            let quick = SmartUISurface(QuickDownloadView(state: quickState, model: model,
+                openWindow: {}, openSettings: {}, quit: {}, close: {}).environment(\.colorScheme, scheme),
+                size: NSSize(width: 380, height: 540))
+            try await quick.settle()
+            quickState.submit()
+            try await quick.settle()
+            guard let quickSheet = quick.window.attachedSheet?.contentView else {
+                throw TestFailure.failed("first quick request presents its connection sheet")
+            }
+            try expect(SmartUISurface.descendants(quickSheet).compactMap { $0 as? NSSecureTextField }
+                .contains { $0.placeholderString == L("DeepSeek API Key") &&
+                    $0.currentEditor() != nil && $0.currentEditor() === quickSheet.window?.firstResponder },
+                       "quick setup focuses the secure field instead of the request editor")
+            try quick.verify("connection-quick-" + language.rawValue,
+                labels: ["API Key", L("获取 Key"), L("连接并继续"), L("取消")],
+                snapshots: snapshots, in: quickSheet)
+            try expect(quickSheet.bounds.width <= 380 && quickSheet.bounds.height < 400,
+                       "quick connection sheet keeps every action within its narrow surface")
+            try await quick.press(L("取消"), in: quickSheet)
+            try expect(!quickState.smart.needsSetup && quickState.draft == "下载 gpt-1 论文",
+                       "cancelling the actual quick sheet preserves the request")
+            quick.window.close()
+        }
+
+        // A real transient menu popover retains its hosting tree after closing.
+        // Its delegate, not only SwiftUI onDisappear, must invalidate setup.
+        let menuCredentials = SmartUICredentials()
+        let menuValidator = SmartUIConnectionValidator(suspended: true)
+        let menuSettings = SmartSettings(preferences, credentials: menuCredentials, validator: menuValidator)
+        let menuResolver = SmartUIRecordingResolver()
+        let menuModel = DownloadModel(
+            engine: DownloadEngine(transport: SmartUINoNetwork(), pdfTransport: SmartUINoNetwork(),
+                                   requestInterval: 0, retryDelay: 0),
+            preferences: preferences, opener: { _ in false },
+            smartSettings: menuSettings, smartResolver: menuResolver)
+        menuModel.language = .english
+        menuModel.showsMenuBarIcon = true
+        let controller = MenuBarController(model: menuModel, openWindow: {}, openSettings: {}, quit: {})
+        defer {
+            controller.popover.close()
+            menuModel.showsMenuBarIcon = false
+            Task { await menuValidator.release() }
+        }
+        try await form.settle()
+        controller.togglePopover()
+        try await form.settle()
+        guard let popoverContent = controller.popover.contentViewController?.view,
+              let editor = SmartUISurface.descendants(popoverContent)
+                .compactMap({ $0 as? QuickLinkEditor.Editor }).first,
+              let popoverWindow = popoverContent.window else {
+            throw TestFailure.failed("real menu popover mounts its native request editor")
+        }
+        try expect(controller.popover.isShown && controller.popover.behavior == .transient,
+                   "connection regression uses the actual transient menu popover")
+        editor.insertText("Find the GPT-1 paper", replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+        let submit = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: popoverWindow.windowNumber,
+            context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+        try expect(editor.performKeyEquivalent(with: submit), "real menu request submits with Command Return")
+        try await form.settle()
+        try expect(controller.popover.isShown && controller.state.smart.needsSetup,
+                   "presenting the connection sheet does not dismiss its transient popover")
+        guard let menuSheet = popoverWindow.attachedSheet?.contentView else {
+            throw TestFailure.failed("real menu popover presents its connection sheet")
+        }
+        try form.verify("connection-menu-popover",
+            labels: [L("连接 DeepSeek"), L("获取 Key"), L("连接并继续"), L("取消")],
+            snapshots: snapshots, in: menuSheet)
+        try form.enterKey("sk-ui-menu-cancelled", in: menuSheet)
+        try await form.settle()
+        try await form.returnKey(in: menuSheet)
+        let validationCalls = await menuValidator.calls
+        try expect(validationCalls == 1 && controller.popover.isShown && controller.state.smart.needsSetup,
+                   "menu sheet validation starts without closing the transient popover")
+        controller.popover.performClose(nil)
+        try await form.settle()
+        try expect(!controller.popover.isShown && !controller.state.smart.needsSetup
+                   && controller.state.draft == "Find the GPT-1 paper",
+                   "closing the real popover cancels setup immediately and preserves its draft")
+        await menuValidator.release()
+        try await form.settle()
+        let resolverCalls = await menuResolver.calls
+        try expect(!menuSettings.hasKey && !menuSettings.enabled && menuCredentials.writes == 0
+                   && resolverCalls == 0 && menuModel.items.isEmpty,
+                   "a late menu validation cannot save, enable, resolve or enqueue after popover close")
     }
 }

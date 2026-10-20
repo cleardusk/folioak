@@ -327,6 +327,14 @@ struct DownloaderView: View {
         .sheet(item: $model.renamingAsset, onDismiss: { if selectedID != nil { listFocus = UUID() } }) { request in
             AssetRenameView(model: model, request: request)
         }
+        .sheet(isPresented: Binding(get: { model.smartInput.needsSetup }, set: { if !$0 && model.smartInput.needsSetup { model.smartInput.cancel() } })) {
+            SmartConnectionForm(settings: model.smartSettings, palette: palette, continuesRequest: true,
+                                requiresNewKey: model.smartInput.requiresNewKey,
+                                connectionOwner: model.smartInput.setupConnectionOwner,
+                                onConnected: model.smartInput.resumeAfterSetup, onCancel: model.smartInput.cancel)
+                .padding(24).frame(width: 400)
+                .background(ThemePalette.color(palette.canvas))
+        }
         .onChange(of: model.previewURL) { url in if url == nil && selectedID != nil { listFocus = UUID() } }
         .onReceive(model.$batchID.dropFirst()) { _ in page = .downloads; filter = .all; query = ""; searchExpanded = false; searchFocused = false; selection.clear(); listFocus = nil }
     }
@@ -749,7 +757,7 @@ struct DownloaderView: View {
                     .accessibilityIdentifier("smart-input-request")
             } else {
                 HStack(spacing: WorkspaceMetrics.Space.compact) {
-                    Text(L(model.smartSettings.enabled ? "添加资源" : "添加链接")).font(WorkspaceMetrics.TypeScale.title)
+                    Text(L("添加资源")).font(WorkspaceMetrics.TypeScale.title)
                     Spacer()
                     if model.hasMediaInput && model.mediaFormat == .audio {
                         Button { model.mediaFormat = .automatic } label: {
@@ -779,7 +787,7 @@ struct DownloaderView: View {
                                                          modifiers: model.shortcuts[.download].swiftModifiers),
                         onEdit: editSmartRequest)
                 } else {
-                    if !model.smartSettings.enabled || SmartInput.isDirect(model.input) {
+                    if SmartInput.isDirect(model.input) {
                         InputRecognitionChips(recognition: recognition, palette: palette)
                     }
                     primaryAction(recognition: recognition)
@@ -828,18 +836,18 @@ struct DownloaderView: View {
                 .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
         } else if model.smartInput.resolution == nil {
             let count = recognition.total
-            let actionLabel = model.smartSettings.enabled && !SmartInput.isDirect(model.input) ? L("查找资源") :
+            let actionLabel = !SmartInput.isDirect(model.input) && !model.input.isEmpty ? L("查找资源") :
                 count == 0 ? L("开始下载") : L("下载 \(count) 项")
             Button(action: model.start) {
                 HStack(spacing: 6) {
-                    Image(systemName: model.smartSettings.enabled && !SmartInput.isDirect(model.input)
+                    Image(systemName: !SmartInput.isDirect(model.input) && !model.input.isEmpty
                           ? "magnifyingglass" : "arrow.down").font(.system(size: 12, weight: .bold))
                     Text(actionLabel).monospacedDigit()
                 }
             }
                 .buttonStyle(PrimaryActionStyle(palette: palette))
                 .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
-                .disabled(count == 0)
+                .disabled(model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.smartInput.needsSetup)
                 .help(L("开始下载（\(model.shortcuts[.download].label)）"))
                 .accessibilityLabel(actionLabel)
         }
