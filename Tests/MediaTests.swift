@@ -11,7 +11,29 @@ private final class ProcessProbe: @unchecked Sendable {
 }
 
 extension CoreTests {
+    static func xBroadcastRoutingTests() throws {
+        let broadcastID = "1RKZzBELBbXKB"
+        for host in ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"] {
+            for suffix in ["", "/", "?s=20#share"] {
+                let source = try DownloadSource.parse("https://\(host)/i/broadcasts/\(broadcastID)\(suffix)")
+                try expect(source.isMedia && MediaDownloader.accepts(source.webURL) && source.rateLimitKey == "media:x",
+                           "X broadcast links use the media engine and share the X rate limit")
+                try expect(source.webURL.path.contains(broadcastID) && source.webURL.fragment == nil,
+                           "broadcast routing preserves the case-sensitive ID and removes fragments")
+            }
+        }
+        for path in ["/i/broadcasts", "/i/broadcasts/", "/i/broadcasts/\(broadcastID)/extra", "/i/broadcasts/not-an-id", "/i/events/123"] {
+            try rejects({ _ = try DownloadSource.parse("https://x.com" + path) },
+                        "incomplete broadcasts and event collections remain unsupported")
+        }
+        try expect(!MediaDownloader.accepts(URL(string: "https://x.com.example.org/i/broadcasts/\(broadcastID)")!),
+                   "lookalike domains cannot route to the authenticated media engine")
+        try rejects({ _ = try DownloadSource.parse("https://user:pass@x.com/i/broadcasts/\(broadcastID)") },
+                    "broadcast links reject embedded credentials")
+    }
+
     @MainActor static func mediaTests(root: URL) async throws {
+        try xBroadcastRoutingTests()
         try await douyinTests(root: root)
         try browserAuthenticationTests(root: root)
         try await browserAuthenticationProcessTests(root: root)

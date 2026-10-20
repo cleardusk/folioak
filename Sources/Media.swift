@@ -42,7 +42,9 @@ enum MediaSite: String, CaseIterable {
             return host == "youtu.be" ? matches(#"^/[^/]+/?$"#) : path == "/watch" || path.hasPrefix("/shorts/") || path.hasPrefix("/live/")
         case .bilibili:
             return host == "b23.tv" ? matches(#"^/[A-Za-z0-9]+/?$"#) : path.hasPrefix("/video/")
-        case .x: return matches(#"^/(?:[^/]+/status|i/web/status)/[0-9]+(?:/video/[0-9]+)?/?$"#)
+        case .x:
+            return matches(#"^/(?:[^/]+/status|i/web/status)/[0-9]+(?:/video/[0-9]+)?/?$"#)
+                || matches(#"^/i/broadcasts/[A-Za-z0-9_]+/?$"#)
         case .toutiao: return host != "v.toutiao.com" && matches(#"^/video/[0-9]+/?$"#)
         case .xiaohongshu:
             return host == "xhslink.com" ? matches(#"^/(?:[am]/[A-Za-z0-9]+|[A-Za-z0-9]{2,})/?$"#) : matches(#"^/(?:explore|discovery/item)/[0-9a-f]{24}/?$"#)
