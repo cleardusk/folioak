@@ -92,12 +92,14 @@ extension CoreTests {
         try rejects({ _ = try captureModel.captureInput(String(repeating: "x", count: ResourceLimits.inputBytes + 1)) },
                     "capture remains bounded before any network request")
 
-        func proposal(_ path: String = "paper.pdf", review: Bool = false, unresolved: [String] = []) -> SmartResolution {
+        func proposal(_ path: String = "paper.pdf", review: Bool = false, unresolved: [String] = [],
+                      notes: [String] = []) -> SmartResolution {
             SmartResolution(candidates: [
                 SmartCandidate(id: "c1", title: "Fixture", url: URL(string: "https://example.org/" + path)!,
                                detail: "fixture", origin: review ? .search : .supplied)
             ], selections: [SmartSelection(candidateID: "c1", format: .inherit, skipExisting: false)],
-               unresolved: unresolved, needsReview: review, modelCalls: 1, toolCalls: review ? 1 : 0)
+               unresolved: unresolved, needsReview: review, modelCalls: 1, toolCalls: review ? 1 : 0,
+               notes: notes)
         }
 
         let directTransport = SmartInputTransport(pdf: pdf), directResolver = DelayedSmartResolver()
@@ -241,9 +243,45 @@ extension CoreTests {
         reviewed.smartInput.acceptSelection()
         reviewed.smartInput.acceptSelection()
         try expect(reviewed.items.count == 1 && acceptedCallbacks == 1 &&
-                   reviewed.smartInput.message?.contains("未找到补充材料") == true,
-                   "accepting a partial selection enqueues once and keeps unmet requirements visible")
+                   reviewed.smartInput.remainingRequirements == ["未找到补充材料"] &&
+                   reviewed.smartInput.message?.contains("未找到补充材料") != true,
+                   "partial acceptance enqueues once and retains unmet requirements separately from its short receipt")
         await reviewed.cancelAndWait()
+
+        // Selection guidance describes a recommendation; it is not a missing
+        // deliverable and must not leave a completed request in either editor.
+        for useQuick in [false, true] {
+            let resolver = DelayedSmartResolver(), transport = SmartInputTransport(pdf: pdf)
+            await transport.suspend()
+            let model = DownloadModel(engine: DownloadEngine(transport: transport, pdfTransport: transport,
+                requestInterval: 0, retryDelay: 0), preferences: preferences,
+                smartSettings: settings, smartResolver: resolver)
+            model.directory = root.appendingPathComponent(useQuick ? "quick-notes" : "main-notes")
+            let quick = QuickDownloadState(model: model)
+            let original = "21世纪最牛逼的论文"
+            let notes = ["按高被引论文推荐。", "如需其他候选，可修改需求。"]
+            let state = useQuick ? quick.smart : model.smartInput
+            model.input = useQuick ? "主窗口尚未提交的需求" : original
+            if useQuick { quick.draft = original; quick.submit() } else { model.start() }
+            try await awaitSmart { await resolver.inputs.count == 1 }
+            await resolver.complete(0, with: proposal("recommended.pdf", review: true, notes: notes))
+            try await awaitSmart { state.resolution != nil }
+            try expect(state.resolution?.notes == notes && state.resolution?.unresolved.isEmpty == true &&
+                       model.items.isEmpty,
+                       "recommendation notes remain available for review without becoming missing requirements")
+            if useQuick { quick.submit() } else { model.start() }
+            try expect(model.items.count == 1 && state.resolution == nil && state.remainingRequirements.isEmpty &&
+                       (state.message?.count ?? 0) < 100 &&
+                       notes.allSatisfy { state.message?.contains($0) != true },
+                       "accepting a recommendation leaves a short receipt and no stale notes or missing requirements")
+            try expect(useQuick ? quick.draft.isEmpty && model.input == "主窗口尚未提交的需求" : model.input.isEmpty,
+                       "notes-only acceptance clears the fulfilled editor and preserves the other window's draft")
+            state.acceptSelection()
+            let calls = await resolver.inputs.count
+            try expect(model.items.count == 1 && calls == 1,
+                       "accepted recommendations cannot be queued or resolved a second time by a stale action")
+            await model.cancelAndWait()
+        }
 
         // A raw search/page observation must not become a download just because
         // it has a supported file extension or a UI tries to select it.
@@ -356,16 +394,18 @@ extension CoreTests {
         quick.submit()
         let quickCalls = await quickResolver.inputs.count
         try expect(quickModel.items.count == 1 && quick.draft == "查找论文和补充材料" &&
-                   quick.smart.message?.contains("未找到补充材料") == true && quickCalls == 1,
-                   "quick primary action accepts once and keeps the original request when requirements remain")
+                   quick.smart.remainingRequirements == ["未找到补充材料"] &&
+                   quick.smart.message?.contains("未找到补充材料") != true && quickCalls == 1,
+                   "quick acceptance retains the original partial request and separates unmet requirements from its receipt")
         await quickModel.cancelAndWait()
         quick.draft = "查找论文"
+        try expect(quick.smart.remainingRequirements.isEmpty, "editing clears obsolete unmet requirements")
         quick.submit()
         try await awaitSmart { await quickResolver.inputs.count == 2 }
         await quickResolver.complete(1, with: proposal("complete.pdf", review: true))
         try await awaitSmart { quick.smart.resolution != nil }
         quick.submit()
-        try expect(quick.draft.isEmpty && quickModel.items.count == 1,
+        try expect(quick.draft.isEmpty && quickModel.items.count == 1 && quick.smart.remainingRequirements.isEmpty,
                    "fully resolved quick acceptance clears the submitted draft")
         await quickModel.cancelAndWait()
 

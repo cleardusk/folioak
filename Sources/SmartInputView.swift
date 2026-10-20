@@ -11,32 +11,37 @@ struct SmartInputStatusView: View {
 
     private var secondary: Color { ThemePalette.color(palette.secondary) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             if let progress = state.progress {
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
                     Text(L(progress.label)).font(.system(size: 12))
                         .accessibilityIdentifier("smart-input-progress")
                     Spacer(minLength: 4)
-                    Button(L("取消"), action: state.cancel).controlSize(.small)
-                        .keyboardShortcut(.cancelAction)
-                        .accessibilityIdentifier("smart-input-cancel")
+                    Button(L("取消")) {
+                        if let onEdit { onEdit() } else { state.cancel() }
+                    }
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(secondary)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("smart-input-cancel")
                 }
             } else {
                 if let message = state.message, !message.isEmpty {
                     HStack(alignment: .top, spacing: 8) {
-                        let text = Text(L(message)).font(.system(size: 12))
-                            .foregroundStyle(state.failed ? Color.red : secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("smart-input-message")
-                        if message.count > 160 {
-                            ScrollView {
-                                text.frame(maxWidth: .infinity, alignment: .leading)
-                            }.frame(height: 48)
-                        } else { text }
+                        Image(systemName: state.failed ? "exclamationmark.circle" : "checkmark.circle")
+                            .foregroundStyle(state.failed ? UIColors.error : ThemePalette.color(palette.accent))
+                            .font(.system(size: 13)).padding(.top, 1)
+                        VStack(alignment: .leading, spacing: 4) {
+                            if state.failed {
+                                Text(L("未能完成查找")).font(.system(size: 12, weight: .medium))
+                            }
+                            Text(L(message)).font(.system(size: state.failed ? 11 : 12))
+                                .foregroundStyle(secondary).fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("smart-input-message")
+                        }
+                        Spacer(minLength: 4)
                         if state.resolution == nil {
-                            Spacer(minLength: 4)
-                            Button(action: state.cancel) { Image(systemName: "xmark") }
+                            Button(action: state.cancel) { Image(systemName: "xmark").frame(width: 22, height: 22) }
                                 .buttonStyle(.plain).foregroundStyle(secondary)
                                 .accessibilityLabel(L("关闭智能输入结果"))
                         }
@@ -47,41 +52,47 @@ struct SmartInputStatusView: View {
                         candidateRow(candidate, showsSelection: resolution.selections.isEmpty)
                     } else if !resolution.candidates.isEmpty {
                         ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 12) {
+                            LazyVStack(alignment: .leading, spacing: 14) {
                                 ForEach(resolution.candidates) { candidate in
                                     candidateRow(candidate, showsSelection: true)
-                                    if candidate.id != resolution.candidates.last?.id {
-                                        Divider().padding(.leading, 20)
-                                    }
+                                    if candidate.id != resolution.candidates.last?.id { Divider() }
                                 }
                             }.padding(.trailing, 4)
                         }
-                        .frame(height: 160)
+                        .frame(height: compact ? 166 : 182)
                         .accessibilityIdentifier("smart-input-candidates")
                     }
+                    if !resolution.notes.isEmpty {
+                        SmartInputDetailsView(label: L("选择说明"), details: resolution.notes,
+                            palette: palette, identifier: "smart-input-notes")
+                    }
                     if !resolution.unresolved.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            if !resolution.candidates.isEmpty {
-                                Text(L("未完成")).font(.system(size: 11, weight: .medium))
+                        if resolution.candidates.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(L("暂未找到可下载的资料")).font(.system(size: 15, weight: .medium))
+                                Text(L(resolution.unresolved[0])).font(.system(size: 12))
+                                    .foregroundStyle(secondary).fixedSize(horizontal: false, vertical: true)
+                                if resolution.unresolved.count > 1 {
+                                    SmartInputDetailsView(label: L("还有 \(resolution.unresolved.count - 1) 项待补充"),
+                                        details: Array(resolution.unresolved.dropFirst()), palette: palette,
+                                        identifier: "smart-input-unresolved")
+                                }
                             }
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(Array(resolution.unresolved.enumerated()), id: \.offset) { _, requirement in
-                                        Text("• " + L(requirement)).font(.system(size: 11))
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }.frame(maxWidth: .infinity, alignment: .leading)
-                            }.frame(height: min(60, max(22, CGFloat(resolution.unresolved.count) * 22)))
-                        }.foregroundStyle(secondary)
-                            .accessibilityIdentifier("smart-input-unresolved")
+                        } else {
+                            SmartInputDetailsView(label: L("还有 \(resolution.unresolved.count) 项待补充"),
+                                details: resolution.unresolved, palette: palette, identifier: "smart-input-unresolved")
+                        }
                     }
                     if showsReviewActions {
                         HStack {
                             Spacer(minLength: 0)
                             SmartInputReviewActionsView(state: state, palette: palette,
                                 submitShortcut: submitShortcut, onEdit: onEdit)
-                        }.padding(.top, 4)
+                        }.padding(.top, 2)
                     }
+                } else if !state.remainingRequirements.isEmpty {
+                    SmartInputDetailsView(label: L("还有 \(state.remainingRequirements.count) 项待补充"),
+                        details: state.remainingRequirements, palette: palette, identifier: "smart-input-unresolved")
                 }
             }
         }
@@ -93,24 +104,28 @@ struct SmartInputStatusView: View {
     private func candidateRow(_ candidate: SmartCandidate, showsSelection: Bool) -> some View {
         let selected = state.selections.contains { $0.candidateID == candidate.id }
         let indices = state.selections.indices.filter { state.selections[$0].candidateID == candidate.id }
-        let hasFormats = (try? DownloadSource.parse(candidate.url.absoluteString))?.supportsAudioExtraction == true
-        return VStack(alignment: .leading, spacing: 6) {
+        let source = try? DownloadSource.parse(candidate.url.absoluteString)
+        let hasFormats = source?.supportsAudioExtraction == true
+        let multiple = (state.resolution?.candidates.count ?? 0) > 1
+        return HStack(alignment: .top, spacing: compact ? 10 : 14) {
             if showsSelection {
-                Toggle(isOn: Binding(get: {
+                Toggle(L("选择资料"), isOn: Binding(get: {
                     state.selections.contains { $0.candidateID == candidate.id }
-                }, set: { state.setSelected(candidate, selected: $0) })) {
-                    Text(candidate.title).font(.system(size: 13, weight: .medium))
-                        .lineLimit(3).fixedSize(horizontal: false, vertical: true)
-                }
-                .toggleStyle(.checkbox)
-                .disabled(!selected && !state.canSelect(candidate))
-                .accessibilityIdentifier("smart-input-candidate-" + candidate.id)
-            } else {
-                Text(candidate.title).font(.system(size: 13, weight: .medium))
-                    .lineLimit(3).fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("smart-input-candidate-" + candidate.id)
+                }, set: { state.setSelected(candidate, selected: $0) }))
+                    .labelsHidden().toggleStyle(.checkbox)
+                    .disabled(!selected && !state.canSelect(candidate))
+                    .padding(.top, 4)
+                    .accessibilityLabel(L("选择资料") + " · " + candidate.title)
+                    .accessibilityIdentifier("smart-input-selection-" + candidate.id)
             }
-            VStack(alignment: .leading, spacing: 4) {
+            if !compact || !multiple {
+                SmartResourceMark(source: source, palette: palette)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                Text(candidate.title).font(.system(size: compact ? 14 : 17, weight: .semibold))
+                    .lineSpacing(2).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                    .help(candidate.title).accessibilityIdentifier("smart-input-candidate-" + candidate.id)
                 HStack(spacing: 8) {
                     Link(sourceLabel(candidate), destination: candidate.url)
                         .font(.system(size: 11)).foregroundStyle(secondary).lineLimit(1)
@@ -139,7 +154,7 @@ struct SmartInputStatusView: View {
                         }.controlSize(.small)
                     }
                 }
-            }.padding(.leading, showsSelection ? 20 : 0)
+            }.frame(maxWidth: .infinity, alignment: .leading)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -159,7 +174,7 @@ struct SmartInputStatusView: View {
     private func sourceLabel(_ candidate: SmartCandidate) -> String {
         let host = candidate.url.host ?? candidate.url.absoluteString
         let source = try? DownloadSource.parse(candidate.url.absoluteString)
-        if source?.isPaper == true { return host + " · PDF" }
+        if source?.isPaper == true { return source?.reference.map { "arXiv " + $0.identifier + " · PDF" } ?? (host + " · PDF") }
         let ext = candidate.url.pathExtension.lowercased()
         if FileStorage.extensions.contains(ext) || GenericFileStorage.extensions.contains(ext) {
             return host + " · " + ext.uppercased()
@@ -190,6 +205,62 @@ struct SmartInputStatusView: View {
     }
 }
 
+private struct SmartResourceMark: View {
+    let source: DownloadSource?
+    let palette: ThemePalette
+    private var isPaper: Bool { source?.isPaper == true }
+    var body: some View {
+        VStack(spacing: 5) {
+            Image(systemName: isPaper ? "doc.text" : source?.isMedia == true ? "play.rectangle" : "doc")
+                .font(.system(size: 21, weight: .light))
+            if isPaper { Text("PDF").font(.system(size: 8, weight: .semibold)) }
+        }
+        .foregroundStyle(ThemePalette.color(palette.accent))
+        .frame(width: 42, height: 56)
+        .background(ThemePalette.color(palette.accent).opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(ThemePalette.color(palette.accent).opacity(0.18), lineWidth: 1))
+    }
+}
+
+struct SmartInputDetailsView: View {
+    let label: String
+    let details: [String]
+    let palette: ThemePalette
+    let identifier: String
+    @WorkspaceViewState private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Text(label).font(.system(size: 11))
+                }.frame(minHeight: 22).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).accessibilityIdentifier(identifier)
+            .accessibilityValue(L(expanded ? "已展开" : "已折叠"))
+            if expanded {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(details.enumerated()), id: \.offset) { _, detail in
+                            Text(L(detail)).font(.system(size: 12)).lineSpacing(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }.padding(.trailing, 4)
+                }
+                .frame(height: min(110, CGFloat(details.reduce(0) { $0 + max(1, ($1.count + 39) / 40) }) * 19 + 8))
+                .padding(.leading, 14)
+            }
+        }.foregroundStyle(ThemePalette.color(palette.secondary))
+            .onChange(of: details) { _ in expanded = false }
+    }
+}
+
 struct SmartInputReviewActionsView: View {
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var state: SmartDownloadState
@@ -199,7 +270,7 @@ struct SmartInputReviewActionsView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button(L("返回修改")) {
+            Button(L("修改需求")) {
                 if let onEdit { onEdit() } else { state.cancel() }
             }
             .buttonStyle(.plain).font(.system(size: 12))

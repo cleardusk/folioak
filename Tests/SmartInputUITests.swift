@@ -57,6 +57,17 @@ private struct SmartUINoNetwork: HTTPTransport {
     }
 }
 
+private struct SmartUIHeldDownload: HTTPTransport {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await Task.sleep(nanoseconds: 30_000_000_000)
+        throw CancellationError()
+    }
+    func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
+        try await Task.sleep(nanoseconds: 30_000_000_000)
+        throw CancellationError()
+    }
+}
+
 private final class SmartUIPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -83,6 +94,24 @@ private final class SmartUIPanel: NSPanel {
         host.layoutSubtreeIfNeeded()
         let height = ceil(host.fittingSize.height)
         if height > 0 { window.setContentSize(NSSize(width: width, height: height)) }
+    }
+    func verifyVisibleQueueRow() throws {
+        let rows = Self.descendants(host).compactMap { $0 as? FileRowClickRegion.Region }
+            .filter { !$0.isControls && !$0.isHiddenOrHasHiddenAncestor }
+        try expect(rows.contains { $0.visibleRect.height >= 24 && $0.visibleRect.width >= 80 },
+                   "the minimum window keeps a real download row visible below the input panel")
+    }
+    func scrollDetailsToEnd() async throws {
+        guard let scroll = Self.descendants(host).compactMap({ $0 as? NSScrollView }).first(where: {
+            !$0.isHiddenOrHasHiddenAncestor && $0.bounds.height <= 112 && $0.bounds.height >= 80 &&
+            ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height + 10
+        }), let document = scroll.documentView else {
+            throw TestFailure.failed("expanded details have a bounded native scroll region")
+        }
+        let y = document.isFlipped ? document.bounds.maxY - scroll.contentView.bounds.height : document.bounds.minY
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try await settle()
     }
     static func descendants(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(descendants) }
     func image(in view: NSView? = nil) throws -> NSBitmapImageRep {
@@ -126,10 +155,14 @@ private final class SmartUIPanel: NSPanel {
                        "absent smart UI action \(name): \(label); actual: \(text)")
         }
     }
-    func enterKey(_ key: String, in view: NSView? = nil) throws {
-        guard let field = Self.descendants(view ?? host).compactMap({ $0 as? NSSecureTextField })
-            .first(where: { $0.isEnabled && !$0.isHiddenOrHasHiddenAncestor }) else {
-            throw TestFailure.failed("connection form has an enabled native secure field")
+    func enterKey(_ key: String, in view: NSView? = nil) async throws {
+        let surface = view ?? host
+        try expect(surface.window?.isVisible == true, "connection typing window is mounted and visible")
+        try await settle()
+        guard let field = Self.descendants(surface).compactMap({ $0 as? NSSecureTextField })
+            .first(where: { $0.isEnabled && !$0.isHiddenOrHasHiddenAncestor &&
+                $0.placeholderString == L("DeepSeek API Key") && $0.window === surface.window }) else {
+            throw TestFailure.failed("connection form has a visible enabled native secure API key field with its exact localized placeholder")
         }
         field.selectText(nil)
         guard let editor = field.currentEditor() as? NSTextView else {
@@ -138,16 +171,22 @@ private final class SmartUIPanel: NSPanel {
         editor.insertText(key, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
     }
     func returnKey(in view: NSView? = nil) async throws {
-        guard let targetWindow = (view ?? host).window,
+        guard let targetWindow = (view ?? host).window, targetWindow.isVisible,
               let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: targetWindow.windowNumber,
                 context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
             throw TestFailure.failed("connection Return key event")
         }
-        targetWindow.makeKeyAndOrderFront(nil)
-        try expect(NSApp.keyWindow === targetWindow && targetWindow.firstResponder is NSTextView,
-                   "native connection Return targets the focused secure editor")
-        NSApp.sendEvent(event)
+        let focusedSecureEditor = Self.descendants(view ?? host).compactMap { $0 as? NSSecureTextField }
+            .contains { $0.isEnabled && !$0.isHiddenOrHasHiddenAncestor &&
+                $0.window === targetWindow && $0.currentEditor() is NSTextView &&
+                $0.currentEditor() === targetWindow.firstResponder }
+        try expect(focusedSecureEditor,
+                   "native connection Return targets the focused secure editor; key=\(NSApp.keyWindow === targetWindow), active=\(NSApp.isActive), responder=\(String(describing: targetWindow.firstResponder.map { type(of: $0) }))")
+        // Exercise the real window/field-editor key route. macOS may refuse to
+        // activate this CLI test host; global application activation is not part
+        // of a window-local SecureField submission.
+        targetWindow.sendEvent(event)
         try await settle()
     }
     func press(_ label: String, in view: NSView? = nil) async throws {
@@ -188,6 +227,9 @@ extension CoreTests {
         let suite = "folioak-smart-ui-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
+        let fixtureRoot = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-smart-ui-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: fixtureRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
         preferences.set(false, forKey: "updates.automatic")
         preferences.set(false, forKey: "showsMenuBarIcon")
         let settings = SmartSettings(preferences, credentials: SmartUICredentials())
@@ -210,11 +252,14 @@ extension CoreTests {
             SmartSelection(candidateID: "paper-1", format: .inherit, skipExisting: false)
         ], unresolved: ["尚未找到官方补充材料。", "The requested supplementary archive was not found on the inspected page."],
            needsReview: true, modelCalls: 2, toolCalls: 1)
-        func makeModel(_ mode: SmartUIResolver.Mode = .review, resolution: SmartResolution? = nil) -> DownloadModel {
-            DownloadModel(engine: DownloadEngine(transport: SmartUINoNetwork(), pdfTransport: SmartUINoNetwork(),
+        func makeModel(_ mode: SmartUIResolver.Mode = .review, resolution: SmartResolution? = nil,
+                       transport: any HTTPTransport = SmartUINoNetwork()) -> DownloadModel {
+            let model = DownloadModel(engine: DownloadEngine(transport: transport, pdfTransport: transport,
                                                  requestInterval: 0, retryDelay: 0),
                           preferences: preferences, opener: { _ in false }, smartSettings: settings,
                           smartResolver: SmartUIResolver(result: resolution ?? result, mode: mode))
+            model.directory = fixtureRoot.appendingPathComponent(UUID().uuidString)
+            return model
         }
         func waitForReview(_ state: SmartDownloadState) async throws {
             for _ in 0..<100 {
@@ -224,9 +269,17 @@ extension CoreTests {
             }
             throw TestFailure.failed("smart UI fixture resolver did not complete")
         }
+        func waitForFixture(_ ready: () -> Bool) async throws {
+            for _ in 0..<200 {
+                if ready() { return }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            throw TestFailure.failed("the controlled resolver did not reach its requested snapshot state")
+        }
         // Replay the real search table through the resolver before rendering.
         // A hand-polished candidate would miss the original filename/evidence bug.
         let paperResult = try await smartPaperPresentationFixture()
+        let subjectiveResult = try await smartSubjectivePresentationFixture()
         for selectedLanguage in [AppLanguage.chinese, .english] {
             for scheme in [ColorScheme.light, .dark] {
                 let model = makeModel()
@@ -253,7 +306,7 @@ extension CoreTests {
                 try await status.settle()
                 try expect(status.host.bounds.height <= 440, "standalone review has bounded compact height")
                 try status.verify("review-" + name,
-                                  labels: [L("下载 3 项"), L("未完成"), L("返回修改")],
+                                  labels: [L("下载 3 项"), L("还有 2 项待补充"), L("修改需求")],
                                   absentLabels: [L("已有的跳过")], snapshots: snapshots)
                 let scrolls = SmartUISurface.descendants(status.host).compactMap { $0 as? NSScrollView }
                 try expect(!scrolls.isEmpty && scrolls.allSatisfy { $0.bounds.height <= 202 },
@@ -264,9 +317,9 @@ extension CoreTests {
                                           size: NSSize(width: 780, height: 540))
                 try await main.settle()
                 try expect(main.host.bounds.size == NSSize(width: 780, height: 540), "review keeps minimum main-window size")
-                try main.verify("main-" + name, labels: [L("下载 3 项"), L("未完成"), L("返回修改"), L("视频"), L("仅音频")],
+                try main.verify("main-" + name, labels: [L("下载 3 项"), L("还有 2 项待补充"), L("修改需求"), L("视频"), L("仅音频")],
                                 uniqueLabels: [L("下载 3 项")],
-                                absentLabels: [L("已有的跳过"), L("粘贴链接，开始下载"), L("试试示例：Attention Is All You Need")],
+                                absentLabels: [L("已有的跳过"), L("添加资源"), L("粘贴链接，开始下载"), L("试试示例：Attention Is All You Need")],
                                 snapshots: snapshots)
                 try expect(SmartUISurface.descendants(main.host).allSatisfy { !($0 is LinkTextView) },
                            "review replaces the large input editor with a compact request summary")
@@ -289,7 +342,7 @@ extension CoreTests {
                 try await quick.settle()
                 try expect(quick.host.bounds.width == 380 && quick.host.bounds.height <= 720,
                            "quick review fits a compact window even with recent downloads")
-                try quick.verify("quick-" + name, labels: [L("下载 3 项"), L("未完成"), L("打开 Folioak"), L("视频"), L("仅音频")],
+                try quick.verify("quick-" + name, labels: [L("下载 3 项"), L("还有 2 项待补充"), L("打开 Folioak"), L("视频"), L("仅音频")],
                                  uniqueLabels: [L("下载 3 项")], absentLabels: [L("已有的跳过")], snapshots: snapshots)
                 quick.window.close()
                 quickState.smart.cancel()
@@ -334,7 +387,7 @@ extension CoreTests {
                 try await paperReview.settle()
                 try paperReview.verify("paper-" + name,
                     labels: ["Improving Language Understanding by Generative Pre-Training",
-                             "cdn.openai.com", L("下载文件"), L("返回修改"), "ReviewPapers", "Earlier saved paper"],
+                             "cdn.openai.com", L("下载文件"), L("修改需求"), "ReviewPapers", "Earlier saved paper"],
                     absentLabels: ["language_understanding_paper.pdf", "Local copy", "one-sentence answer",
                                    L("已有的跳过"), L("已选 1 / 10")], snapshots: snapshots)
                 try expect(paperReview.host.bounds.size == NSSize(width: 780, height: 540),
@@ -353,14 +406,131 @@ extension CoreTests {
                     absentLabels: ["Improving Language Understanding by Generative Pre-Training"], snapshots: snapshots)
                 paperReview.window.close()
                 paperModel.setPDFDirectoryEnabled(false)
+
+                let recommended = makeModel(resolution: subjectiveResult)
+                recommended.language = selectedLanguage
+                recommended.theme = .grove
+                recommended.history = [DownloadItem(original: "https://example.org/earlier.pdf",
+                    directURL: URL(string: "https://example.org/earlier.pdf"), state: .failed,
+                    documentTitle: "Earlier saved paper", preservesInput: true)]
+                recommended.input = "21世纪最牛逼的论文"
+                recommended.start()
+                try await waitForReview(recommended.smartInput)
+                try expect(recommended.smartInput.resolution?.unresolved.isEmpty == true &&
+                           recommended.smartInput.resolution?.notes.isEmpty == false,
+                           "the real subjective-query resolver fixture separates recommendation guidance from missing work")
+                let preview = SmartUISurface(DownloaderView(model: recommended).environment(\.colorScheme, scheme),
+                                             size: NSSize(width: 780, height: 540))
+                try await preview.settle()
+                try preview.verify("subjective-main-" + name,
+                    labels: ["Deep Residual Learning for Image Recognition", "arXiv 1512.03385", L("选择说明"),
+                             L("下载文件"), "Earlier saved paper"],
+                    absentLabels: [L("还有 1 项待补充"), L("添加资源")], snapshots: snapshots)
+                try preview.verifyVisibleQueueRow()
+                try await preview.press(L("选择说明"))
+                try preview.verify("subjective-main-notes-" + name,
+                    labels: subjectiveResult.notes + ["Earlier saved paper"], snapshots: snapshots)
+                try preview.verifyVisibleQueueRow()
+                preview.window.close()
+                recommended.smartInput.cancel()
+                let recommendedQuick = QuickDownloadState(model: recommended)
+                recommendedQuick.draft = "21世纪最牛逼的论文"
+                recommendedQuick.submit()
+                try await waitForReview(recommendedQuick.smart)
+                let quickPreview = SmartUISurface(QuickDownloadView(state: recommendedQuick, model: recommended,
+                    openWindow: {}, openSettings: {}, quit: {}, close: {}).environment(\.colorScheme, scheme),
+                    size: NSSize(width: 380, height: 540))
+                quickPreview.fitHeight(width: 380)
+                try await quickPreview.settle()
+                try quickPreview.verify("subjective-quick-" + name,
+                    labels: ["Deep Residual Learning for Image Recognition", L("选择说明"), L("下载文件")],
+                    absentLabels: [L("还有 1 项待补充")], snapshots: snapshots)
+                try await quickPreview.press(L("选择说明"))
+                quickPreview.fitHeight(width: 380)
+                try await quickPreview.settle()
+                try expect(quickPreview.host.bounds.height <= 720, "expanded selection guidance keeps Quick compact")
+                try quickPreview.verify("subjective-quick-notes-" + name,
+                    labels: subjectiveResult.notes + [L("打开 Folioak")], snapshots: snapshots)
+                quickPreview.window.close()
+                recommendedQuick.smart.cancel()
             }
         }
 
         AppLocalization.shared.language = .chinese
         NSApp.appearance = NSAppearance(named: .aqua)
+        for stage in ["idle", "progress", "error", "postaccept"] {
+            for useQuick in [false, true] {
+                let mode: SmartUIResolver.Mode = stage == "progress" ? .pending : stage == "error" ? .failure : .review
+                let transport: any HTTPTransport
+                if stage == "postaccept" { transport = SmartUIHeldDownload() }
+                else { transport = SmartUINoNetwork() }
+                let model = makeModel(mode, resolution: subjectiveResult, transport: transport)
+                model.language = .chinese
+                model.theme = .grove
+                model.history = [DownloadItem(original: "https://example.org/earlier.pdf",
+                    directURL: URL(string: "https://example.org/earlier.pdf"), state: .failed,
+                    documentTitle: "Earlier saved paper", preservesInput: true)]
+                let quick = QuickDownloadState(model: model)
+                let state = useQuick ? quick.smart : model.smartInput
+                let original = "21世纪最牛逼的论文"
+                model.input = useQuick ? "主窗口未提交的草稿" : original
+                quick.draft = original
+                if stage != "idle" {
+                    if useQuick { quick.submit() } else { model.start() }
+                    if stage == "progress" || stage == "error" {
+                        try await waitForFixture {
+                            stage == "progress" ? state.progress == .searching : state.failed
+                        }
+                    }
+                    if stage == "postaccept" {
+                        try await waitForReview(state)
+                        if useQuick { quick.submit() } else { model.start() }
+                        try expect(model.busy && model.items.count == 1 && state.resolution == nil &&
+                                   state.remainingRequirements.isEmpty && (useQuick ? quick.draft.isEmpty : model.input.isEmpty),
+                                   "confirmed recommendations clear fulfilled input and hand progress to the queue")
+                    }
+                }
+                let surface: SmartUISurface
+                if useQuick {
+                    surface = SmartUISurface(QuickDownloadView(state: quick, model: model,
+                        openWindow: {}, openSettings: {}, quit: {}, close: {}), size: NSSize(width: 380, height: 640))
+                    surface.fitHeight(width: 380)
+                } else {
+                    surface = SmartUISurface(DownloaderView(model: model), size: NSSize(width: 780, height: 540))
+                }
+                try await surface.settle()
+                let name = (useQuick ? "quick-" : "main-") + stage
+                let labels: [String]
+                switch stage {
+                case "idle": labels = [L("查找资源"), "Earlier saved paper"]
+                case "progress": labels = [L("正在查找资源…"), L("取消")]
+                case "error": labels = [L("未能完成查找"), L("重试"), original]
+                default: labels = ["Deep Residual", L("停止")]
+                }
+                try surface.verify(name, labels: labels,
+                    absentLabels: [L("添加资源")] + (stage == "postaccept" ? [original, L("选择说明")] : []),
+                    snapshots: snapshots)
+                if useQuick {
+                    try expect(surface.host.bounds.height <= 720, "full Quick state remains within its compact height limit")
+                } else {
+                    try expect(surface.host.bounds.size == NSSize(width: 780, height: 540),
+                               "full smart-input state keeps the minimum main-window size")
+                    try surface.verifyVisibleQueueRow()
+                    if stage == "idle" || stage == "error" {
+                        let editor = SmartUISurface.descendants(surface.host).compactMap { $0 as? LinkTextView }.first
+                        try expect(editor?.font?.pointSize == 13 && editor?.string == original,
+                                   "idle and recoverable errors retain the native 13-point request editor")
+                    }
+                }
+                surface.window.close()
+                state.cancel()
+                await model.cancelAndWait()
+            }
+        }
         let pending = makeModel(.pending)
         pending.input = "查找论文及附件"
         pending.start()
+        try await waitForFixture { pending.smartInput.progress == .searching }
         let progress = SmartUISurface(SmartInputStatusView(state: pending.smartInput, palette: pending.theme.palette(dark: false))
             .padding(12), size: NSSize(width: 380, height: 90))
         try await progress.settle()
@@ -372,6 +542,7 @@ extension CoreTests {
         let failed = makeModel(.failure)
         failed.input = "查找论文"
         failed.start()
+        try await waitForFixture { failed.smartInput.failed }
         let error = SmartUISurface(SmartInputStatusView(state: failed.smartInput, palette: failed.theme.palette(dark: false))
             .padding(12), size: NSSize(width: 380, height: 100))
         try await error.settle()
@@ -387,11 +558,12 @@ extension CoreTests {
         try await waitForReview(notFound.smartInput)
         let emptyReview = SmartUISurface(SmartInputStatusView(state: notFound.smartInput,
             palette: notFound.theme.palette(dark: false)).padding(12), size: NSSize(width: 380, height: 130))
+        emptyReview.fitHeight(width: 380)
         try await emptyReview.settle()
         try expect(notFound.smartInput.message == nil && notFound.items.isEmpty,
                    "no-match result keeps a single explanation and never creates a queue")
-        try emptyReview.verify("no-match", labels: ["未找到匹配的论文", L("返回修改")],
-            absentLabels: [L("下载文件"), L("已选 0 / 10")], snapshots: snapshots)
+        try emptyReview.verify("no-match", labels: ["未找到匹配的论文", L("修改需求")],
+            absentLabels: [L("已选 0 / 10")], snapshots: snapshots)
         emptyReview.window.close()
         notFound.start()
         try expect(!notFound.smartInput.failed && notFound.smartInput.message == nil && notFound.items.isEmpty,
@@ -419,23 +591,37 @@ extension CoreTests {
 
         let longResult = SmartResolution(candidates: [candidates[1]],
             selections: [SmartSelection(candidateID: candidates[1].id, format: .inherit, skipExisting: false)],
-            unresolved: (1...10).map { "要求 \($0)：" + String(repeating: "尚未确认补充材料的来源，请保留原请求以便继续核对。", count: 8) },
+            unresolved: (1...10).map {
+                "要求 \($0)：" + String(repeating: "尚未确认补充材料的来源，请保留原请求以便继续核对。", count: 8) +
+                ($0 == 10 ? " Final remaining requirement." : "")
+            },
             needsReview: true, modelCalls: 1, toolCalls: 0)
         let partial = makeModel(resolution: longResult)
         // An existing queue item exercises acceptance without starting a worker.
         partial.items = [DownloadItem(original: candidates[1].url.absoluteString,
-                                      directURL: candidates[1].url, state: .queued)]
+                                      directURL: candidates[1].url, state: .queued,
+                                      documentTitle: "Already queued paper", preservesInput: true)]
         partial.input = "查找论文及全部补充材料"
         partial.start()
         try await waitForReview(partial.smartInput)
         partial.start()
-        try expect(partial.smartInput.resolution == nil && (partial.smartInput.message?.count ?? 0) > 1_000,
-                   "long partial-acceptance fixture preserves every unmet requirement")
+        try expect(partial.smartInput.resolution == nil &&
+                   partial.smartInput.remainingRequirements == longResult.unresolved &&
+                   (partial.smartInput.message?.count ?? 0) < 100,
+                   "long partial acceptance preserves every requirement outside its concise receipt")
         let longMain = SmartUISurface(DownloaderView(model: partial), size: NSSize(width: 780, height: 540))
         try await longMain.settle()
-        try longMain.verify("main-long-partial", labels: [L("添加资源"), L("仍未完成：")], snapshots: snapshots)
+        try longMain.verify("main-long-partial",
+            labels: [L("还有 10 项待补充"), "Already queued paper"],
+            absentLabels: [L("添加资源"), "Final remaining requirement"], snapshots: snapshots)
         try expect(longMain.host.bounds.size == NSSize(width: 780, height: 540),
                    "long partial result keeps minimum main-window size")
+        try longMain.verifyVisibleQueueRow()
+        try await longMain.press(L("还有 10 项待补充"))
+        try longMain.verify("main-long-partial-expanded", labels: ["要求 1", "Already queued paper"], snapshots: snapshots)
+        try longMain.verifyVisibleQueueRow()
+        try await longMain.scrollDetailsToEnd()
+        try longMain.verify("main-long-partial-last-detail", labels: ["Final remaining requirement"], snapshots: snapshots)
         longMain.window.close()
 
         let partialQuick = QuickDownloadState(model: partial)
@@ -443,14 +629,23 @@ extension CoreTests {
         partialQuick.submit()
         try await waitForReview(partialQuick.smart)
         partialQuick.submit()
-        try expect(!partialQuick.draft.isEmpty && (partialQuick.smart.message?.count ?? 0) > 1_000,
-                   "quick partial acceptance retains draft and every unmet requirement")
+        try expect(!partialQuick.draft.isEmpty && partialQuick.smart.remainingRequirements == longResult.unresolved &&
+                   (partialQuick.smart.message?.count ?? 0) < 100,
+                   "quick partial acceptance retains draft and complete requirements with a concise receipt")
         let longQuick = SmartUISurface(QuickDownloadView(state: partialQuick, model: partial, openWindow: {},
             openSettings: {}, quit: {}, close: {}), size: NSSize(width: 380, height: 640))
         longQuick.fitHeight(width: 380)
         try await longQuick.settle()
         try expect(longQuick.host.bounds.height <= 720, "long partial result keeps compact quick-panel height")
-        try longQuick.verify("quick-long-partial", labels: [L("仍未完成："), L("打开 Folioak")], snapshots: snapshots)
+        try longQuick.verify("quick-long-partial", labels: [L("还有 10 项待补充"), L("打开 Folioak")],
+                             absentLabels: ["Final remaining requirement"], snapshots: snapshots)
+        try await longQuick.press(L("还有 10 项待补充"))
+        longQuick.fitHeight(width: 380)
+        try await longQuick.settle()
+        try expect(longQuick.host.bounds.height <= 720, "expanded missing requirements keep Quick within its height limit")
+        try longQuick.verify("quick-long-partial-expanded", labels: ["要求 1", L("打开 Folioak")], snapshots: snapshots)
+        try await longQuick.scrollDetailsToEnd()
+        try longQuick.verify("quick-long-partial-last-detail", labels: ["Final remaining requirement"], snapshots: snapshots)
         longQuick.window.close()
         partialQuick.smart.cancel()
         partial.smartInput.cancel()
@@ -476,11 +671,15 @@ extension CoreTests {
             .padding(20).frame(width: 380), size: NSSize(width: 380, height: 280))
         form.fitHeight(width: 380)
         try await form.settle()
-        try form.verify("connection-new-key", labels: [L("DeepSeek API Key"), L("获取 Key"), L("连接并继续"), L("取消")],
+        try expect(SmartUISurface.descendants(form.host).compactMap { $0 as? NSSecureTextField }
+            .contains { $0.isEnabled && !$0.isHiddenOrHasHiddenAncestor &&
+                $0.placeholderString == L("DeepSeek API Key") },
+                   "new connection presents the exact API key placeholder in a native secure input")
+        try form.verify("connection-new-key", labels: [L("获取 Key"), L("连接并继续"), L("取消")],
                         snapshots: snapshots)
         try expect(credentials.reads == 0 && credentials.writes == 0 && !settings.enabled,
                    "opening connection never reads, saves or enables a credential")
-        try form.enterKey("sk-ui-native-entry")
+        try await form.enterKey("sk-ui-native-entry")
         try await form.settle()
         try await form.returnKey()
         try expect(settings.hasKey && settings.enabled && credentials.writes == 1 && connected == 1,
@@ -520,7 +719,7 @@ extension CoreTests {
             configurationModel.preferencesPage = .settings
             configurationModel.settingsTab = "智能输入"
             try await configuration.settle()
-            try configuration.enterKey("sk-ui-cancel-before-save")
+            try await configuration.enterKey("sk-ui-cancel-before-save")
             try await configuration.settle()
             try await configuration.press(L("连接"))
             let calls = await pendingValidator.calls
@@ -552,11 +751,12 @@ extension CoreTests {
                 throw TestFailure.failed("first smart request presents the main connection sheet")
             }
             try expect(SmartUISurface.descendants(sheet).compactMap { $0 as? NSSecureTextField }
-                .contains { $0.placeholderString == L("DeepSeek API Key") &&
+                .contains { $0.isEnabled && !$0.isHiddenOrHasHiddenAncestor && $0.window === sheet.window &&
+                    $0.placeholderString == L("DeepSeek API Key") &&
                     $0.currentEditor() != nil && $0.currentEditor() === sheet.window?.firstResponder },
                        "main setup gives the native secure field initial focus")
             try main.verify("connection-main-" + language.rawValue,
-                labels: ["API Key", L("获取 Key"), L("连接并继续"), L("取消")],
+                labels: [L("获取 Key"), L("连接并继续"), L("取消")],
                 snapshots: snapshots, in: sheet)
             try expect(sheet.bounds.width <= 420 && sheet.bounds.height < 400,
                        "main connection sheet remains compact and all actions fit")
@@ -577,11 +777,12 @@ extension CoreTests {
                 throw TestFailure.failed("first quick request presents its connection sheet")
             }
             try expect(SmartUISurface.descendants(quickSheet).compactMap { $0 as? NSSecureTextField }
-                .contains { $0.placeholderString == L("DeepSeek API Key") &&
+                .contains { $0.isEnabled && !$0.isHiddenOrHasHiddenAncestor && $0.window === quickSheet.window &&
+                    $0.placeholderString == L("DeepSeek API Key") &&
                     $0.currentEditor() != nil && $0.currentEditor() === quickSheet.window?.firstResponder },
                        "quick setup focuses the secure field instead of the request editor")
             try quick.verify("connection-quick-" + language.rawValue,
-                labels: ["API Key", L("获取 Key"), L("连接并继续"), L("取消")],
+                labels: [L("获取 Key"), L("连接并继续"), L("取消")],
                 snapshots: snapshots, in: quickSheet)
             try expect(quickSheet.bounds.width <= 380 && quickSheet.bounds.height < 400,
                        "quick connection sheet keeps every action within its narrow surface")
@@ -635,7 +836,7 @@ extension CoreTests {
         try form.verify("connection-menu-popover",
             labels: [L("连接 DeepSeek"), L("获取 Key"), L("连接并继续"), L("取消")],
             snapshots: snapshots, in: menuSheet)
-        try form.enterKey("sk-ui-menu-cancelled", in: menuSheet)
+        try await form.enterKey("sk-ui-menu-cancelled", in: menuSheet)
         try await form.settle()
         try await form.returnKey(in: menuSheet)
         let validationCalls = await menuValidator.calls

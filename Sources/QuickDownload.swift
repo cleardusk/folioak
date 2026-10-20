@@ -86,10 +86,13 @@ struct QuickDownloadView: View {
     @Environment(\.colorSchemeContrast) private var contrast
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
     private var reviewing: Bool { state.smart.resolution != nil }
+    private var presentingRequest: Bool { reviewing || state.smart.resolving }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
+                FolioakGlyph().frame(width: 18, height: 20).foregroundStyle(ThemePalette.color(palette.accent))
+                    .accessibilityHidden(true)
                 Text("Folioak").font(.system(size: 15, weight: .semibold))
                 Spacer()
                 Menu {
@@ -102,43 +105,42 @@ struct QuickDownloadView: View {
             }
             ZStack(alignment: .topLeading) {
                 QuickLinkEditor(text: $state.draft, focusRequest: state.focusRequest, submit: state.submit, close: cancelOrClose, rejected: state.inputTooLarge, captureTrace: { accepted in model.trace.user(accepted ? .inputCaptured : .inputRejected, context: .quickPanel, outcome: accepted ? .succeeded : .failed) }, captureInput: model.captureInput)
-                    .opacity(reviewing ? 0 : 1).disabled(reviewing).accessibilityHidden(reviewing)
-                if reviewing {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(L("核对下载")).font(.system(size: 13, weight: .medium))
-                        Text(state.draft).font(.system(size: 12))
-                            .foregroundStyle(ThemePalette.color(palette.secondary)).lineLimit(1)
-                            .help(state.draft)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    .opacity(presentingRequest ? 0 : 1).disabled(presentingRequest).accessibilityHidden(presentingRequest)
+                if presentingRequest {
+                    Text(state.draft).font(.system(size: 12))
+                        .foregroundStyle(ThemePalette.color(palette.secondary)).lineLimit(1)
+                        .help(state.draft).frame(maxWidth: .infinity, alignment: .leading)
                 } else if state.draft.isEmpty {
                     Text(L("粘贴链接，或描述想保存的资料"))
                         .font(.system(size: 13)).foregroundStyle(ThemePalette.color(palette.secondary))
                         .padding(.horizontal, 9).padding(.vertical, 8).allowsHitTesting(false)
                 }
             }
-            .frame(height: reviewing ? 42 : 112)
-            .background(reviewing ? Color.clear : ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(reviewing ? Color.clear : ThemePalette.color(palette.border), lineWidth: 1))
+            .frame(height: presentingRequest ? 20 : 72)
+            .background(presentingRequest ? Color.clear : ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(presentingRequest ? Color.clear : ThemePalette.color(palette.border), lineWidth: 1))
             if state.smart.resolving || reviewing || state.smart.message != nil {
                 SmartInputStatusView(state: state.smart, palette: palette, compact: true,
                                      showsReviewActions: false, onEdit: returnToEditing)
             }
-            HStack(spacing: 12) {
-                Button(action: state.openDirectory) {
-                    Label(state.saveDirectory.lastPathComponent, systemImage: "folder")
-                        .font(.system(size: 11)).lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }.buttonStyle(.plain).foregroundStyle(ThemePalette.color(palette.secondary))
-                    .help(state.saveDirectory.path).accessibilityLabel(L("打开保存位置"))
-                if reviewing {
-                    SmartInputReviewActionsView(state: state.smart, palette: palette, onEdit: returnToEditing)
-                } else if !state.smart.resolving {
-                    Button(L(!SmartInput.isDirect(state.draft) && !state.draft.isEmpty
-                             ? "查找资源" : model.busy ? "加入队列" : "开始下载"), action: state.submit)
-                        .buttonStyle(QuietButtonStyle(palette: palette))
-                        .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling || state.smart.resolving)
-                        .help(L("⌘ Return 下载"))
-                        .accessibilityIdentifier("quick-download-submit")
+            if !state.smart.resolving {
+                HStack(spacing: 12) {
+                    Button(action: state.openDirectory) {
+                        Label(state.saveDirectory.lastPathComponent, systemImage: "folder")
+                            .font(.system(size: 11)).lineLimit(1).truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain).foregroundStyle(ThemePalette.color(palette.secondary))
+                        .help(state.saveDirectory.path).accessibilityLabel(L("打开保存位置"))
+                    if reviewing {
+                        SmartInputReviewActionsView(state: state.smart, palette: palette, onEdit: returnToEditing)
+                    } else {
+                        Button(L(state.smart.failed ? "重试" : !SmartInput.isDirect(state.draft) && !state.draft.isEmpty
+                                 ? "查找资源" : model.busy ? "加入队列" : "开始下载"), action: state.submit)
+                            .buttonStyle(PrimaryActionStyle(palette: palette))
+                            .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling)
+                            .help(L("⌘ Return 下载"))
+                            .accessibilityIdentifier("quick-download-submit")
+                    }
                 }
             }
             if let message = state.message, state.failed || state.recentItems.contains(where: { !$0.state.terminal }) {

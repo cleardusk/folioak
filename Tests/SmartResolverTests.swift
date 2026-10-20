@@ -20,13 +20,14 @@ private actor ScriptedSmartTransport: HTTPTransport {
             data = try JSONSerialization.data(withJSONObject: object)
             self.status = status; type = "application/json"; self.delay = delay
         }
-        init(html: String, type: String = "text/html") {
-            data = Data(html.utf8); status = 200; self.type = type; delay = 0
+        init(html: String, type: String = "text/html", delay: UInt64 = 0) {
+            data = Data(html.utf8); status = 200; self.type = type; self.delay = delay
         }
     }
     var replies: [Reply]
     private(set) var requests: [URLRequest] = []
     private(set) var cancelled = false
+    private(set) var downloads = 0
     init(_ replies: [Reply]) { self.replies = replies }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requests.append(request)
@@ -40,11 +41,119 @@ private actor ScriptedSmartTransport: HTTPTransport {
             headerFields: ["Content-Type": reply.type])!)
     }
     func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
+        downloads += 1
+        throw URLError(.unsupportedURL)
+    }
+}
+
+// Test-only diagnostics for fixed public fixtures. Never retain response prose,
+// reasoning, request headers, or unbounded function arguments.
+private actor SmartLiveTraceTransport: HTTPTransport {
+    let base = SmartAPITransport()
+    private(set) var events: [String] = []
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let result = try await base.data(for: request)
+        guard request.url?.path == "/chat/completions" else { return result }
+        func candidateID(_ value: Any?) -> String {
+            guard let value = value as? String, value.first == "r", value.count <= 3,
+                  let number = Int(value.dropFirst()), (1...30).contains(number), value == "r\(number)" else { return "invalid" }
+            return value
+        }
+        var event = "HTTP=\(result.1.statusCode)"
+        if let body = request.httpBody,
+           let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let messages = payload["messages"] as? [[String: Any]] {
+            var available: [String: Bool] = [:]
+            for message in messages where ["user", "tool"].contains(message["role"] as? String ?? "") {
+                guard let content = message["content"] as? String,
+                      let observation = try? JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any],
+                      let resources = observation["resources"] as? [[String: Any]] else { continue }
+                for resource in resources {
+                    let id = candidateID(resource["id"])
+                    if id != "invalid", let downloadable = resource["downloadable"] as? Bool { available[id] = downloadable }
+                }
+            }
+            event += ",available=[" + available.keys.sorted().map { "\($0):\(available[$0]! ? "yes" : "no")" }.joined(separator: ",") + "]"
+        }
+        if let object = try? JSONSerialization.jsonObject(with: result.0) as? [String: Any],
+           let choices = object["choices"] as? [[String: Any]], let choice = choices.first {
+            let reason = choice["finish_reason"] as? String ?? ""
+            event += ",choices=\(choices.count),finish=\(["tool_calls", "stop", "length"].contains(reason) ? reason : "other")"
+            let message = choice["message"] as? [String: Any]
+            let calls = message?["tool_calls"] as? [[String: Any]] ?? []
+            event += ",calls=\(calls.count)"
+            for call in calls.prefix(3) {
+                let function = call["function"] as? [String: Any]
+                let name = function?["name"] as? String ?? ""
+                event += ",tool=\(["search_resources", "inspect_page", "enqueue_download"].contains(name) ? name : "unknown")"
+                if let raw = function?["arguments"] as? String,
+                   let args = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] {
+                    let allowed = Set(["query", "candidate_id", "selections", "unresolved", "notes"])
+                    event += ",keys=\(args.keys.filter { allowed.contains($0) }.sorted()),unknown_keys=\(Set(args.keys).subtracting(allowed).count)"
+                    event += ",selected=\((args["selections"] as? [Any])?.count ?? -1)"
+                    event += ",unresolved=\((args["unresolved"] as? [Any])?.count ?? -1),notes=\((args["notes"] as? [Any])?.count ?? -1)"
+                    if name == "search_resources", let query = args["query"] as? String {
+                        event += ",query=\(String(query.prefix(128)))"
+                    }
+                    if let selections = args["selections"] as? [[String: Any]] {
+                        for row in selections.prefix(SmartInput.targetLimit) {
+                            let known = Set(["candidate_id", "format", "title", "skip_existing"])
+                            let format = row["format"] as? String ?? ""
+                            let skipIsBool = (row["skip_existing"] as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false
+                            event += ",selection={keys:\(row.keys.filter { known.contains($0) }.sorted()),unknown:\(Set(row.keys).subtracting(known).count)"
+                            event += ",id:\(candidateID(row["candidate_id"])),format:\(["inherit", "video", "audio"].contains(format) ? format : "invalid")"
+                            event += ",title_length:\((row["title"] as? String)?.count ?? -1),skip_bool:\(skipIsBool)}"
+                        }
+                    }
+                } else { event += ",invalid_arguments" }
+            }
+        }
+        events.append(event)
+        return result
+    }
+    func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
         throw URLError(.unsupportedURL)
     }
 }
 
 extension CoreTests {
+    static func smartSubjectivePresentationFixture() async throws -> SmartResolution {
+        func tool(_ id: String, _ name: String, _ args: [String: Any]) throws -> [String: Any] {
+            ["id": id, "type": "function", "function": ["name": name,
+                "arguments": String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)]]
+        }
+        let reads = try [
+            tool("first", "search_resources", ["query": "21st century influential papers PDF"]),
+            tool("second", "search_resources", ["query": "deep residual learning paper PDF"])
+        ]
+        let terminal = try tool("finish", "enqueue_download", ["selections": [["candidate_id": "r1", "title": "",
+            "format": "inherit", "skip_existing": false]], "unresolved": [], "notes": ["按长期学术影响选取代表作。"]])
+        func response(_ calls: [[String: Any]]) -> [String: Any] {
+            ["choices": [["finish_reason": "tool_calls", "message": ["role": "assistant", "tool_calls": calls]]]]
+        }
+        let api = try ScriptedSmartTransport([
+            .init(response(reads)),
+            .init(["results": [["title": "1512.03385", "url": "https://arxiv.org/abs/1512.03385",
+                               "summary": "Residual learning paper by He et al."]]]),
+            .init(["results": []]),
+            .init(response([terminal]))
+        ])
+        let metadata = ScriptedSmartTransport([.init(html: smartArxivAtom(), type: "application/atom+xml")])
+        return try await DeepSeekResolver(api: api, metadata: metadata).resolve("21 世纪最牛逼的论文",
+            apiKey: "synthetic-test-key", progress: { _ in })
+    }
+
+    private static func smartArxivAtom(id: String = "1512.03385v1",
+                                       title: String = "Deep Residual Learning for Image Recognition") -> String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom"><entry>
+        <id>http://arxiv.org/abs/\(id)</id><title>\(title)</title>
+        <published>2015-12-10T00:00:00Z</published>
+        </entry></feed>
+        """
+    }
+
     // The captured search observation is deliberately unformatted. Native UI
     // tests use the resolver result, not a hand-cleaned presentation mock.
     static func smartPaperPresentationFixture() async throws -> SmartResolution {
@@ -86,13 +195,15 @@ extension CoreTests {
             try call("enqueue_download", ["selections": selections, "unresolved": unresolved])
         }
         let key = "synthetic-test-key"
+        let unusedMetadata = ScriptedSmartTransport([])
         let direct = try ScriptedSmartTransport([.init(terminal([selection("r2", "audio", skip: true)]))])
-        let directResult = try await DeepSeekResolver(api: direct).resolve(
+        let directResult = try await DeepSeekResolver(api: direct, metadata: unusedMetadata).resolve(
             "https://example.com/first.mp4 https://example.com/second.mp4 只要第二个音频，已有的跳过", apiKey: key, progress: { _ in })
         try expect(directResult.modelCalls == 1 && directResult.toolCalls == 0 && !directResult.needsReview,
                    "supplied-link conditions use one terminal model request")
         try expect(directResult.selections == [SmartSelection(candidateID: "r2", format: .audio, skipExisting: true)],
                    "per-resource format and skip conditions survive the protocol")
+        try expect(await unusedMetadata.requests.isEmpty, "ordinary media conditions never query paper metadata")
         let directRequests = await direct.requests
         let payload = try JSONSerialization.jsonObject(with: directRequests[0].httpBody!) as! [String: Any]
         try expect((payload["thinking"] as? [String: String])?["type"] == "disabled" && payload["stream"] as? Bool == false,
@@ -112,7 +223,7 @@ extension CoreTests {
         try expect(literalResult.candidates.first?.url == URL(string: literalURL),
                    "conditions do not truncate punctuation inside an actual URL query")
         let paperAPI = try ScriptedSmartTransport([.init(terminal([selection("r1", skip: true)]))])
-        let paperResult = try await DeepSeekResolver(api: paperAPI).resolve(
+        let paperResult = try await DeepSeekResolver(api: paperAPI, metadata: ScriptedSmartTransport([])).resolve(
             "https://arxiv.org/abs/1706.03762v7 只要 PDF，已有的跳过", apiKey: key, progress: { _ in })
         try expect(paperResult.candidates.first?.url.absoluteString == "https://arxiv.org/abs/1706.03762v7" &&
                    paperResult.selections.first?.format == .inherit && !paperResult.needsReview,
@@ -127,7 +238,8 @@ extension CoreTests {
             .init(["results": [["title": "Attention Is All You Need", "url": "https://arxiv.org/abs/1706.03762", "summary": "A paper candidate"]]]),
             .init(terminal([selection("r1", title: "Attention Is All You Need")]))
         ])
-        let searched = try await DeepSeekResolver(api: search).resolve("找提出 Transformer 的论文", apiKey: key, progress: { _ in })
+        let searched = try await DeepSeekResolver(api: search, metadata: ScriptedSmartTransport([]))
+            .resolve("找提出 Transformer 的论文", apiKey: key, progress: { _ in })
         try expect(searched.needsReview && searched.modelCalls == 2 && searched.toolCalls == 1,
                    "search discovery always requires review, even when only one result exists")
         try expect(searched.candidates.first?.observedTitle == "Attention Is All You Need" &&
@@ -351,7 +463,8 @@ extension CoreTests {
             ["selections": [], "unresolved": []]
         ]
         for args in invalidArguments {
-            let transport = try ScriptedSmartTransport([.init(call("enqueue_download", args))])
+            let invalid = try call("enqueue_download", args)
+            let transport = try ScriptedSmartTransport([.init(invalid), .init(invalid)])
             do {
                 _ = try await DeepSeekResolver(api: transport).resolve("https://example.com/video.mp4 只要音频", apiKey: key, progress: { _ in })
                 throw TestFailure.failed("invalid tool arguments must be rejected")
@@ -405,11 +518,337 @@ extension CoreTests {
         } catch SmartResolverError.rateLimited {}
         let throttledRequests = await throttledSearch.requests
         try expect(throttledRequests.count == 2, "rate-limited search never triggers an immediate retry")
+        try await smartProposalSemanticsTests()
+        try await smartProposalCorrectionTests()
         try await smartThinkingTests()
         #if TESTING
         try await smartAPITransportTests()
         #endif
         print("PASS smart resolver protocol, observations, static page extraction, budgets and cancellation")
+    }
+
+    private static func smartProposalSemanticsTests() async throws {
+        func tool(_ id: String, _ name: String, _ args: [String: Any]) throws -> [String: Any] {
+            ["id": id, "type": "function", "function": ["name": name,
+                "arguments": String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)]]
+        }
+        func response(_ calls: [[String: Any]]) -> [String: Any] {
+            ["choices": [["finish_reason": "tool_calls", "message": ["role": "assistant", "content": NSNull(),
+                "reasoning_content": "private batch reasoning", "tool_calls": calls]]]]
+        }
+        func proposal(unresolved: [String] = [], notes: Any? = nil, title: String = "") -> [String: Any] {
+            var value: [String: Any] = ["selections": [["candidate_id": "r1", "title": title,
+                "format": "inherit", "skip_existing": false]], "unresolved": unresolved]
+            if let notes { value["notes"] = notes }
+            return value
+        }
+        let key = "synthetic-test-key"
+        let presentation = try await smartSubjectivePresentationFixture()
+        try expect(presentation.unresolved.isEmpty && presentation.notes == ["按长期学术影响选取代表作。"] &&
+                   presentation.candidates.first?.title == "Deep Residual Learning for Image Recognition" &&
+                   presentation.candidates.first?.observedTitle == presentation.candidates.first?.title,
+                   "a subjective recommendation has a separate note and an ID-matched official arXiv title")
+        for query in ["21 世纪最牛逼的论文", "21 世纪对大模型影响最大的论文"] {
+            let api = try ScriptedSmartTransport([
+                .init(response([tool("s1", "search_resources", ["query": "Attention Is All You Need PDF arXiv"]),
+                                tool("s2", "search_resources", ["query": "Language Models are Few-Shot Learners GPT-3 PDF arXiv"])])),
+                .init(["results": [["title": "A foundational paper", "url": "https://example.com/foundational.pdf"]]]),
+                .init(["results": [["title": "Another influential paper", "url": "https://example.com/another.pdf"]]]),
+                .init(response([tool("finish", "enqueue_download", proposal(notes: ["按对后续研究的影响选取代表作。"]))]))
+            ])
+            let result = try await DeepSeekResolver(api: api).resolve(query, apiKey: key, thinking: .low, progress: { _ in })
+            let requests = await api.requests
+            let body = try JSONSerialization.jsonObject(with: requests[3].httpBody!) as! [String: Any]
+            let messages = body["messages"] as! [[String: Any]]
+            let observations = messages.filter { $0["role"] as? String == "tool" }
+            let assistant = messages.first { $0["role"] as? String == "assistant" }
+            try expect(result.modelCalls == 2 && result.toolCalls == 2 && requests.count == 4 &&
+                       observations.compactMap { $0["tool_call_id"] as? String } == ["s1", "s2"] &&
+                       (observations[0]["content"] as? String)?.contains("foundational.pdf") == true &&
+                       (observations[1]["content"] as? String)?.contains("another.pdf") == true &&
+                       (assistant?["tool_calls"] as? [Any])?.count == 2 &&
+                       assistant?["reasoning_content"] as? String == "private batch reasoning",
+                       "the reproduced two-search response executes both reads in order and replays all observations and thinking")
+            try expect(result.unresolved.isEmpty && result.notes.count == 1 && result.selections.count == 1,
+                       "subjective selection criteria do not become unfinished download requirements")
+            let initial = try JSONSerialization.jsonObject(with: requests[0].httpBody!) as! [String: Any]
+            let definitions = initial["tools"] as! [[String: Any]]
+            let remainingTools = body["tools"] as! [[String: Any]]
+            let lastObservation = try JSONSerialization.jsonObject(with: Data((observations.last!["content"] as! String).utf8)) as! [String: Any]
+            let initialMessages = initial["messages"] as! [[String: Any]]
+            let firstPrefix = try JSONSerialization.data(withJSONObject: initialMessages, options: [.sortedKeys])
+            let replayedPrefix = try JSONSerialization.data(withJSONObject: Array(messages.prefix(initialMessages.count)), options: [.sortedKeys])
+            try expect(definitions.count == 3 && remainingTools.count == 1 &&
+                       (remainingTools[0]["function"] as? [String: Any])?["name"] as? String == "enqueue_download" &&
+                       lastObservation["remaining_read_calls"] as? Int == 0 && firstPrefix == replayedPrefix,
+                       "exhausted read budget advertises only terminal proposals without rewriting the cached message prefix")
+            let terminal = definitions.compactMap { $0["function"] as? [String: Any] }.first { $0["name"] as? String == "enqueue_download" }!
+            let parameters = terminal["parameters"] as! [String: Any]
+            try expect(!(parameters["required"] as! [String]).contains("notes") &&
+                       (parameters["properties"] as? [String: Any])?["notes"] != nil,
+                       "notes are an explicit optional protocol field, preserving existing terminal responses")
+        }
+        let genuine = try ScriptedSmartTransport([.init(response([tool("finish", "enqueue_download",
+            proposal(unresolved: ["未找到请求的补充材料。"], notes: ["按研究影响选取代表作。"]))]))])
+        let partial = try await DeepSeekResolver(api: genuine).resolve("https://example.com/paper.pdf 和补充材料",
+            apiKey: key, progress: { _ in })
+        try expect(partial.unresolved == ["未找到请求的补充材料。"] && partial.notes == ["按研究影响选取代表作。"] &&
+                   partial.needsReview, "separate recommendation notes never erase a genuinely missing attachment")
+        let invalidNotes: [Any] = [NSNull(), "not an array", [1], [""], Array(repeating: "note", count: 4), [String(repeating: "a", count: 201)]]
+        for notes in invalidNotes {
+            let invalid = try response([tool("finish", "enqueue_download", proposal(notes: notes))])
+            let api = try ScriptedSmartTransport([.init(invalid), .init(invalid)])
+            do {
+                _ = try await DeepSeekResolver(api: api).resolve("https://example.com/paper.pdf", apiKey: key, progress: { _ in })
+                throw TestFailure.failed("malformed notes accepted")
+            } catch SmartResolverError.invalidResponse {}
+        }
+        let search = try tool("s1", "search_resources", ["query": "first"])
+        let second = try tool("s2", "search_resources", ["query": "second"])
+        let finish = try tool("finish", "enqueue_download", proposal())
+        let invalidBatches = [
+            [search, search], [search, finish], [finish, finish],
+            [search, second, try tool("s3", "search_resources", ["query": "third"])],
+            [search, try tool("bad", "inspect_page", ["candidate_id": "unknown"])],
+            [search, try tool("bad", "search_resources", ["query": "second", "extra": true])]
+        ]
+        for calls in invalidBatches {
+            let api = try ScriptedSmartTransport([.init(response(calls))])
+            do {
+                _ = try await DeepSeekResolver(api: api).resolve("找论文", apiKey: key, progress: { _ in })
+                throw TestFailure.failed("invalid tool batch accepted")
+            } catch SmartResolverError.invalidResponse {}
+            let requests = await api.requests
+            try expect(requests.count == 1, "invalid or mixed batches are rejected before any read request")
+        }
+        let overBudget = try ScriptedSmartTransport([
+            .init(response([search])), .init(["results": []]), .init(response([search, second]))
+        ])
+        let exhausted = try await DeepSeekResolver(api: overBudget).resolve("找论文", apiKey: key, progress: { _ in })
+        let exhaustedRequests = await overBudget.requests
+        try expect(exhaustedRequests.count == 3 && exhausted.toolCalls == 1 && exhausted.selections.isEmpty &&
+                   !exhausted.unresolved.isEmpty, "a batch exceeding the remaining read budget is not partially executed")
+
+        let official = ScriptedSmartTransport([.init(html: smartArxivAtom(), type: "application/atom+xml")])
+        let direct = try ScriptedSmartTransport([.init(response([tool("finish", "enqueue_download",
+            proposal(title: "An invented model title"))]))])
+        let titled = try await DeepSeekResolver(api: direct, metadata: official).resolve(
+            "只下载第一篇 https://arxiv.org/abs/1512.03385v1 https://arxiv.org/abs/1706.03762",
+            apiKey: key, progress: { _ in })
+        let metadataRequests = await official.requests
+        let request = metadataRequests[0]
+        let fields = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+        try expect(titled.candidates[0].title == "Deep Residual Learning for Image Recognition" &&
+                   titled.candidates[0].observedTitle == titled.candidates[0].title &&
+                   titled.candidates[1].observedTitle == nil && titled.modelCalls == 1 && titled.toolCalls == 0,
+                   "only selected arXiv papers get official titles; supplied model guesses never name a paper")
+        try expect(metadataRequests.count == 1 && request.url?.host == "export.arxiv.org" &&
+                   fields.first(where: { $0.name == "id_list" })?.value == "1512.03385v1" &&
+                   request.value(forHTTPHeaderField: "Authorization") == nil && request.httpBody == nil &&
+                   request.timeoutInterval <= 4, "title lookup is one bounded fixed-origin request without API credentials")
+        for versions in [["1512.03385v1", "1512.03385v2"], ["1512.03385", "1512.03385v1"]] {
+            for includeUnique in [false, true] {
+                let identifiers = versions + (includeUnique ? ["1706.03762v7"] : [])
+                let rows = identifiers.enumerated().map { index, id in
+                    ["title": "Observed title \(index + 1)", "url": "https://arxiv.org/abs/\(id)"]
+                }
+                let choices: [[String: Any]] = identifiers.enumerated().map { index, _ in
+                    ["candidate_id": "r\(index + 1)", "title": "Observed title \(index + 1)",
+                     "format": "inherit", "skip_existing": false]
+                }
+                let api = try ScriptedSmartTransport([
+                    .init(response([tool("search", "search_resources", ["query": "paper versions"])])),
+                    .init(["results": rows]),
+                    .init(response([tool("finish", "enqueue_download", ["selections": choices, "unresolved": []])]))
+                ])
+                let metadata = ScriptedSmartTransport([.init(html: smartArxivAtom(id: "1706.03762v7",
+                    title: "Attention Is All You Need"), type: "application/atom+xml")])
+                let result = try await DeepSeekResolver(api: api, metadata: metadata)
+                    .resolve("下载这些不同版本的论文", apiKey: key, progress: { _ in })
+                let requests = await metadata.requests
+                try expect(result.candidates.prefix(2).map(\.observedTitle) == ["Observed title 1", "Observed title 2"] &&
+                           requests.count == (includeUnique ? 1 : 0),
+                           "mixed explicit/latest versions retain their own evidence and never enter the same metadata lookup")
+                if includeUnique {
+                    let query = URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)!.queryItems!
+                    try expect(query.first(where: { $0.name == "id_list" })?.value == "1706.03762v7" &&
+                               result.candidates[2].observedTitle == "Attention Is All You Need",
+                               "unrelated unique base IDs still receive verified titles in the same single network request")
+                }
+            }
+        }
+        for xml in [smartArxivAtom(id: "1706.03762v1"), smartArxivAtom(id: "1512.03385v2"),
+                    "<!DOCTYPE feed [<!ENTITY x SYSTEM 'file:///private/file'>]><feed>&x;</feed>", "<invalid"] {
+            let api = try ScriptedSmartTransport([.init(response([tool("finish", "enqueue_download",
+                proposal(title: "An invented model title"))]))])
+            let value = try await DeepSeekResolver(api: api, metadata: ScriptedSmartTransport([.init(html: xml)]))
+                .resolve("下载 https://arxiv.org/abs/1512.03385v1", apiKey: key, progress: { _ in })
+            try expect(value.candidates.first?.title == "1512.03385v1" && value.candidates.first?.observedTitle == nil &&
+                       value.unresolved.isEmpty, "wrong IDs/versions and unsafe XML retain the honest ID fallback without inventing unfinished intent")
+        }
+        let delayed = ScriptedSmartTransport([.init(html: smartArxivAtom(), delay: 200_000_000)])
+        let deadlineAPI = try ScriptedSmartTransport([.init(response([tool("finish", "enqueue_download", proposal())]))])
+        let timed = try await DeepSeekResolver(api: deadlineAPI, metadata: delayed, budget: 0.02)
+            .resolve("下载 https://arxiv.org/abs/1512.03385", apiKey: key, thinking: .max, progress: { _ in })
+        let delayedCancelled = await delayed.cancelled
+        let delayedRequests = await delayed.requests
+        try expect(delayedCancelled && delayedRequests.first!.timeoutInterval <= 0.02 &&
+                   timed.candidates.first?.observedTitle == nil && timed.selections.count == 1,
+                   "optional metadata lookup respects the remaining total deadline and preserves a completed intent proposal")
+        let cancellable = ScriptedSmartTransport([.init(html: smartArxivAtom(), delay: 200_000_000)])
+        let cancelAPI = try ScriptedSmartTransport([.init(response([tool("finish", "enqueue_download", proposal())]))])
+        let job = Task {
+            try await DeepSeekResolver(api: cancelAPI, metadata: cancellable)
+                .resolve("下载 https://arxiv.org/abs/1512.03385", apiKey: key, progress: { _ in })
+        }
+        for _ in 0..<100 {
+            if !(await cancellable.requests).isEmpty { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        job.cancel()
+        do { _ = try await job.value; throw TestFailure.failed("cancelled metadata lookup returned a proposal") }
+        catch is CancellationError {}
+        try expect(await cancellable.cancelled, "user cancellation propagates through optional title lookup")
+        print("PASS subjective notes, real missing requirements, bounded read batches and verified arXiv titles")
+    }
+
+    private static func smartProposalCorrectionTests() async throws {
+        func selection(_ id: String, format: String = "inherit", skip: Bool = false) -> [String: Any] {
+            ["candidate_id": id, "title": "", "format": format, "skip_existing": skip]
+        }
+        func proposal(_ rows: [[String: Any]], unresolved: [String] = []) -> [String: Any] {
+            ["selections": rows, "unresolved": unresolved]
+        }
+        func call(_ id: String, _ name: String, _ args: [String: Any], reasoning: String? = nil) throws -> [String: Any] {
+            var message: [String: Any] = ["role": "assistant", "content": " \n", "tool_calls": [
+                ["id": id, "type": "function", "function": ["name": name,
+                    "arguments": String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)]]
+            ]]
+            if let reasoning { message["reasoning_content"] = reasoning }
+            return ["choices": [["finish_reason": "tool_calls", "message": message]]]
+        }
+        let key = "synthetic-test-key"
+        let input = "https://example.com/first.mp4 https://example.com/second.mp4 只下载第二个音频，已有跳过，还要字幕。"
+        let good = try call("good", "enqueue_download",
+            proposal([selection("r2", format: "audio", skip: true)], unresolved: ["未找到所要求的字幕。"]))
+        let invalidRows: [[[String: Any]]] = [
+            [selection("r99")],
+            [["candidate_id": "r2", "format": "audio"]],
+            [selection("r2", format: "pdf")],
+            [selection("r2"), selection("r2")]
+        ]
+        for rows in invalidRows {
+            let bad = try call("bad", "enqueue_download", proposal(rows))
+            let api = try ScriptedSmartTransport([.init(bad), .init(good)])
+            let result = try await DeepSeekResolver(api: api).resolve(input, apiKey: key, progress: { _ in })
+            let requests = await api.requests
+            let body = try JSONSerialization.jsonObject(with: requests[1].httpBody!) as! [String: Any]
+            let messages = body["messages"] as! [[String: Any]]
+            let error = try JSONSerialization.jsonObject(with: Data((messages.last!["content"] as! String).utf8)) as! [String: Any]
+            let tools = body["tools"] as! [[String: Any]]
+            let firstBody = try JSONSerialization.jsonObject(with: requests[0].httpBody!) as! [String: Any]
+            let initialMessages = firstBody["messages"] as! [[String: Any]]
+            let initialPrefix = try JSONSerialization.data(withJSONObject: initialMessages, options: [.sortedKeys])
+            let correctedPrefix = try JSONSerialization.data(withJSONObject: Array(messages.prefix(initialMessages.count)), options: [.sortedKeys])
+            try expect(result.modelCalls == 2 && result.toolCalls == 0 &&
+                       result.selections == [SmartSelection(candidateID: "r2", format: .audio, skipExisting: true)] &&
+                       result.unresolved == ["未找到所要求的字幕。"] &&
+                       error["error"] as? String == "invalid_download_proposal" && error["accepted"] as? Bool == false &&
+                       messages.last?["tool_call_id"] as? String == "bad",
+                       "one correction can repair invalid IDs/selection shapes without losing format, skip or missing-resource conditions")
+            try expect(tools.count == 1 && (tools[0]["function"] as? [String: Any])?["name"] as? String == "enqueue_download" &&
+                       error["remaining_read_calls"] as? Int == 0 && initialPrefix == correctedPrefix,
+                       "proposal correction advertises only the terminal tool and preserves the complete original message prefix")
+            let serialized = String(decoding: requests[1].httpBody!, as: UTF8.self)
+            let downloads = await api.downloads
+            try expect(!serialized.contains(key) && downloads == 0,
+                       "validation feedback contains no API credential and never executes a download")
+        }
+
+        let searchReasoning = "\nprivate search reasoning\r\n"
+        let correctionReasoning = "\tprivate proposal reasoning\n"
+        let search = try call("search", "search_resources", ["query": "requested paper"], reasoning: searchReasoning)
+        let hits: [String: Any] = ["results": [
+            ["title": "Project", "url": "https://example.com/project"],
+            ["title": "Requested Paper", "url": "https://example.com/paper.pdf"]
+        ]]
+        let pageProposal = try call("bad-page", "enqueue_download", proposal([selection("r1")]), reasoning: correctionReasoning)
+        let paperProposal = try call("paper", "enqueue_download", proposal([selection("r2")]), reasoning: "terminal reasoning")
+        let api = try ScriptedSmartTransport([.init(search), .init(hits), .init(pageProposal), .init(paperProposal)])
+        let repaired = try await DeepSeekResolver(api: api).resolve("找到所要求的论文", apiKey: key, thinking: .low, progress: { _ in })
+        let requests = await api.requests
+        let finalPayload = try JSONSerialization.jsonObject(with: requests[3].httpBody!) as! [String: Any]
+        let messages = finalPayload["messages"] as! [[String: Any]]
+        let assistants = messages.filter { $0["role"] as? String == "assistant" }
+        let error = try JSONSerialization.jsonObject(with: Data((messages.last!["content"] as! String).utf8)) as! [String: Any]
+        let registered = error["resources"] as! [[String: Any]]
+        try expect(repaired.modelCalls == 3 && repaired.toolCalls == 1 && repaired.candidates.count == 1 &&
+                   repaired.candidates[0].url.absoluteString == "https://example.com/paper.pdf" &&
+                   registered.first(where: { $0["id"] as? String == "r1" })?["downloadable"] as? Bool == false &&
+                   registered.first(where: { $0["id"] as? String == "r2" })?["downloadable"] as? Bool == true,
+                   "a non-downloadable landing-page proposal is corrected only using registered eligible candidates")
+        try expect(assistants.count == 2 && assistants[0]["reasoning_content"] as? String == searchReasoning &&
+                   assistants[1]["reasoning_content"] as? String == correctionReasoning &&
+                   assistants[1]["content"] as? String == " \n" &&
+                   messages.last?["tool_call_id"] as? String == "bad-page",
+                   "thinking correction replays all original reasoning and the exact rejected assistant call")
+        try expect(await api.downloads == 0, "even a corrected terminal proposal is not a download side effect")
+
+        let invalid = try call("bad", "enqueue_download", proposal([selection("r99")]))
+        let repeated = try ScriptedSmartTransport([.init(invalid), .init(invalid), .init(good)])
+        do {
+            _ = try await DeepSeekResolver(api: repeated).resolve(input, apiKey: key, progress: { _ in })
+            throw TestFailure.failed("a second invalid proposal was accepted or repaired twice")
+        } catch SmartResolverError.invalidResponse {}
+        try expect(await repeated.requests.count == 2, "only one proposal correction is allowed even with a third turn available")
+
+        let firstSearch = try call("first", "search_resources", ["query": "first"])
+        let secondSearch = try call("second", "search_resources", ["query": "second"])
+        let forbiddenRead = try ScriptedSmartTransport([.init(invalid), .init(firstSearch)])
+        do {
+            _ = try await DeepSeekResolver(api: forbiddenRead).resolve(input, apiKey: key, progress: { _ in })
+            throw TestFailure.failed("a correction invoked a read tool that was no longer available")
+        } catch SmartResolverError.invalidResponse {}
+        try expect(await forbiddenRead.requests.count == 2, "the host rejects a read during correction before any read request")
+        let lastTurn = try ScriptedSmartTransport([
+            .init(firstSearch), .init(["results": []]), .init(secondSearch), .init(["results": []]), .init(invalid), .init(good)
+        ])
+        do {
+            _ = try await DeepSeekResolver(api: lastTurn).resolve("找论文", apiKey: key, progress: { _ in })
+            throw TestFailure.failed("last-turn invalid proposal received an extra model call")
+        } catch SmartResolverError.invalidResponse {}
+        try expect(await lastTurn.requests.count == 5, "correction never exceeds three model turns or two reads")
+        let lastRequests = await lastTurn.requests
+        let lastPayload = try JSONSerialization.jsonObject(with: lastRequests[4].httpBody!) as! [String: Any]
+        let lastTools = lastPayload["tools"] as! [[String: Any]]
+        try expect(lastTools.count == 1 && (lastTools[0]["function"] as? [String: Any])?["name"] as? String == "enqueue_download",
+                   "the last model turn advertises only a terminal proposal")
+
+        let missingReasoning = try ScriptedSmartTransport([.init(invalid), .init(good)])
+        do {
+            _ = try await DeepSeekResolver(api: missingReasoning).resolve(input, apiKey: key, thinking: .high, progress: { _ in })
+            throw TestFailure.failed("thinking correction continued without required reasoning")
+        } catch SmartResolverError.invalidResponse {}
+        try expect(await missingReasoning.requests.count == 1, "an incomplete thinking tool message cannot be corrected through an invalid continuation")
+
+        let slow = try ScriptedSmartTransport([.init(invalid), .init(good, delay: 300_000_000)])
+        let timed = try await DeepSeekResolver(api: slow, budget: 0.02).resolve(input, apiKey: key, progress: { _ in })
+        let timedCancelled = await slow.cancelled
+        try expect(timed.selections.isEmpty && !timed.unresolved.isEmpty && timedCancelled,
+                   "correction stays inside the original deadline and cannot accept a late proposal")
+        let cancellable = try ScriptedSmartTransport([.init(invalid), .init(good, delay: 300_000_000)])
+        let job = Task { try await DeepSeekResolver(api: cancellable).resolve(input, apiKey: key, progress: { _ in }) }
+        for _ in 0..<100 {
+            if await cancellable.requests.count == 2 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        job.cancel()
+        do { _ = try await job.value; throw TestFailure.failed("cancelled correction returned a proposal") }
+        catch is CancellationError {}
+        let wasCancelled = await cancellable.cancelled
+        let downloads = await cancellable.downloads
+        try expect(wasCancelled && downloads == 0, "cancelling correction cancels its network request without downloading")
+        print("PASS one bounded proposal correction, strict rejection, preserved conditions and thinking replay")
     }
 
     private static func smartThinkingTests() async throws {
@@ -656,7 +1095,8 @@ extension CoreTests {
     #endif
 
     // Explicit opt-in only. The file may contain a bare key or a dotenv assignment.
-    // Values, response bodies and user credentials are never printed.
+    // Only bounded outcomes from these fixed public fixtures are printed.
+    // Credentials, raw response bodies and reasoning are never printed.
     static func smartResolverLiveTests() async throws {
         let environment = ProcessInfo.processInfo.environment
         var key = environment["DEEPSEEK_API_KEY"] ?? ""
@@ -674,19 +1114,34 @@ extension CoreTests {
             } else if !text.contains("=") { key = text.trimmingCharacters(in: .whitespacesAndNewlines) }
         }
         guard !key.isEmpty else { throw TestFailure.failed("live API check requires a configured key") }
-        try await DeepSeekCredentialValidator().validate(key)
-        print("PASS live key verification via authenticated model listing (no draft or model generation)")
         let samples: [(String, String, SmartThinkingEffort)] = [
             ("conditional", "https://example.com/first.mp4 https://example.com/second.mp4 只下载第二个的音频，已有的跳过", .off),
             ("search", "找到论文 Attention Is All You Need，返回候选让我选择。", .off),
             ("alias-gpt1-first", "下载 gpt-1 论文", .off),
             ("alias-gpt1-repeat", "下载 gpt-1 论文", .off),
             ("alias-gpt2", "下载 GPT-2 论文", .off),
+            ("subjective-best", "21 世纪最牛逼的论文", .off),
+            ("subjective-llm", "21 世纪对大模型影响最大的论文", .off),
+            ("arxiv-title", "下载 https://arxiv.org/abs/1512.03385 ，只要 PDF。", .off),
             ("page", "读取 https://jonbarron.info/mipnerf360/ ，找到这个项目的论文和补充材料。没有找到的材料明确说明。", .off),
             ("thinking-low", "读取 https://jonbarron.info/mipnerf360/ ，只找这个项目的论文 PDF。", .low),
             ("thinking-high", "读取 https://jonbarron.info/mipnerf360/ ，只找这个项目的论文 PDF。", .high),
             ("thinking-max", "读取 https://jonbarron.info/mipnerf360/ ，只找这个项目的论文 PDF。", .max)
         ]
+        let selectedNames = environment["FOLIOAK_SMART_LIVE_CASES"].map {
+            Set($0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        }
+        if let selectedNames {
+            let known = Set(samples.map(\.0)).union(["download-pipeline"])
+            try expect(!selectedNames.isEmpty && selectedNames.isSubset(of: known), "live case filter must contain known sample names")
+        }
+        try await DeepSeekCredentialValidator().validate(key)
+        print("PASS live key verification via authenticated model listing (no draft or model generation)")
+        func publicText(_ value: String, limit: Int = 1000) -> String {
+            let redacted = value.replacingOccurrences(of: key, with: "[REDACTED]")
+            return String(redacted.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+                .map(String.init).joined().prefix(limit))
+        }
         var failures: [String] = []
         func record(_ name: String, _ error: Error) {
             failures.append(name)
@@ -694,17 +1149,20 @@ extension CoreTests {
             if case TestFailure.failed(let message) = error { detail = message }
             else if let response = error as? HTTPResponseFailure { detail = "HTTP \(response.response.statusCode)" }
             else { detail = "request or download failed" }
-            print("FAIL live \(name): \(detail)")
+            let failure = error as NSError
+            print("FAIL live \(name): \(publicText(detail)); domain=\(publicText(failure.domain, limit: 120)), code=\(failure.code)")
         }
-        for (name, input, effort) in samples {
+        for (name, input, effort) in samples where selectedNames == nil || selectedNames!.contains(name) {
+            let trace = SmartLiveTraceTransport()
             do {
                 let started = ContinuousClock.now
-                let result = try await DeepSeekResolver().resolve(input, apiKey: key, thinking: effort, progress: { _ in })
+                let result = try await DeepSeekResolver(api: trace).resolve(input, apiKey: key, thinking: effort, progress: { _ in })
                 let duration = started.duration(to: .now)
                 let elapsed = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
-                print(String(format: "LIVE smart %@: %.2fs, model=%d, tools=%d, candidates=%d, proposed=%d, review=%@, unresolved=%d",
+                print(String(format: "LIVE smart %@: %.2fs, model=%d, tools=%d, candidates=%d, proposed=%d, review=%@, unresolved=%d, notes=%d",
                              name, elapsed, result.modelCalls, result.toolCalls, result.candidates.count, result.selections.count,
-                             result.needsReview ? "yes" : "no", result.unresolved.count))
+                             result.needsReview ? "yes" : "no", result.unresolved.count, result.notes.count))
+                print("LIVE intent \(name): unresolved=[\(publicText(result.unresolved.joined(separator: " | ")))], notes=[\(publicText(result.notes.joined(separator: " | "))) ]")
                 if let usage = result.usage {
                     let cache = usage.cacheHitTokens.map(String.init) ?? "unknown"
                     print("LIVE usage \(name): effort=\(effort.rawValue), input=\(usage.inputTokens), output=\(usage.outputTokens), cache_hit=\(cache), total=\(usage.totalTokens)")
@@ -714,6 +1172,11 @@ extension CoreTests {
                     try expect(result.modelCalls == 1 && result.toolCalls == 0 && !result.needsReview &&
                                result.selections == [SmartSelection(candidateID: "r2", format: .audio, skipExisting: true)],
                                "live conditional interpretation must select only the second link as audio")
+                } else if name == "arxiv-title" {
+                    try expect(result.candidates.first?.title == "Deep Residual Learning for Image Recognition" &&
+                               result.candidates.first?.observedTitle == result.candidates.first?.title &&
+                               !result.selections.isEmpty && result.unresolved.isEmpty,
+                               "live arXiv proposal presents the ID-verified official title instead of its identifier")
                 } else {
                     let origin: SmartCandidate.Origin = name == "page" || effort != .off ? .page : .search
                     try expect(result.needsReview && result.candidates.contains(where: { $0.origin == origin }),
@@ -723,6 +1186,15 @@ extension CoreTests {
                                    result.unresolved.isEmpty && result.usage != nil,
                                    "each live thinking setting completes a real tool continuation with reported usage")
                     }
+                    if name.hasPrefix("subjective-") {
+                        try expect(!result.selections.isEmpty && result.unresolved.isEmpty && !result.notes.isEmpty,
+                                   "live subjective recommendation keeps criteria in notes without manufacturing unfinished requirements")
+                        let selected = Set(result.selections.map(\.candidateID))
+                        try expect(result.candidates.filter {
+                            selected.contains($0.id) && (try? ArxivReference.parse($0.url.absoluteString)) != nil
+                        }.allSatisfy { $0.observedTitle != nil && $0.title == $0.observedTitle },
+                        "selected live arXiv recommendations show observed or ID-verified titles")
+                    }
                     if name.hasPrefix("alias-gpt1") {
                         try await verifySearchPaper(result, title: "Improving Language Understanding by Generative Pre-Training")
                     } else if name == "alias-gpt2" {
@@ -730,10 +1202,13 @@ extension CoreTests {
                     }
                 }
             } catch { record(name, error) }
+            for event in await trace.events { print("LIVE protocol \(name): \(publicText(event, limit: 2000))") }
         }
         #if TESTING
-        do { try await smartDownloadLiveTest(apiKey: key) }
-        catch { record("download-pipeline", error) }
+        if selectedNames == nil || selectedNames!.contains("download-pipeline") {
+            do { try await smartDownloadLiveTest(apiKey: key) }
+            catch { record("download-pipeline", error) }
+        }
         #endif
         try expect(failures.isEmpty, "live samples failed: " + failures.joined(separator: ", "))
         print("PASS smart live samples (sample timings are observations, not latency guarantees)")

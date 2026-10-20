@@ -155,7 +155,9 @@ extension CoreTests {
                 try expect(window.firstResponder !== editor && model.input == "1706.03762", "canvas ends input editing without clearing the draft (dismissals: \(endEditingCount))")
                 model.objectWillChange.send(); await settle()
                 try expect(window.firstResponder !== editor, "ordinary view updates do not restore dismissed input focus")
-                await fromTop(550, 100)
+                // The compact composer starts its editor below the top inset.
+                // Click that inset, not NSTextView's synchronous mouse tracker.
+                await fromTop(550, 80)
                 try expect(window.firstResponder is LinkTextView, "clicking the composer background restores editing")
                 await fromTop(75, 158)
                 try expect(editor.window == nil, "document-library navigation removes the input")

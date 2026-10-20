@@ -74,6 +74,12 @@ extension CoreTests {
                    L("粘贴链接，或描述想保存的资料") == "Paste links or describe what you want to save",
                    "native request label and natural-language placeholder update immediately")
         try expect(L("设置") == "Settings" && L("自动重试 2/3") == "Retrying 2/3", "labels and dynamic state translate")
+        try expect(L("选择说明") == "Why this selection" && L("下载进行中") == "Download in progress" &&
+                   L("修改需求") == "Edit request" && L("重试") == "Retry",
+                   "resource preview, selection guidance and recovery actions translate concisely")
+        try expect(L("还有 1 项待补充") == "1 requirement remaining" &&
+                   L("还有 10 项待补充") == "10 requirements remaining",
+                   "collapsed missing requirements translate with correct singular and plural counts")
         try expect(L(DownloadError.invalidLink("123").localizedDescription).hasPrefix("Unrecognized input."), "historical errors translate at presentation")
         try expect(L("保存失败：所选目录不存在，请重新选择。") == "Could not save: The selected folder does not exist. Choose another folder.", "nested stored errors translate")
         try expect(L("下载的更多操作") == "More actions for 下载" && L("清除标签筛选：下载") == "Clear tag filter: 下载", "user titles and tags are not translated")

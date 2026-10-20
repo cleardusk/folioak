@@ -65,12 +65,14 @@ struct SmartResolution: Sendable {
     let modelCalls: Int
     let toolCalls: Int
     let usage: SmartTokenUsage?
+    let notes: [String]
 
     init(candidates: [SmartCandidate], selections: [SmartSelection], unresolved: [String],
-         needsReview: Bool, modelCalls: Int, toolCalls: Int, usage: SmartTokenUsage? = nil) {
+         needsReview: Bool, modelCalls: Int, toolCalls: Int, usage: SmartTokenUsage? = nil, notes: [String] = []) {
         self.candidates = candidates; self.selections = selections; self.unresolved = unresolved
         self.needsReview = needsReview; self.modelCalls = modelCalls; self.toolCalls = toolCalls
         self.usage = usage
+        self.notes = notes
     }
 
     // Search observations are not download choices until the resolver has

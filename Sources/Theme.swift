@@ -26,7 +26,7 @@ enum WorkspaceMetrics {
     static let headerHeight: CGFloat = 76
     static let controlHeight: CGFloat = 32
     static let rowIconSize: CGFloat = 44
-    static let inputHeight: CGFloat = 104
+    static let inputHeight: CGFloat = 64
 }
 
 struct ThemePalette {
@@ -167,7 +167,7 @@ struct PrimaryActionStyle: ButtonStyle {
     @WorkspaceViewState private var hovered = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let shape = Capsule(style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         configuration.label
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(ThemePalette.color(enabled ? palette.onAction : palette.secondary))
@@ -176,7 +176,6 @@ struct PrimaryActionStyle: ButtonStyle {
             .background(shape.fill(enabled ? ThemePalette.color(palette.action) : ThemePalette.color(palette.border).opacity(0.55)))
             .overlay(shape.fill(Color.white.opacity(enabled ? (configuration.isPressed ? 0 : hovered ? 0.10 : 0) : 0)))
             .overlay(shape.fill(Color.black.opacity(enabled && configuration.isPressed ? 0.12 : 0)))
-            .shadow(color: ThemePalette.color(palette.action).opacity(enabled && !configuration.isPressed ? 0.28 : 0), radius: enabled ? (hovered ? 8 : 5) : 0, y: enabled ? 2 : 0)
             .contentShape(shape)
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.97 : 1)
             .onHover { hovered = $0 }

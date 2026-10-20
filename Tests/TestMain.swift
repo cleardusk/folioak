@@ -972,7 +972,7 @@ struct CoreTests {
             return root.subviews.lazy.compactMap { findEditor($0) }.first
         }
         settle()
-        guard let editor = findEditor(view), let layout = editor.layoutManager, let container = editor.textContainer else { throw TestFailure.failed("native input text layout missing") }
+        guard var editor = findEditor(view), let layout = editor.layoutManager, let container = editor.textContainer else { throw TestFailure.failed("native input text layout missing") }
         try expect(editor.frame.width > 500 && editor.frame.height >= (editor.enclosingScrollView?.contentSize.height ?? 62), "input document must fill scroll area")
         let placeholder = editor.placeholderFirstGlyphOrigin
         model.input = LinkTextView.example
@@ -990,15 +990,19 @@ struct CoreTests {
         try expect(model.input == editor.string, "editor-to-model multiline sync")
         model.input = String(repeating: "https://arxiv.org/abs/2609.22978\n", count: 100)
         settle()
-        try expect(editor.frame.height > 104 && editor.enclosingScrollView?.contentSize.height == 104, "long input scrolls within the fixed input box")
+        try expect(editor.frame.height > WorkspaceMetrics.inputHeight &&
+                   editor.enclosingScrollView?.contentSize.height == WorkspaceMetrics.inputHeight,
+                   "long input scrolls within the configured input height")
         model.input = ""
         settle()
-        try expect(editor.frame.height == 104, "clearing input restores document height")
+        try expect(editor.frame.height == WorkspaceMetrics.inputHeight, "clearing input restores document height")
         model.busy = true
         settle()
-        try expect(!editor.isEditable, "busy input is read-only")
+        try expect(findEditor(view) == nil, "busy input is replaced by the compact download progress row")
         model.busy = false
         settle()
+        guard let restoredEditor = findEditor(view) else { throw TestFailure.failed("idle input editor is restored") }
+        editor = restoredEditor
         try expect(editor.isEditable && editor.allowsUndo && !editor.isAutomaticDashSubstitutionEnabled, "input restores editing and preserves URL punctuation")
         window.makeFirstResponder(editor)
         editor.insertText("2501.12345v2", replacementRange: NSRange(location: 0, length: 0))
@@ -1007,9 +1011,13 @@ struct CoreTests {
         model.busy = true
         model.input = ""
         settle()
-        try expect(editor.string.isEmpty && editor.undoManager?.canUndo == false, "automatic input cleanup discards undo actions for old text")
+        try expect(findEditor(view) == nil && model.input.isEmpty, "automatic cleanup clears the request while the busy editor is unmounted")
         model.busy = false
         settle()
+        guard let clearedEditor = findEditor(view) else { throw TestFailure.failed("input editor returns after automatic cleanup") }
+        editor = clearedEditor
+        try expect(editor.isEditable && editor.allowsUndo && editor.string.isEmpty && editor.undoManager?.canUndo == false,
+                   "the restored empty input discards undo actions for the completed request")
         model.input = "https://arxiv.org/html/2501.12345v2\n2501.12345\nhttps://example.com/paper\nbad-link"
         settle()
         for theme in AppTheme.allCases {

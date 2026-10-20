@@ -885,6 +885,14 @@
 "下载文件" = "Download";
 "核对下载" = "Review downloads";
 "返回修改" = "Edit request";
+"修改需求" = "Edit request";
+"选择说明" = "Why this selection";
+"还有 %@ 项待补充" = "%@ requirements remaining";
+"还有 1 项待补充" = "1 requirement remaining";
+"选择资料" = "Select resource";
+"未能完成查找" = "Search could not be completed";
+"暂未找到可下载的资料" = "No downloadable resources found";
+"下载进行中" = "Download in progress";
 "下载选项" = "Download options";
 "保存位置：" = "Save to: ";
 "停止解析" = "Stop resolving";

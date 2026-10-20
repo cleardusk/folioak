@@ -8,6 +8,7 @@ import Combine
     @Published private(set) var resolution: SmartResolution?
     @Published var selections: [SmartSelection] = []
     @Published private(set) var message: String?
+    @Published private(set) var remainingRequirements: [String] = []
     @Published private(set) var failed = false
     @Published private(set) var needsSetup = false
     @Published private(set) var requiresNewKey = false
@@ -119,14 +120,14 @@ import Combine
     }
 
     func inputChanged(_ input: String) {
-        if sessionID != nil && input != original { cancel() }
+        if input != original && (sessionID != nil || message != nil || !remainingRequirements.isEmpty) { cancel() }
     }
 
     func cancel() {
         if let owner = setupConnectionOwner { model?.smartSettings.cancelPendingConnection(owner: owner) }
         sessionID = nil
         worker?.cancel(); worker = nil; progress = nil
-        resolution = nil; selections = []; message = nil; failed = false; onAccepted = nil
+        resolution = nil; selections = []; message = nil; remainingRequirements = []; failed = false; onAccepted = nil
         needsSetup = false; requiresNewKey = false; original = ""
     }
 
@@ -139,14 +140,13 @@ import Combine
             // Invalidate before invoking callbacks that can change the draft.
             sessionID = nil; onAccepted = nil; resolution = nil; selections = []; failed = false
             completion?(result.unresolved.isEmpty)
+            original = result.unresolved.isEmpty ? "" : original
+            remainingRequirements = result.unresolved
             var parts: [String] = []
             if receipt.accepted > 0 { parts.append(L("已加入 \(receipt.accepted) 项")) }
             if receipt.skipped > 0 { parts.append(L("已有 \(receipt.skipped) 项，已跳过")) }
             if receipt.duplicates > 0 { parts.append(L("队列中已有 \(receipt.duplicates) 项")) }
-            if !result.unresolved.isEmpty {
-                parts.append(L("仍未完成：") + result.unresolved.map { L($0) }.joined(separator: "；"))
-            }
-            message = parts.joined(separator: " · ")
+            message = parts.joined(separator: "；")
         } catch { failed = true; message = error.localizedDescription }
     }
 
