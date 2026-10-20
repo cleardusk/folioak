@@ -27,12 +27,15 @@ import Combine
         if smart.resolving || smart.resolution != nil { return smart.progress?.label ?? "就绪" }
         return recentItems.first?.state.label ?? "就绪"
     }
+    var saveDirectory: URL {
+        smart.selectsOnlyPDFs ? (model.activePDFDirectory ?? model.directory) : model.directory
+    }
     func open(_ item: DownloadItem, reveal: Bool = false) {
         model.openFile(item, reveal: reveal)
         resultError = model.notice
     }
     func openDirectory() {
-        model.openDirectory()
+        model.openDirectory(saveDirectory)
         resultError = model.directoryNotice
     }
 
@@ -82,6 +85,7 @@ struct QuickDownloadView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.colorSchemeContrast) private var contrast
     private var palette: ThemePalette { model.theme.palette(dark: scheme == .dark).accessibilityAdjusted(contrast) }
+    private var reviewing: Bool { state.smart.resolution != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -97,32 +101,46 @@ struct QuickDownloadView: View {
                     .accessibilityLabel(L("更多操作"))
             }
             ZStack(alignment: .topLeading) {
-                QuickLinkEditor(text: $state.draft, focusRequest: state.focusRequest, submit: state.submit, close: close, rejected: state.inputTooLarge, captureTrace: { accepted in model.trace.user(accepted ? .inputCaptured : .inputRejected, context: .quickPanel, outcome: accepted ? .succeeded : .failed) }, captureInput: model.captureInput)
-                    .frame(height: state.smart.resolution == nil ? 112 : 72)
-                if state.draft.isEmpty {
+                QuickLinkEditor(text: $state.draft, focusRequest: state.focusRequest, submit: state.submit, close: cancelOrClose, rejected: state.inputTooLarge, captureTrace: { accepted in model.trace.user(accepted ? .inputCaptured : .inputRejected, context: .quickPanel, outcome: accepted ? .succeeded : .failed) }, captureInput: model.captureInput)
+                    .opacity(reviewing ? 0 : 1).disabled(reviewing).accessibilityHidden(reviewing)
+                if reviewing {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L("核对下载")).font(.system(size: 13, weight: .medium))
+                        Text(state.draft).font(.system(size: 12))
+                            .foregroundStyle(ThemePalette.color(palette.secondary)).lineLimit(1)
+                            .help(state.draft)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                } else if state.draft.isEmpty {
                     Text(L(model.smartSettings.enabled ? "粘贴链接，或描述想保存的资料" : "粘贴链接，每行一条"))
                         .font(.system(size: 13)).foregroundStyle(ThemePalette.color(palette.secondary))
                         .padding(.horizontal, 9).padding(.vertical, 8).allowsHitTesting(false)
                 }
             }
-            .background(ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(ThemePalette.color(palette.border), lineWidth: 1))
+            .frame(height: reviewing ? 42 : 112)
+            .background(reviewing ? Color.clear : ThemePalette.color(palette.surface), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(reviewing ? Color.clear : ThemePalette.color(palette.border), lineWidth: 1))
+            if state.smart.resolving || reviewing || state.smart.message != nil {
+                SmartInputStatusView(state: state.smart, palette: palette, compact: true,
+                                     showsReviewActions: false, onEdit: returnToEditing)
+            }
             HStack(spacing: 12) {
                 Button(action: state.openDirectory) {
-                    Label(model.directoryLabel, systemImage: "folder")
+                    Label(state.saveDirectory.lastPathComponent, systemImage: "folder")
                         .font(.system(size: 11)).lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }.buttonStyle(.plain).foregroundStyle(ThemePalette.color(palette.secondary))
-                    .help(model.directory.path).accessibilityLabel(L("打开保存位置"))
-                Spacer(minLength: 0)
-                if state.smart.resolution == nil {
-                    Button(L(model.busy ? "加入队列" : "开始下载"), action: state.submit)
+                    .help(state.saveDirectory.path).accessibilityLabel(L("打开保存位置"))
+                if reviewing {
+                    SmartInputReviewActionsView(state: state.smart, palette: palette, onEdit: returnToEditing)
+                } else if !state.smart.resolving {
+                    Button(L(model.smartSettings.enabled && !SmartInput.isDirect(state.draft) && !state.draft.isEmpty
+                             ? "查找资源" : model.busy ? "加入队列" : "开始下载"), action: state.submit)
                         .buttonStyle(QuietButtonStyle(palette: palette))
                         .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling || state.smart.resolving)
                         .help(L("⌘ Return 下载"))
                         .accessibilityIdentifier("quick-download-submit")
                 }
             }
-            SmartInputStatusView(state: state.smart, palette: palette, compact: true)
             if let message = state.message, state.failed || state.recentItems.contains(where: { !$0.state.terminal }) {
                 Label(L(message), systemImage: state.failed ? "exclamationmark.circle" : "checkmark.circle")
                     .font(.system(size: 12)).foregroundStyle(state.failed ? UIColors.error : UIColors.success)
@@ -172,6 +190,16 @@ struct QuickDownloadView: View {
         .foregroundStyle(ThemePalette.color(palette.text))
         .background(ThemePalette.color(palette.canvas))
         .environment(\.locale, L10n.locale)
+    }
+
+    private func returnToEditing() {
+        state.smart.cancel()
+        state.focusRequest = UUID()
+    }
+
+    private func cancelOrClose() {
+        if state.smart.resolving || reviewing { returnToEditing() }
+        else { close() }
     }
 }
 
@@ -254,6 +282,7 @@ struct QuickDownloadFileInteraction: NSViewRepresentable {
 // A native editor preserves selection/undo and handles submission in its own
 // responder chain, even when the main window's download menu item is disabled.
 struct QuickLinkEditor: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
     @Binding var text: String
     let focusRequest: UUID
     let submit: () -> Void
@@ -283,13 +312,15 @@ struct QuickLinkEditor: NSViewRepresentable {
         editor.submit = submit; editor.close = close; editor.captureTrace = captureTrace
         editor.captureInput = captureInput
         editor.rejected = rejected
+        editor.isEditable = isEnabled; editor.isSelectable = isEnabled
+        if !isEnabled, editor.window?.firstResponder === editor { editor.window?.makeFirstResponder(nil) }
         editor.textColor = .labelColor; editor.insertionPointColor = .labelColor
         editor.setAccessibilityLabel(L("下载链接"))
         if editor.string != text { editor.string = text; editor.undoManager?.removeAllActions() }
-        if editor.focusRequest != focusRequest {
+        if isEnabled && editor.focusRequest != focusRequest {
             editor.focusRequest = focusRequest
             DispatchQueue.main.async { [weak editor] in
-                guard let editor, editor.focusRequest == focusRequest else { return }
+                guard let editor, editor.isEditable, editor.focusRequest == focusRequest else { return }
                 editor.window?.makeFirstResponder(editor)
             }
         }

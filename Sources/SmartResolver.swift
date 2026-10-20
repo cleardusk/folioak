@@ -90,9 +90,37 @@ struct DeepSeekResolver: SmartResolving {
     private struct Resource {
         let candidate: SmartCandidate
         let downloadable: Bool
+        let sourceTitle: String
+        let evidence: String
+        let titleEvidence: String
         var json: [String: Any] {
-            ["id": candidate.id, "title": candidate.title, "url": candidate.url.absoluteString,
-             "detail": candidate.detail, "origin": candidate.origin.rawValue, "downloadable": downloadable]
+            ["id": candidate.id, "title": sourceTitle, "url": candidate.url.absoluteString,
+             "detail": evidence, "origin": candidate.origin.rawValue, "downloadable": downloadable]
+        }
+
+        func observedTitle(_ proposed: String) -> String? {
+            let title = Self.spaced(proposed)
+            guard candidate.origin != .supplied, !title.isEmpty, title.count <= 200,
+                  title.caseInsensitiveCompare(candidate.title) != .orderedSame,
+                  !title.contains("|"), !title.contains("`"),
+                  !title.contains("://"), !title.contains("]("),
+                  !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+            // Copying is allowed; generating or borrowing another candidate's
+            // metadata is not. Keep punctuation and case from the observation.
+            for source in [sourceTitle, titleEvidence] {
+                let value = Self.spaced(source)
+                if let range = value.range(of: title, options: .literal) {
+                    let before = range.lowerBound == value.startIndex ? nil : value[value.index(before: range.lowerBound)]
+                    let after = range.upperBound == value.endIndex ? nil : value[range.upperBound]
+                    if before?.isLetter != true && before?.isNumber != true &&
+                        after?.isLetter != true && after?.isNumber != true { return title }
+                }
+            }
+            return nil
+        }
+
+        static func spaced(_ text: String) -> String {
+            text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         }
     }
 
@@ -181,7 +209,8 @@ struct DeepSeekResolver: SmartResolving {
             }
         }
 
-        mutating func register(_ raw: URL, title: String, detail: String, origin: SmartCandidate.Origin) -> Resource? {
+        mutating func register(_ raw: URL, title: String, detail: String, origin: SmartCandidate.Origin,
+                               titleEvidence: String? = nil) -> Resource? {
             guard PublicHTTPS.allows(raw), raw.absoluteString.utf8.count <= 2048,
                   (try? DownloadSource.parse(raw.absoluteString)) != nil else { return nil }
             var parts = URLComponents(url: raw, resolvingAgainstBaseURL: false)!
@@ -194,8 +223,18 @@ struct DeepSeekResolver: SmartResolving {
                 return nil
             }
             let downloadable = origin == .supplied || Self.isFile(url)
+            let source = try? DownloadSource.parse(url.absoluteString)
+            let fallback = source?.reference?.identifier ?? (url.lastPathComponent.isEmpty ? url.host ?? L("资源") : url.lastPathComponent)
+            // A filename is a display fallback, not observed title metadata.
+            // Leaving it in the title field encourages the model to copy it
+            // instead of the formal name in the adjacent evidence.
+            let sourceTitle = origin == .supplied ||
+                title.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(url.lastPathComponent) == .orderedSame
+                ? "" : String(title.prefix(200))
             let resource = Resource(candidate: SmartCandidate(id: "r\(resources.count + 1)",
-                title: String(title.prefix(200)), url: url, detail: String(detail.prefix(600)), origin: origin), downloadable: downloadable)
+                title: String(fallback.prefix(200)), url: url, detail: "", origin: origin),
+                downloadable: downloadable, sourceTitle: sourceTitle, evidence: String(detail.prefix(600)),
+                titleEvidence: String((titleEvidence ?? detail).prefix(600)))
             resources.append(resource)
             return resource
         }
@@ -225,7 +264,7 @@ struct DeepSeekResolver: SmartResolving {
                 // evidence; the model must still match their nearby context.
                 for link in Self.snippetLinks(detail) where link.url != url {
                     if let resource = register(link.url, title: link.url.lastPathComponent,
-                                               detail: link.context, origin: .search),
+                                               detail: link.context, origin: .search, titleEvidence: link.titleEvidence),
                        !found.contains(where: { $0["id"] as? String == resource.candidate.id }) {
                         found.append(resource.json.merging(["observed_in": url.absoluteString]) { _, new in new })
                     }
@@ -234,10 +273,10 @@ struct DeepSeekResolver: SmartResolving {
             return ["resources": found, "notice": "结果页面与片段中引用的附件可能是不同作品；必须依据相邻标题、作者、年份和版本核对，不能仅因链接可下载就选择。"]
         }
 
-        static func snippetLinks(_ text: String) -> [(url: URL, context: String)] {
+        static func snippetLinks(_ text: String) -> [(url: URL, context: String, titleEvidence: String)] {
             let detector = try! NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
             let raw = text as NSString
-            var links: [(url: URL, context: String)] = [], seen = Set<URL>()
+            var links: [(url: URL, context: String, titleEvidence: String)] = [], seen = Set<URL>(), previousEnd = 0
             for match in detector.matches(in: text, range: NSRange(location: 0, length: raw.length)).prefix(20) {
                 guard var value = match.url?.absoluteString, value.utf8.count <= 2048 else { continue }
                 // Data detectors can retain a Markdown wrapper after a path
@@ -245,11 +284,22 @@ struct DeepSeekResolver: SmartResolving {
                 while value.hasSuffix(")"), value.filter({ $0 == ")" }).count > value.filter({ $0 == "(" }).count {
                     value.removeLast()
                 }
-                guard let url = URL(string: value), PublicHTTPS.allows(url), isFile(url), seen.insert(url).inserted else { continue }
-                let start = max(0, match.range.location - 300)
-                let end = min(raw.length, NSMaxRange(match.range) + 140)
+                guard let url = URL(string: value), PublicHTTPS.allows(url), isFile(url) else { continue }
+                let priorEnd = previousEnd
+                previousEnd = NSMaxRange(match.range)
+                guard seen.insert(url).inserted else { continue }
+                // Tables bind a link to its own row. Ordinary Markdown may
+                // put a heading just above a separate link paragraph.
+                let line = raw.lineRange(for: match.range)
+                let isTableRow = raw.substring(with: line).contains("|")
+                let start = max(isTableRow ? line.location : 0, match.range.location - 350)
+                let end = min(NSMaxRange(line), NSMaxRange(match.range) + 140)
                 let context = raw.substring(with: NSRange(location: start, length: end - start))
-                links.append((url, String(context.prefix(600))))
+                // Adjacent attachments can inform selection but cannot lend
+                // each other a title, in either direction.
+                let titleStart = max(start, priorEnd)
+                let titleEvidence = raw.substring(with: NSRange(location: titleStart, length: match.range.location - titleStart))
+                links.append((url, String(context.prefix(600)), titleEvidence))
                 if links.count == 2 { break }
             }
             return links
@@ -276,7 +326,8 @@ struct DeepSeekResolver: SmartResolving {
             }.sorted { Self.isFile($0.url) && !Self.isFile($1.url) }
             if relevant.count > 20 { noteLimit(L("候选数量已达上限，可能还有未列出的资源。")) }
             for link in relevant.prefix(20) {
-                if let resource = register(link.url, title: link.title, detail: link.context, origin: .page) { found.append(resource.json) }
+                if let resource = register(link.url, title: link.title, detail: link.context, origin: .page,
+                                           titleEvidence: link.titleEvidence) { found.append(resource.json) }
             }
             return ["page_id": id, "text": page.text, "resources": found,
                     "limitations": limitations,
@@ -304,12 +355,15 @@ struct DeepSeekResolver: SmartResolving {
                 throw SmartResolverError.invalidResponse
             }
             var seen = Set<String>()
+            var titles: [String: String] = [:]
             let selections = try rows.map { row -> SmartSelection in
-                guard Set(row.keys) == ["candidate_id", "format", "skip_existing"],
+                guard Set(row.keys) == ["candidate_id", "format", "skip_existing", "title"],
                       let id = row["candidate_id"] as? String, let resource = resources.first(where: { $0.candidate.id == id }),
                       resource.downloadable, let formatValue = row["format"] as? String, let format = SmartFormat(rawValue: formatValue),
+                      let title = row["title"] as? String, title.count <= 200,
                       let skip = row["skip_existing"] as? NSNumber, CFGetTypeID(skip) == CFBooleanGetTypeID(),
                       seen.insert(id + "|" + format.rawValue).inserted else { throw SmartResolverError.invalidResponse }
+                if let observed = resource.observedTitle(title), titles[id] == nil { titles[id] = observed }
                 return SmartSelection(candidateID: id, format: format, skipExisting: skip.boolValue)
             }
             guard !selections.isEmpty || !unresolved.isEmpty else { throw SmartResolverError.invalidResponse }
@@ -321,7 +375,11 @@ struct DeepSeekResolver: SmartResolving {
             let matched = Set(selections.map(\.candidateID))
             return SmartResolution(candidates: resources.filter {
                 $0.candidate.origin == .supplied || matched.contains($0.candidate.id)
-            }.map(\.candidate), selections: selections,
+            }.map {
+                let candidate = $0.candidate
+                return SmartCandidate(id: candidate.id, title: titles[candidate.id] ?? candidate.title,
+                    url: candidate.url, detail: "", origin: candidate.origin, observedTitle: titles[candidate.id])
+            }, selections: selections,
                 unresolved: remaining, needsReview: discovered || !remaining.isEmpty || unknownPage,
                 modelCalls: modelCalls, toolCalls: toolCalls)
         }
@@ -395,11 +453,13 @@ struct DeepSeekResolver: SmartResolving {
         Represent these ordinary conditions with format and skip_existing; do NOT mark them unresolved merely because you cannot access the local library or verify the link.
         Do not search or inspect supplied direct file/video links just to verify availability.
         Expand informal names or abbreviations to the likely formal title while retaining the user's distinctive alias and including the original institution or publisher when known. Keep queries concise (<=128 Unicode characters).
+        When searching for a paper download, include PDF in the query along with the necessary identifying words and original publisher when known.
         Prefer original author or publisher sources; a clearly identified copy from a university or other reliable source can also match.
         When several links identify the same work, prefer the original publisher's current page or CDN link over links from old repository commits or historical citations. If a publisher landing page is available, inspect it for the current download link.
         Select a discovered resource only when its observed title and nearby evidence identify the requested work, including any specified author, year or version.
         A high search rank, a matching keyword in references, or a downloadable file extension does NOT establish identity.
         Snippet links carry their own nearby context and observed_in page; a citing article's title is not the cited attachment's title.
+        Each selection must include title: copy only the resource's formal title verbatim from its own observed title or nearby detail, excluding surrounding table syntax, aliases, authors and years. Use an empty string if no formal title was observed; never infer it from a filename, URL, the user's request, memory or another resource.
         If the first search has only weak or unrelated results, use the remaining read call for a more precise search. If identity remains unsupported, select nothing and state what is missing.
         Discovery selections are matching candidates for user review, not immediate downloads. Include genuine matches even when the user asks to choose later; do not include unrelated alternatives.
         inspect_page reads the static HTML of an existing candidate and registers its links. Use it for a project page or to inspect a search landing page.
@@ -425,9 +485,10 @@ struct DeepSeekResolver: SmartResolving {
                     "selections": ["type": "array", "items": [
                         "type": "object", "properties": [
                             "candidate_id": ["type": "string"],
+                            "title": ["type": "string", "description": "Formal title copied verbatim from this resource's observed title/detail; empty string if unknown."],
                             "format": ["type": "string", "enum": ["inherit", "video", "audio"]],
                             "skip_existing": ["type": "boolean"]
-                        ], "required": ["candidate_id", "format", "skip_existing"], "additionalProperties": false
+                        ], "required": ["candidate_id", "title", "format", "skip_existing"], "additionalProperties": false
                     ]],
                     "unresolved": ["type": "array", "items": ["type": "string"]]
                  ])
@@ -442,7 +503,7 @@ struct DeepSeekResolver: SmartResolving {
 // Bounded static HTML extraction. Scripts, comments and style content are never
 // interpreted; links are resolved against the actual response URL.
 struct SmartHTMLPage {
-    struct Link { let url: URL, title: String, context: String }
+    struct Link { let url: URL, title: String, context: String, titleEvidence: String }
     let text: String
     let links: [Link]
     let truncated: Bool
@@ -456,6 +517,7 @@ struct SmartHTMLPage {
         var links: [Link] = [], seen = Set<URL>(), inspected = 0, cursor = 0, truncated = false
         expression.enumerateMatches(in: cleaned, range: NSRange(location: 0, length: raw.length)) { match, _, stop in
             guard let match, match.range.location >= cursor else { return }
+            let previousAnchorEnd = cursor
             inspected += 1
             if inspected > 200 { truncated = true; stop.pointee = true; return }
             let start = NSMaxRange(match.range)
@@ -478,7 +540,10 @@ struct SmartHTMLPage {
             let contextStart = max(0, match.range.location - 140)
             let length = min(raw.length - contextStart, NSMaxRange(closing) - contextStart + 140)
             let context = Self.plain(raw.substring(with: NSRange(location: contextStart, length: length)))
-            links.append(Link(url: target, title: title.isEmpty ? target.lastPathComponent : title, context: String(context.prefix(400))))
+            let titleStart = max(contextStart, previousAnchorEnd)
+            let titleEvidence = Self.plain(raw.substring(with: NSRange(location: titleStart, length: NSMaxRange(closing) - titleStart)))
+            links.append(Link(url: target, title: title.isEmpty ? target.lastPathComponent : title,
+                              context: String(context.prefix(400)), titleEvidence: String(titleEvidence.prefix(400))))
         }
         self.links = links
         self.truncated = truncated

@@ -1134,14 +1134,18 @@ final class DownloadModel: ObservableObject {
     }
 
     func start() {
-        guard !busy, !isTerminating else { return }
+        guard !busy, !isTerminating, mainSmartState?.resolving != true else { return }
         if mainSmartState?.resolution != nil {
             mainSmartState?.acceptSelection()
             return
         }
         if smartSettings.enabled && !SmartInput.isDirect(input) {
             notice = nil
-            smartInput.submit(input)
+            let original = input
+            smartInput.submit(original) { [weak self] fullyResolved in
+                guard fullyResolved, self?.input == original else { return }
+                self?.input = ""
+            }
             return
         }
         mainSmartState?.cancel()
@@ -1276,7 +1280,8 @@ final class DownloadModel: ObservableObject {
                 skipped += 1; continue
             }
             added.append(DownloadItem(original: candidate.url.absoluteString, reference: source.reference, directURL: source.directURL,
-                state: .queued, mediaFormat: source.supportsAudioExtraction ? format : nil, preservesInput: quick ? true : nil,
+                state: .queued, documentTitle: candidate.observedTitle,
+                mediaFormat: source.supportsAudioExtraction ? format : nil, preservesInput: quick ? true : nil,
                 smartRequestID: sessionID, namingSnapshot: namingSnapshot,
                 origin: DownloadOrigin(input: candidate.url.absoluteString, capturedAt: Date())))
         }
@@ -1354,11 +1359,15 @@ final class DownloadModel: ObservableObject {
     }
 
     func openDirectory() {
+        openDirectory(directory)
+    }
+
+    func openDirectory(_ target: URL) {
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             directoryNotice = "保存位置不存在，请重新选择。"; return
         }
-        if !opener(directory) { directoryNotice = "无法打开保存目录，请检查 Finder 或目录权限。" }
+        if !opener(target) { directoryNotice = "无法打开保存目录，请检查 Finder 或目录权限。" }
         else { directoryNotice = nil }
     }
 
@@ -1605,7 +1614,9 @@ final class DownloadModel: ObservableObject {
                 for await event in events { self?.receive(event, for: id, run: run) }
             }
             do {
-                let saved = try await engine.download(source, to: target, naming: snapshot.paperStyle, namingSnapshot: snapshot, mediaFormat: item.mediaFormat ?? .automatic, organizeByType: true, pdfDirectory: pdfTarget) { event in sink.yield(event) }
+                let saved = try await engine.download(source, to: target, naming: snapshot.paperStyle, namingSnapshot: snapshot,
+                    mediaFormat: item.mediaFormat ?? .automatic, organizeByType: true, pdfDirectory: pdfTarget,
+                    titleHint: item.smartRequestID == nil ? nil : item.documentTitle) { event in sink.yield(event) }
                 sink.finish()
                 await listener.value
                 update(id) {

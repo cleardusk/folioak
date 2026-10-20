@@ -1,7 +1,123 @@
 import Foundation
 import PDFKit
+import CoreText
+
+func createTextPDF(at url: URL, lines: [String], title: String? = nil) throws {
+    var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+    let info = title.map { [kCGPDFContextTitle as String: $0] as CFDictionary }
+    guard let context = CGContext(url as CFURL, mediaBox: &box, info) else {
+        throw TestFailure.failed("text PDF context creation")
+    }
+    context.beginPDFPage(nil)
+    let font = CTFontCreateWithName("Helvetica" as CFString, 16, nil)
+    for (index, text) in lines.enumerated() {
+        let attributes = [NSAttributedString.Key(kCTFontAttributeName as String): font]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        context.textPosition = CGPoint(x: 40, y: 740 - CGFloat(index) * 25)
+        CTLineDraw(line, context)
+    }
+    context.endPDFPage()
+    context.closePDF()
+}
 
 extension CoreTests {
+    @MainActor private static func pdfTitleHintTests(root: URL) async throws {
+        let folder = root.appendingPathComponent("pdf-title-hints", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let title = "Reliable Retrieval with Language Models"
+        let lines = ["Reliable Retrieval with", "Language Models", "Author One and Author Two", "Abstract"]
+        let plain = folder.appendingPathComponent("plain-fixture.pdf")
+        let embedded = folder.appendingPathComponent("embedded-fixture.pdf")
+        try createTextPDF(at: plain, lines: lines)
+        try createTextPDF(at: embedded, lines: lines, title: "Embedded Document Title")
+        let body = try Data(contentsOf: plain), embeddedBody = try Data(contentsOf: embedded)
+        try expect(PDFDocument(url: plain)?.page(at: 0)?.string?.contains("Language Models") == true,
+                   "title fixture contains extractable first-page text")
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FixtureProtocol.self]
+        let transport = URLSessionTransport(testConfiguration: config, policy: .externalPDF)
+        let engine = DownloadEngine(pdfTransport: transport, requestInterval: 0, retryDelay: 0)
+        let baseHeaders = ["Content-Type": "application/pdf", "ETag": "\"title-v1\"",
+                           "Content-Disposition": "attachment; filename=opaque-download.pdf"]
+        func source(_ name: String) throws -> DownloadSource { try DownloadSource.parse("https://example.com/title-\(name).pdf") }
+        func install(_ name: String, body: Data, headers: [String: String]? = nil) {
+            FixtureProtocol.install(.init(headers: headers ?? baseHeaders, body: body), path: "/title-\(name).pdf")
+        }
+
+        install("matched", body: body)
+        let matched = try await engine.download(source("matched"), to: folder.appendingPathComponent("matched"), titleHint: title)
+        try expect(matched.title == title && matched.url.lastPathComponent == title + ".pdf",
+                   "a complete first-page title replaces an opaque PDF filename")
+        try expect(PDFDocument(url: matched.url)?.documentAttributes?[PDFDocumentAttribute.titleAttribute] == nil,
+                   "a display-title hint never rewrites the downloaded PDF")
+        install("default", body: body)
+        let ordinary = try await engine.download(source("default"), to: folder.appendingPathComponent("default"))
+        try expect(ordinary.title == "opaque-download" && ordinary.url.lastPathComponent == "opaque-download.pdf",
+                   "omitting titleHint preserves ordinary direct-PDF naming")
+        install("normalized", body: body)
+        let normalized = try await engine.download(source("normalized"), to: folder.appendingPathComponent("normalized"),
+            titleHint: "reliable   retrieval WITH\nLanguage Models")
+        try expect(normalized.title == "reliable retrieval WITH Language Models",
+                   "full-title verification normalizes case and line wrapping")
+
+        for (index, hint) in ["An Unrelated Paper", "Reliable Retrieval with Language Model", "",
+                              "Unknown", String(repeating: "a", count: ResourceLimits.titleCharacters + 1)].enumerated() {
+            let name = "invalid-\(index)"
+            install(name, body: embeddedBody)
+            let rejected = try await engine.download(source(name), to: folder.appendingPathComponent(name), titleHint: hint)
+            try expect(rejected.title == "Embedded Document Title",
+                       "unmatched, partial, blank, generic and overlong hints cannot replace embedded metadata")
+        }
+        install("embedded-matched", body: embeddedBody)
+        let corrected = try await engine.download(source("embedded-matched"), to: folder.appendingPathComponent("embedded-matched"), titleHint: title)
+        try expect(corrected.title == title &&
+                   PDFDocument(url: corrected.url)?.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String == "Embedded Document Title",
+                   "a verified full title takes display priority without changing embedded metadata")
+
+        var rules = AssetNamingRules(); rules[.documents] = "{source} - {title}"
+        let snapshot = AssetNamingSnapshot(rules: rules)
+        install("custom", body: body)
+        let custom = try await engine.download(source("custom"), to: folder.appendingPathComponent("custom"),
+            namingSnapshot: snapshot, titleHint: title)
+        try expect(custom.title == title && custom.url.lastPathComponent == "example.com - " + title + ".pdf",
+                   "custom filenames use the verified title while display titles exclude the template")
+        let frozenFolder = folder.appendingPathComponent("frozen")
+        let frozen = snapshot.saving([frozenFolder.appendingPathComponent("User Chosen Name.pdf")])
+        install("frozen", body: body)
+        let retry = try await engine.download(source("frozen"), to: frozenFolder, namingSnapshot: frozen, titleHint: title)
+        try expect(retry.title == title && retry.url.lastPathComponent == "User Chosen Name.pdf",
+                   "a verified title cannot replace an allocated or user-renamed retry filename")
+
+        for status in [200, 304] {
+            let name = "cache-\(status)", cacheFolder = folder.appendingPathComponent("cache-\(status)")
+            install(name, body: body)
+            let before = try await engine.download(source(name), to: cacheFolder)
+            let renamed = cacheFolder.appendingPathComponent("User Renamed.pdf")
+            try FileManager.default.moveItem(at: before.url, to: renamed)
+            let bytes = try Data(contentsOf: renamed)
+            let modification = try FileManager.default.attributesOfItem(atPath: renamed.path)[.modificationDate] as? Date
+            var latestHeaders = baseHeaders; latestHeaders["ETag"] = "\"title-v2\""
+            if status == 304 { FixtureProtocol.install(.init(status: 304), path: "/title-\(name).pdf") }
+            else { install(name, body: body, headers: latestHeaders) }
+            let reused = try await engine.download(source(name), to: cacheFolder, namingSnapshot: snapshot, titleHint: title)
+            try expect(reused.alreadyExisted && reused.url == renamed && reused.title == title &&
+                       (try FileManager.default.contentsOfDirectory(atPath: cacheFolder.path)).count == 1,
+                       "\(status) title correction reuses a verified copy without renaming or duplicating it")
+            try expect((try Data(contentsOf: renamed)) == bytes &&
+                       (try FileManager.default.attributesOfItem(atPath: renamed.path)[.modificationDate] as? Date) == modification,
+                       "\(status) title correction leaves file content and modification time unchanged")
+            let recorded = try PDFStorage.existing(source: source(name).webURL, directory: cacheFolder)
+            try expect(recorded?.saved.title == title && recorded?.saved.url == renamed,
+                       "\(status) corrected title is durable in the source record")
+            FixtureProtocol.install(.init(status: 304), path: "/title-\(name).pdf")
+            let later = try await engine.download(source(name), to: cacheFolder, titleHint: "An Unrelated Paper")
+            try expect(later.title == title && later.url == renamed &&
+                       FixtureProtocol.lastRequest("/title-\(name).pdf")?.value(forHTTPHeaderField: "If-None-Match")
+                           == (status == 200 ? "\"title-v2\"" : "\"title-v1\""),
+                       "\(status) bad later hint preserves corrected cache title and current validators")
+        }
+        print("PASS PDF title hints: first-page evidence, metadata fallback, frozen naming and 200/304 cache identity")
+    }
+
     @MainActor static func pdfDirectoryTests(root: URL, pdf: URL) async throws {
         let suite = "folioak-pdf-directory-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
@@ -388,6 +504,7 @@ extension CoreTests {
             try await Task.sleep(nanoseconds: 10_000_000)
             try expect(released == nil, "generic transfer releases transport/delegates")
         }
+        try await pdfTitleHintTests(root: root)
         print("PASS generic PDF: parsing, mixed batches, ETag/304, cache updates/edits, redirects, private DNS, cancellation, filenames, arxiv lock isolation and UI input cleanup")
     }
 }

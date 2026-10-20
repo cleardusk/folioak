@@ -15,6 +15,13 @@ struct SmartCandidate: Identifiable, Equatable, Sendable {
     let url: URL
     let detail: String
     let origin: Origin
+    // A literal title observed in this resource's evidence, not model metadata.
+    let observedTitle: String?
+
+    init(id: String, title: String, url: URL, detail: String, origin: Origin, observedTitle: String? = nil) {
+        self.id = id; self.title = title; self.url = url; self.detail = detail
+        self.origin = origin; self.observedTitle = observedTitle
+    }
 }
 
 struct SmartSelection: Equatable, Sendable {

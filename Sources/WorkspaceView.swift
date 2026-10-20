@@ -246,6 +246,7 @@ struct DownloaderView: View {
             else { model.preferencesPage = nil; focusList() }
         }
         .onReceive(model.$editRequest.dropFirst()) { _ in
+            if model.smartInput.resolution != nil { model.smartInput.cancel() }
             listFocus = nil; focusListOnArrival = false; page = .downloads; inputFocused = true
         }
         .onReceive(model.$searchRequest.dropFirst()) { openSearch($0) }
@@ -481,13 +482,11 @@ struct DownloaderView: View {
             VStack(alignment: .leading, spacing: 16) {
                 if page == .downloads { composer }
                 if page == .logs { logContent }
-                else if page == .downloads && model.smartInput.resolution != nil {
-                    SmartInputStatusView(state: model.smartInput, palette: palette,
-                        submitShortcut: KeyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)),
-                                                   modifiers: model.shortcuts[.download].swiftModifiers))
-                        .padding(.horizontal, WorkspaceMetrics.Space.inset)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                } else {
+                else if page == .downloads && model.downloads.isEmpty &&
+                            (model.smartInput.resolving || model.smartInput.resolution != nil) {
+                    Spacer(minLength: 0)
+                }
+                else {
                     papers.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.recordAnimation)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -740,42 +739,57 @@ struct DownloaderView: View {
         let recognition = InputRecognition(model.input)
         let reviewing = model.smartInput.resolution != nil
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: WorkspaceMetrics.Space.compact) {
-                Text(L(model.smartSettings.enabled ? "添加资源" : "添加链接")).font(WorkspaceMetrics.TypeScale.title)
-                Spacer()
-                if model.hasMediaInput && model.mediaFormat == .audio {
-                    Button { model.mediaFormat = .automatic } label: {
-                        Label(L("仅音频"), systemImage: "waveform").font(.callout).foregroundStyle(secondary)
-                    }.help(L("视频链接仅保存音频，点按恢复下载视频")).accessibilityLabel(L("仅音频模式，点按恢复视频")).disabled(model.busy)
-                }
-                pasteButton
-                downloadActions
-            }.buttonStyle(.plain)
-                .padding(.leading, WorkspaceMetrics.Space.inset).padding(.trailing, WorkspaceMetrics.Space.page)
-                .frame(height: reviewing ? 28 : WorkspaceMetrics.controlHeight)
-                .padding(.top, reviewing ? WorkspaceMetrics.Space.compact : WorkspaceMetrics.Space.regular)
-            LinkInput(model: model, focused: $inputFocused, palette: palette)
-                .frame(height: reviewing ? 48 : WorkspaceMetrics.inputHeight)
-                .padding(.horizontal, WorkspaceMetrics.Space.compact)
-                .padding(.top, reviewing ? WorkspaceMetrics.Space.small : WorkspaceMetrics.Space.compact)
-            if !reviewing {
-                SmartInputStatusView(state: model.smartInput, palette: palette)
+            if reviewing {
+                Text(model.input.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.system(size: 12)).foregroundStyle(secondary)
+                    .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, WorkspaceMetrics.Space.inset)
+                    .padding(.top, WorkspaceMetrics.Space.inset)
+                    .padding(.bottom, WorkspaceMetrics.Space.regular)
+                    .accessibilityIdentifier("smart-input-request")
+            } else {
+                HStack(spacing: WorkspaceMetrics.Space.compact) {
+                    Text(L(model.smartSettings.enabled ? "添加资源" : "添加链接")).font(WorkspaceMetrics.TypeScale.title)
+                    Spacer()
+                    if model.hasMediaInput && model.mediaFormat == .audio {
+                        Button { model.mediaFormat = .automatic } label: {
+                            Label(L("仅音频"), systemImage: "waveform").font(.callout).foregroundStyle(secondary)
+                        }.help(L("视频链接仅保存音频，点按恢复下载视频")).accessibilityLabel(L("仅音频模式，点按恢复视频")).disabled(model.busy)
+                    }
+                    pasteButton
+                    downloadActions
+                }.buttonStyle(.plain)
+                    .padding(.leading, WorkspaceMetrics.Space.inset).padding(.trailing, WorkspaceMetrics.Space.page)
+                    .frame(height: WorkspaceMetrics.controlHeight)
+                    .padding(.top, WorkspaceMetrics.Space.regular)
+                LinkInput(model: model, focused: $inputFocused, palette: palette)
+                    .frame(height: WorkspaceMetrics.inputHeight)
+                    .padding(.horizontal, WorkspaceMetrics.Space.compact)
+                    .padding(.top, WorkspaceMetrics.Space.compact)
             }
+            SmartInputStatusView(state: model.smartInput, palette: palette, showsReviewActions: false)
+                .padding(.horizontal, WorkspaceMetrics.Space.inset)
             HStack(spacing: WorkspaceMetrics.Space.regular) {
-                DirectoryMenu(model: model, palette: palette)
-                    .frame(maxWidth: .infinity, minHeight: reviewing ? 28 : 40, alignment: .leading)
+                DirectoryMenu(model: model, palette: palette, pdfOnly: model.smartInput.selectsOnlyPDFs)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 36, alignment: .leading)
                 Spacer(minLength: WorkspaceMetrics.Space.compact)
-                if !model.smartSettings.enabled || SmartInput.isDirect(model.input) {
-                    InputRecognitionChips(recognition: recognition, palette: palette)
+                if reviewing {
+                    SmartInputReviewActionsView(state: model.smartInput, palette: palette,
+                        submitShortcut: KeyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)),
+                                                         modifiers: model.shortcuts[.download].swiftModifiers),
+                        onEdit: editSmartRequest)
+                } else {
+                    if !model.smartSettings.enabled || SmartInput.isDirect(model.input) {
+                        InputRecognitionChips(recognition: recognition, palette: palette)
+                    }
+                    primaryAction(recognition: recognition)
                 }
-                primaryAction(recognition: recognition)
             }.padding(.horizontal, WorkspaceMetrics.Space.inset)
-                .padding(.top, reviewing ? WorkspaceMetrics.Space.small : WorkspaceMetrics.Space.regular)
-                .padding(.bottom, reviewing ? WorkspaceMetrics.Space.compact : WorkspaceMetrics.Space.section)
+                .padding(.top, WorkspaceMetrics.Space.regular)
+                .padding(.bottom, WorkspaceMetrics.Space.section)
         }
         .background(ThemePalette.color(palette.surface).contentShape(Rectangle()).onTapGesture {
-            if model.busy { dismissEditing() } else { model.focusInput() }
+            if model.busy { dismissEditing() } else if !reviewing { model.focusInput() }
         })
         .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel))
         .overlay {
@@ -794,6 +808,11 @@ struct DownloaderView: View {
         .onDrop(of: [UTType.url, UTType.plainText], isTargeted: $dropTargeted, perform: model.acceptDrop)
     }
 
+    private func editSmartRequest() {
+        model.smartInput.cancel()
+        model.focusInput()
+    }
+
     @ViewBuilder private func primaryAction(recognition: InputRecognition) -> some View {
         if model.smartInput.resolving {
             EmptyView()
@@ -809,11 +828,12 @@ struct DownloaderView: View {
                 .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
         } else if model.smartInput.resolution == nil {
             let count = recognition.total
-            let actionLabel = model.smartSettings.enabled && !SmartInput.isDirect(model.input) ? L("智能下载") :
+            let actionLabel = model.smartSettings.enabled && !SmartInput.isDirect(model.input) ? L("查找资源") :
                 count == 0 ? L("开始下载") : L("下载 \(count) 项")
             Button(action: model.start) {
                 HStack(spacing: 6) {
-                    Image(systemName: "arrow.down").font(.system(size: 12, weight: .bold))
+                    Image(systemName: model.smartSettings.enabled && !SmartInput.isDirect(model.input)
+                          ? "magnifyingglass" : "arrow.down").font(.system(size: 12, weight: .bold))
                     Text(actionLabel).monospacedDigit()
                 }
             }
@@ -1512,23 +1532,33 @@ struct DirectoryMenu: View {
     @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var model: DownloadModel
     let palette: ThemePalette
+    var pdfOnly = false
+    private var usesPDFDirectory: Bool { pdfOnly && model.activePDFDirectory != nil }
+    private var target: URL { usesPDFDirectory ? model.activePDFDirectory! : model.directory }
+    private var label: String { (target.path as NSString).abbreviatingWithTildeInPath }
+    private var exists: Bool {
+        var directory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: target.path, isDirectory: &directory) && directory.boolValue
+    }
     var body: some View {
         Menu {
-            Text(model.directoryLabel)
-            Text(L("按文件类型自动归档"))
-            if !model.directoryExists { Text(L("首次下载时创建文件夹")) }
+            Text(label)
+            if !usesPDFDirectory { Text(L("按文件类型自动归档")) }
+            if !exists { Text(L("首次下载时创建文件夹")) }
             Divider()
-            Button(L("更改保存位置…"), action: model.chooseDirectory).disabled(model.busy)
-            Button(L("在访达中打开"), action: model.openDirectory).disabled(!model.directoryExists)
+            Button(L("更改保存位置…")) {
+                if usesPDFDirectory { model.choosePDFDirectory() } else { model.chooseDirectory() }
+            }.disabled(model.busy)
+            Button(L("在访达中打开")) { model.openDirectory(target) }.disabled(!exists)
         } label: {
-            Label(model.directory.lastPathComponent.isEmpty ? "/" : model.directory.lastPathComponent, systemImage: "folder")
+            Label(target.lastPathComponent.isEmpty ? "/" : target.lastPathComponent, systemImage: "folder")
                 .font(.system(size: 12)).lineLimit(1).truncationMode(.middle).foregroundStyle(ThemePalette.color(palette.secondary))
-        }.menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: model.directoryLabel)).menuIndicator(.hidden)
+        }.menuStyle(.button).buttonStyle(MenuTriggerStyle(palette: palette, menuTitle: label)).menuIndicator(.hidden)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 300, alignment: .leading)
             .padding(.leading, -12)
-            .help(L("\(model.directoryLabel)\n按文件类型自动归档"))
-            .accessibilityLabel(L("保存位置：\(model.directoryLabel)，自动按类型归档"))
+            .help(usesPDFDirectory ? label : L("\(label)\n按文件类型自动归档"))
+            .accessibilityLabel(usesPDFDirectory ? L("保存位置：") + label : L("保存位置：\(label)，自动按类型归档"))
     }
 }
 

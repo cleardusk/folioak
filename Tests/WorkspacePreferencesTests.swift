@@ -618,8 +618,19 @@ private final class PreferencesTestWindow: NSPanel {
                         try expect(bottom > 0 && abs(scroll.contentView.bounds.origin.y - bottom) < 2,
                             "the full theme palette remains reachable by scrolling at minimum height")
                         let themeLabels = try surface.labels().map(\.0)
-                        try expect(themeLabels.contains { $0.contains(L("经典")) } && themeLabels.contains { $0.contains("Coding") },
-                            "Classic and Coding have equally visible group headings in both languages")
+                        try expect(themeLabels.contains { $0.contains("Coding") },
+                            "the final Coding group is visible at the bottom of the theme palette")
+                        // The palette is taller than the viewport. Its first
+                        // heading need not remain on screen at the very bottom.
+                        var classicVisible = themeLabels.contains { $0.contains(L("经典")) }
+                        var offset = bottom
+                        while !classicVisible && offset > 0 {
+                            offset = max(0, offset - max(1, scroll.contentView.bounds.height * 0.75))
+                            scroll.contentView.scroll(to: NSPoint(x: 0, y: offset)); scroll.reflectScrolledClipView(scroll.contentView)
+                            await surface.settle()
+                            classicVisible = try surface.labels().contains { $0.0.contains(L("经典")) }
+                        }
+                        try expect(classicVisible, "the Classic group heading remains reachable in both languages")
                     }
                     if category == "快捷键" {
                         let recorders = surface.descendants.compactMap { $0 as? ShortcutRecorder.Recorder }

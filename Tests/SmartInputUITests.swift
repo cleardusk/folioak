@@ -142,6 +142,9 @@ extension CoreTests {
             }
             throw TestFailure.failed("smart UI fixture resolver did not complete")
         }
+        // Replay the real search table through the resolver before rendering.
+        // A hand-polished candidate would miss the original filename/evidence bug.
+        let paperResult = try await smartPaperPresentationFixture()
         for selectedLanguage in [AppLanguage.chinese, .english] {
             for scheme in [ColorScheme.light, .dark] {
                 let model = makeModel()
@@ -168,7 +171,8 @@ extension CoreTests {
                 try await status.settle()
                 try expect(status.host.bounds.height <= 440, "standalone review has bounded compact height")
                 try status.verify("review-" + name,
-                                  labels: [L("下载所选"), L("未完成"), L("已有的跳过")], snapshots: snapshots)
+                                  labels: [L("下载 3 项"), L("未完成"), L("返回修改")],
+                                  absentLabels: [L("已有的跳过")], snapshots: snapshots)
                 let scrolls = SmartUISurface.descendants(status.host).compactMap { $0 as? NSScrollView }
                 try expect(!scrolls.isEmpty && scrolls.allSatisfy { $0.bounds.height <= 202 },
                            "review scroll regions stay bounded")
@@ -178,13 +182,12 @@ extension CoreTests {
                                           size: NSSize(width: 780, height: 540))
                 try await main.settle()
                 try expect(main.host.bounds.size == NSSize(width: 780, height: 540), "review keeps minimum main-window size")
-                try main.verify("main-" + name, labels: [L("下载所选"), L("未完成"), L("添加资源"), L("视频"), L("仅音频")],
-                                uniqueLabels: [L("下载所选")], snapshots: snapshots)
-                guard let editor = SmartUISurface.descendants(main.host).compactMap({ $0 as? LinkTextView }).first else {
-                    throw TestFailure.failed("native input remains mounted during review")
-                }
-                try expect(editor.naturalLanguageInput && editor.font == NSFont.systemFont(ofSize: 13),
-                           "enabled smart input uses its natural-language placeholder and native system font")
+                try main.verify("main-" + name, labels: [L("下载 3 项"), L("未完成"), L("返回修改"), L("视频"), L("仅音频")],
+                                uniqueLabels: [L("下载 3 项")],
+                                absentLabels: [L("已有的跳过"), L("粘贴链接，开始下载"), L("试试示例：Attention Is All You Need")],
+                                snapshots: snapshots)
+                try expect(SmartUISurface.descendants(main.host).allSatisfy { !($0 is LinkTextView) },
+                           "review replaces the large input editor with a compact request summary")
                 main.window.close()
 
                 let quickState = QuickDownloadState(model: model)
@@ -204,8 +207,8 @@ extension CoreTests {
                 try await quick.settle()
                 try expect(quick.host.bounds.width == 380 && quick.host.bounds.height <= 720,
                            "quick review fits a compact window even with recent downloads")
-                try quick.verify("quick-" + name, labels: [L("下载所选"), L("未完成"), L("打开 Folioak"), L("视频"), L("仅音频")],
-                                 uniqueLabels: [L("下载所选")], snapshots: snapshots)
+                try quick.verify("quick-" + name, labels: [L("下载 3 项"), L("未完成"), L("打开 Folioak"), L("视频"), L("仅音频")],
+                                 uniqueLabels: [L("下载 3 项")], absentLabels: [L("已有的跳过")], snapshots: snapshots)
                 quick.window.close()
                 quickState.smart.cancel()
 
@@ -229,6 +232,42 @@ extension CoreTests {
                                         labels: [L("通用"), L("命名规则"), L("快捷键"), L("浏览器认证"), L("智能输入"),
                                                  L("启用智能输入"), L("保存"), L("移除 Key")], snapshots: snapshots)
                 fullSettings.window.close()
+
+                let paperModel = makeModel(resolution: paperResult)
+                paperModel.language = selectedLanguage
+                paperModel.theme = .grove
+                paperModel.pdfDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("ReviewPapers")
+                paperModel.setPDFDirectoryEnabled(true)
+                paperModel.input = "下载 gpt-1 论文"
+                paperModel.history = [DownloadItem(original: "https://example.org/earlier.pdf",
+                    directURL: URL(string: "https://example.org/earlier.pdf"), state: .failed,
+                    documentTitle: "Earlier saved paper")]
+                paperModel.start()
+                try await waitForReview(paperModel.smartInput)
+                let paperReview = SmartUISurface(DownloaderView(model: paperModel).environment(\.colorScheme, scheme),
+                                                 size: NSSize(width: 780, height: 540))
+                try await paperReview.settle()
+                try paperReview.verify("paper-" + name,
+                    labels: ["Improving Language Understanding by Generative Pre-Training",
+                             "cdn.openai.com", L("下载文件"), L("返回修改"), "ReviewPapers", "Earlier saved paper"],
+                    absentLabels: ["language_understanding_paper.pdf", "Local copy", "one-sentence answer",
+                                   L("已有的跳过"), L("已选 1 / 10")], snapshots: snapshots)
+                try expect(paperReview.host.bounds.size == NSSize(width: 780, height: 540),
+                           "real paper review and history fit the minimum main window")
+                paperModel.focusInput()
+                try await paperReview.settle()
+                guard let restoredEditor = SmartUISurface.descendants(paperReview.host)
+                    .compactMap({ $0 as? LinkTextView }).first else {
+                    throw TestFailure.failed("returning to edit remounts the native input")
+                }
+                try expect(paperModel.smartInput.resolution == nil && paperModel.input == "下载 gpt-1 论文"
+                           && restoredEditor.naturalLanguageInput
+                           && restoredEditor.font?.pointSize == 13,
+                           "return to edit preserves the exact request and native editor, including CJK font fallback")
+                try paperReview.verify("paper-edit-" + name, labels: [L("查找资源")],
+                    absentLabels: ["Improving Language Understanding by Generative Pre-Training"], snapshots: snapshots)
+                paperReview.window.close()
+                paperModel.setPDFDirectoryEnabled(false)
             }
         }
 
@@ -266,8 +305,8 @@ extension CoreTests {
         try await emptyReview.settle()
         try expect(notFound.smartInput.message == nil && notFound.items.isEmpty,
                    "no-match result keeps a single explanation and never creates a queue")
-        try emptyReview.verify("no-match", labels: ["未找到匹配的论文", L("取消")],
-            absentLabels: [L("下载所选"), L("已选 0 / 10")], snapshots: snapshots)
+        try emptyReview.verify("no-match", labels: ["未找到匹配的论文", L("返回修改")],
+            absentLabels: [L("下载文件"), L("已选 0 / 10")], snapshots: snapshots)
         emptyReview.window.close()
         notFound.start()
         try expect(!notFound.smartInput.failed && notFound.smartInput.message == nil && notFound.items.isEmpty,

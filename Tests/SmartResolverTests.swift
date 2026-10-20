@@ -45,9 +45,36 @@ private actor ScriptedSmartTransport: HTTPTransport {
 }
 
 extension CoreTests {
+    // The captured search observation is deliberately unformatted. Native UI
+    // tests use the resolver result, not a hand-cleaned presentation mock.
+    static func smartPaperPresentationFixture() async throws -> SmartResolution {
+        func call(_ name: String, _ args: [String: Any]) throws -> [String: Any] {
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
+            return ["choices": [["finish_reason": "tool_calls", "message": ["role": "assistant",
+                "tool_calls": [["id": "fixture", "type": "function", "function": ["name": name, "arguments": arguments]]]]]]]
+        }
+        let title = "Improving Language Understanding by Generative Pre-Training"
+        let pdf = "https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf"
+        let summary = """
+        | # | Paper | Year | ID | Local copy | The one-sentence answer |
+        |---|---|---|---|---|---|
+        | 3 | Improving Language Understanding by Generative Pre-Training (GPT-1) — Radford et al., OpenAI | 2018 | [OpenAI PDF](\(pdf)) | `ai-engineering/readings/general/gpt1-improving-language-understanding.pdf` | Decoder-only next-token prediction at scale yields general-purpose models |
+        """
+        let api = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": title + " GPT-1 OpenAI paper PDF"])),
+            .init(["results": [["title": "---",
+                "url": "https://raw.githubusercontent.com/ramseywise/learn-ai-engineering/refs/heads/main/interviewing/notes/paper-canon.md",
+                "summary": summary,
+                "snippet": "#: 3; Paper: \(title) (GPT-1) — Radford et al., OpenAI; Year: 2018; ID: [OpenAI PDF](\(pdf))"]]]),
+            .init(call("enqueue_download", ["selections": [["candidate_id": "r2", "title": title,
+                "format": "inherit", "skip_existing": false]], "unresolved": []]))
+        ])
+        return try await DeepSeekResolver(api: api).resolve("下载 gpt-1 论文", apiKey: "synthetic-test-key", progress: { _ in })
+    }
+
     static func smartResolverTests() async throws {
-        func selection(_ id: String, _ format: String = "inherit", skip: Bool = false) -> [String: Any] {
-            ["candidate_id": id, "format": format, "skip_existing": skip]
+        func selection(_ id: String, _ format: String = "inherit", skip: Bool = false, title: String = "") -> [String: Any] {
+            ["candidate_id": id, "format": format, "skip_existing": skip, "title": title]
         }
         func call(_ name: String, _ args: [String: Any], additional: Bool = false) throws -> [String: Any] {
             let arguments = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
@@ -98,11 +125,13 @@ extension CoreTests {
         let search = try ScriptedSmartTransport([
             .init(call("search_resources", ["query": "Attention Is All You Need arxiv"])),
             .init(["results": [["title": "Attention Is All You Need", "url": "https://arxiv.org/abs/1706.03762", "summary": "A paper candidate"]]]),
-            .init(terminal([selection("r1")]))
+            .init(terminal([selection("r1", title: "Attention Is All You Need")]))
         ])
         let searched = try await DeepSeekResolver(api: search).resolve("找提出 Transformer 的论文", apiKey: key, progress: { _ in })
         try expect(searched.needsReview && searched.modelCalls == 2 && searched.toolCalls == 1,
                    "search discovery always requires review, even when only one result exists")
+        try expect(searched.candidates.first?.observedTitle == "Attention Is All You Need" &&
+                   searched.candidates.first?.detail == "", "observed search titles are retained without leaking raw snippets")
         let searchRequests = await search.requests
         let secondPayload = try JSONSerialization.jsonObject(with: searchRequests[2].httpBody!) as! [String: Any]
         let messages = secondPayload["messages"] as! [[String: Any]]
@@ -122,18 +151,110 @@ extension CoreTests {
             .init(call("search_resources", ["query": "Original Formal Title"])),
             .init(["results": [["title": "A collection of different papers", "url": "https://example.com/notes.md",
                                 "summary": "", "snippet": "Original Formal Title — Ada Example (2019). [Official PDF](https://papers.example.edu/original.pdf)."]]]),
-            .init(terminal([selection("r2")]))
+            .init(terminal([selection("r2", title: "Original Formal Title")]))
         ])
         let citation = try await DeepSeekResolver(api: cited).resolve("下载这篇原始论文", apiKey: key, progress: { _ in })
         try expect(citation.candidates.count == 1 && citation.candidates[0].url.absoluteString == "https://papers.example.edu/original.pdf" &&
-                   citation.candidates[0].title == "original.pdf" && citation.candidates[0].detail.contains("Ada Example"),
-                   "an observed snippet attachment retains nearby identity evidence without inheriting the citing page's title")
+                   citation.candidates[0].title == "Original Formal Title" &&
+                   citation.candidates[0].observedTitle == "Original Formal Title" && citation.candidates[0].detail.isEmpty,
+                   "an observed attachment title is separated from private evidence and the citing page's title")
         let citedRequests = await cited.requests
         let citedPayload = try JSONSerialization.jsonObject(with: citedRequests[2].httpBody!) as! [String: Any]
         let citedMessages = citedPayload["messages"] as! [[String: Any]]
+        let citedObservation = try JSONSerialization.jsonObject(with: Data((citedMessages.last!["content"] as! String).utf8)) as! [String: Any]
+        let attachmentObservation = (citedObservation["resources"] as! [[String: Any]]).first { $0["id"] as? String == "r2" }
+        try expect(attachmentObservation?["title"] as? String == "" &&
+                   (attachmentObservation?["detail"] as? String)?.contains("Original Formal Title") == true,
+                   "an attachment filename is not mislabeled as an observed formal title in the model's input")
         try expect((citedMessages.last?["content"] as? String)?.contains("observed_in") == true &&
-                   (citedMessages.last?["content"] as? String)?.contains("Original Formal Title") == true,
+                   (citedMessages.last?["content"] as? String)?.contains("Original Formal Title") == true &&
+                   (citedMessages.last?["content"] as? String)?.contains("Ada Example") == true,
                    "nonempty snippets and citation provenance reach the decision after an empty summary")
+        let presentation = try await smartPaperPresentationFixture()
+        try expect(presentation.candidates.count == 1 &&
+                   presentation.candidates[0].observedTitle == "Improving Language Understanding by Generative Pre-Training" &&
+                   presentation.candidates[0].title == presentation.candidates[0].observedTitle &&
+                   presentation.candidates[0].detail.isEmpty && !presentation.candidates[0].title.contains("|"),
+                   "captured Markdown table yields the formal paper title without exposing table syntax or its filename")
+        let gpt2Title = "Language Models are Unsupervised Multitask Learners"
+        let markdown = """
+        # Language Models are Unsupervised Multitask Learners (2019), Alec Radford et al.
+
+        ###### contributors: [@GitYCC](https://github.com/GitYCC)
+
+        \\[[paper](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)\\] \\[[pytorch](https://github.com/huggingface/transformers/blob/master/src/transformers/models/gpt2/modeling_gpt2.py)\\]
+        """
+        let markdownAPI = try ScriptedSmartTransport([
+            .init(call("search_resources", ["query": gpt2Title + " GPT-2 OpenAI PDF"])),
+            .init(["results": [["title": gpt2Title + " (2019), Alec Radford et al.",
+                "url": "https://raw.githubusercontent.com/GitYCC/machine-learning-papers-summary/refs/heads/master/nlp/GPT2.md",
+                "summary": markdown]]]),
+            .init(terminal([selection("r2", title: gpt2Title)]))
+        ])
+        let markdownResult = try await DeepSeekResolver(api: markdownAPI).resolve("下载 GPT-2 论文", apiKey: key, progress: { _ in })
+        try expect(markdownResult.candidates.first?.observedTitle == gpt2Title &&
+                   markdownResult.candidates.first?.title == gpt2Title && markdownResult.candidates.first?.detail == "",
+                   "captured Markdown heading remains associated with the paper link in the following paragraph")
+        for proposed in ["Invented Formal Title", "Neighbor Paper", "A collection of different papers", "original.pdf", "ORIGINAL.PDF", ""] {
+            let api = try ScriptedSmartTransport([
+                .init(call("search_resources", ["query": "original paper"])),
+                .init(["results": [["title": "A collection of different papers", "url": "https://example.com/notes",
+                    "summary": "| Neighbor Paper | 2020 |\n| Original Formal Title | [PDF](https://papers.example.edu/original.pdf) |"]]]),
+                .init(terminal([selection("r2", title: proposed)]))
+            ])
+            let result = try await DeepSeekResolver(api: api).resolve("下载原始论文", apiKey: key, progress: { _ in })
+            try expect(result.candidates.first?.observedTitle == nil && result.candidates.first?.title == "original.pdf" &&
+                       result.candidates.first?.detail == "" && result.selections.count == 1,
+                       "unknown, inferred, neighboring-row and parent-page titles cannot become attachment metadata")
+        }
+        let pageTitle = try ScriptedSmartTransport([
+            .init(call("inspect_page", ["candidate_id": "r1"])),
+            .init(terminal([selection("r2", title: "A Different Paper: Reliable Methods")]))
+        ])
+        let titlePage = try await DeepSeekResolver(api: pageTitle, pages: ScriptedSmartTransport([
+            .init(html: "<h1>A Different Paper: Reliable Methods</h1><a href='/document.pdf'>PDF</a>")
+        ])).resolve("https://example.com/project 下载论文", apiKey: key, progress: { _ in })
+        try expect(titlePage.candidates.first(where: { $0.id == "r2" })?.observedTitle == "A Different Paper: Reliable Methods",
+                   "the same literal-title protocol supports a static project's observed heading")
+        for separator in ["\n", " "] {
+            let snippet = "Alpha Paper [PDF](https://example.com/a.pdf)" + separator +
+                "Beta Paper [PDF](https://example.com/b.pdf)"
+            for (id, borrowed) in [("r2", "Beta Paper"), ("r3", "Alpha Paper")] {
+                let api = try ScriptedSmartTransport([
+                    .init(call("search_resources", ["query": "two papers"])),
+                    .init(["results": [["title": "A reading list", "url": "https://example.com/list", "summary": snippet]]]),
+                    .init(terminal([selection(id, title: borrowed)]))
+                ])
+                let result = try await DeepSeekResolver(api: api).resolve("下载列表中的论文", apiKey: key, progress: { _ in })
+                try expect(result.candidates.count == 1 && result.candidates[0].observedTitle == nil,
+                           "adjacent Markdown attachments cannot borrow a preceding or following paper's title")
+            }
+        }
+        for html in [
+            "<li><a href='/a.pdf'>Alpha Paper</a></li><li><a href='/b.pdf'>Beta Paper</a></li>",
+            "<li>Alpha Paper <a href='/a.pdf'>PDF</a></li><li>Beta Paper <a href='/b.pdf'>PDF</a></li>"
+        ] {
+            for (id, borrowed) in [("r2", "Beta Paper"), ("r3", "Alpha Paper")] {
+                let api = try ScriptedSmartTransport([
+                    .init(call("inspect_page", ["candidate_id": "r1"])),
+                    .init(terminal([selection(id, title: borrowed)]))
+                ])
+                let result = try await DeepSeekResolver(api: api, pages: ScriptedSmartTransport([.init(html: html)]))
+                    .resolve("https://example.com/list 下载列表中的论文", apiKey: key, progress: { _ in })
+                try expect(result.candidates.first(where: { $0.id == id })?.observedTitle == nil,
+                           "adjacent HTML attachments cannot borrow a preceding or following paper's title")
+            }
+        }
+        let sharedTitleAPI = try ScriptedSmartTransport([
+            .init(call("inspect_page", ["candidate_id": "r1"])),
+            .init(terminal([selection("r3", title: "Project Paper")]))
+        ])
+        let sharedTitle = try await DeepSeekResolver(api: sharedTitleAPI, pages: ScriptedSmartTransport([
+            .init(html: "<h1>Project Paper</h1><a href='/paper.pdf'>Paper</a><a href='/supp.zip'>Supplement</a>")
+        ])).resolve("https://example.com/project 下载附件", apiKey: key, progress: { _ in })
+        try expect(sharedTitle.candidates.first(where: { $0.id == "r3" })?.observedTitle == nil &&
+                   sharedTitle.candidates.first(where: { $0.id == "r3" })?.title == "supp.zip",
+                   "a shared project heading is not promoted to a later supplementary attachment's title")
         let refined = try ScriptedSmartTransport([
             .init(call("search_resources", ["query": "short alias"])),
             .init(["results": [["title": "Different work", "url": "https://example.com/unrelated.pdf", "summary": "Cites the original work"]]]),
@@ -222,7 +343,10 @@ extension CoreTests {
             ["selections": [selection("invented")], "unresolved": []],
             ["selections": [selection("r1"), selection("r1")], "unresolved": []],
             ["selections": [selection("r1", "exe")], "unresolved": []],
-            ["selections": [["candidate_id": "r1", "format": "audio", "skip_existing": 1]], "unresolved": []],
+            ["selections": [["candidate_id": "r1", "title": "", "format": "audio", "skip_existing": 1]], "unresolved": []],
+            ["selections": [["candidate_id": "r1", "format": "audio", "skip_existing": false]], "unresolved": []],
+            ["selections": [["candidate_id": "r1", "title": 3, "format": "audio", "skip_existing": false]], "unresolved": []],
+            ["selections": [selection("r1", title: String(repeating: "A", count: 201))], "unresolved": []],
             ["selections": [selection("r1")], "unresolved": [], "url": "https://evil.example/file.pdf"],
             ["selections": [], "unresolved": []]
         ]
@@ -394,33 +518,46 @@ extension CoreTests {
             ("alias-gpt2", "下载 GPT-2 论文"),
             ("page", "读取 https://jonbarron.info/mipnerf360/ ，找到这个项目的论文和补充材料。没有找到的材料明确说明。")
         ]
+        var failures: [String] = []
+        func record(_ name: String, _ error: Error) {
+            failures.append(name)
+            let detail: String
+            if case TestFailure.failed(let message) = error { detail = message }
+            else if let response = error as? HTTPResponseFailure { detail = "HTTP \(response.response.statusCode)" }
+            else { detail = "request or download failed" }
+            print("FAIL live \(name): \(detail)")
+        }
         for (name, input) in samples {
-            let started = ContinuousClock.now
-            let result = try await DeepSeekResolver().resolve(input, apiKey: key, progress: { _ in })
-            let duration = started.duration(to: .now)
-            let elapsed = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
-            print(String(format: "LIVE smart %@: %.2fs, model=%d, tools=%d, candidates=%d, proposed=%d, review=%@, unresolved=%d",
-                         name, elapsed, result.modelCalls, result.toolCalls, result.candidates.count, result.selections.count,
-                         result.needsReview ? "yes" : "no", result.unresolved.count))
-            try expect(result.modelCalls <= 3 && result.toolCalls <= 2, "live call budgets are enforced")
-            if name == "conditional" {
-                try expect(result.modelCalls == 1 && result.toolCalls == 0 && !result.needsReview &&
-                           result.selections == [SmartSelection(candidateID: "r2", format: .audio, skipExisting: true)],
-                           "live conditional interpretation must select only the second link as audio")
-            } else {
-                let origin: SmartCandidate.Origin = name == "page" ? .page : .search
-                try expect(result.needsReview && result.candidates.contains(where: { $0.origin == origin }),
-                           "live discovery returns candidates from the observed search or page")
-                if name.hasPrefix("alias-gpt1") {
-                    try await verifySearchPaper(result, title: "Improving Language Understanding by Generative Pre-Training")
-                } else if name == "alias-gpt2" {
-                    try await verifySearchPaper(result, title: "Language Models are Unsupervised Multitask Learners")
+            do {
+                let started = ContinuousClock.now
+                let result = try await DeepSeekResolver().resolve(input, apiKey: key, progress: { _ in })
+                let duration = started.duration(to: .now)
+                let elapsed = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+                print(String(format: "LIVE smart %@: %.2fs, model=%d, tools=%d, candidates=%d, proposed=%d, review=%@, unresolved=%d",
+                             name, elapsed, result.modelCalls, result.toolCalls, result.candidates.count, result.selections.count,
+                             result.needsReview ? "yes" : "no", result.unresolved.count))
+                try expect(result.modelCalls <= 3 && result.toolCalls <= 2, "live call budgets are enforced")
+                if name == "conditional" {
+                    try expect(result.modelCalls == 1 && result.toolCalls == 0 && !result.needsReview &&
+                               result.selections == [SmartSelection(candidateID: "r2", format: .audio, skipExisting: true)],
+                               "live conditional interpretation must select only the second link as audio")
+                } else {
+                    let origin: SmartCandidate.Origin = name == "page" ? .page : .search
+                    try expect(result.needsReview && result.candidates.contains(where: { $0.origin == origin }),
+                               "live discovery returns candidates from the observed search or page")
+                    if name.hasPrefix("alias-gpt1") {
+                        try await verifySearchPaper(result, title: "Improving Language Understanding by Generative Pre-Training")
+                    } else if name == "alias-gpt2" {
+                        try await verifySearchPaper(result, title: "Language Models are Unsupervised Multitask Learners")
+                    }
                 }
-            }
+            } catch { record(name, error) }
         }
         #if TESTING
-        try await smartDownloadLiveTest(apiKey: key)
+        do { try await smartDownloadLiveTest(apiKey: key) }
+        catch { record("download-pipeline", error) }
         #endif
+        try expect(failures.isEmpty, "live samples failed: " + failures.joined(separator: ", "))
         print("PASS smart live samples (sample timings are observations, not latency guarantees)")
     }
 
@@ -430,6 +567,9 @@ extension CoreTests {
         try expect(!candidates.isEmpty, "live alias search must propose an identified paper")
         func normalized(_ text: String) -> String { text.lowercased().filter { $0.isLetter || $0.isNumber } }
         for candidate in candidates {
+            try expect(normalized(candidate.observedTitle ?? "").contains(normalized(title)) &&
+                       normalized(candidate.title).contains(normalized(title)) && candidate.detail.isEmpty,
+                       "live alias search presents the observed formal title without raw evidence")
             let (file, response) = try await URLSessionTransport(policy: .externalPDF).download(
                 for: URLRequest(url: candidate.url), progress: { _ in })
             defer { try? FileManager.default.removeItem(at: file) }
@@ -438,7 +578,15 @@ extension CoreTests {
             let firstPage = PDFDocument(url: file)?.page(at: 0)?.string ?? ""
             try expect(normalized(firstPage).contains(normalized(title)),
                        "live alias search must resolve the requested paper's actual first-page title")
-            print("LIVE smart identity: verified first-page title, PDF pages=\(pages)")
+            let output = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-title-live-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: output) }
+            let saved = try PDFStorage.save(downloaded: file, source: candidate.url, response: response,
+                directory: output, titleHint: candidate.observedTitle)
+            try expect(normalized(saved.title) == normalized(title) &&
+                       normalized(saved.url.deletingPathExtension().lastPathComponent).contains(normalized(title)),
+                       "live PDF storage retains the verified formal title in its record and filename")
+            print("LIVE smart identity: verified presentation, first-page title and saved filename, PDF pages=\(pages)")
         }
     }
 
@@ -476,14 +624,15 @@ extension CoreTests {
             guard let item = model.items.first, item.state == .saved, let saved = item.savedURL else {
                 throw TestFailure.failed("live PDF pipeline did not save the requested paper")
             }
-            try expect(item.reference?.identifier == "1706.03762v7" && item.smartRequestID != nil && model.input == input,
-                       "live host acceptance retains the selected version, intelligent session identity and full draft")
+            try expect(item.reference?.identifier == "1706.03762v7" && item.smartRequestID != nil && model.input.isEmpty,
+                       "live host acceptance retains version and session identity, then clears the fully handled draft")
             let pages = try PaperStorage.validatePDF(at: saved)
             try expect(pages > 0 && saved.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path + "/"),
                        "live engine saves a valid PDF inside the isolated output folder")
             await model.persistWorkspaceAndWait()
             let persisted = try WorkspaceStore.read(stateURL)
-            try expect(persisted?.items.contains(where: { $0.id == item.id && $0.state == .saved && $0.savedURL == saved }) == true,
+            try expect(persisted?.items.contains(where: { $0.id == item.id && $0.state == .saved && $0.savedURL == saved }) == true
+                       && persisted?.input.isEmpty == true,
                        "live intelligent result and completed download are durable")
             let duration = started.duration(to: .now)
             let elapsed = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18

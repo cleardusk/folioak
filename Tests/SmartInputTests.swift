@@ -30,6 +30,7 @@ private actor SmartInputTransport: HTTPTransport {
     private(set) var requests: [URL] = []
     init(pdf: URL) { self.pdf = pdf }
     func suspend() { suspended = true }
+    func resume() { suspended = false }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         throw URLError(.unsupportedURL)
     }
@@ -115,6 +116,10 @@ extension CoreTests {
             model.input = "保存这个链接的论文 https://example.org/late.pdf"
             model.start()
             try await awaitSmart { await resolver.inputs.count == 1 }
+            model.start()
+            try await Task.sleep(nanoseconds: 10_000_000)
+            try expect(await resolver.inputs.count == 1 && model.smartInput.resolving,
+                       "repeated main submission during parsing cannot restart or duplicate the request")
             switch boundary {
             case "cancel": model.smartInput.cancel()
             case "edit":
@@ -226,9 +231,43 @@ extension CoreTests {
         actionModel.start()
         let actionCalls = await actionResolver.inputs.count
         try expect(actionModel.items.first?.original == choice.url.absoluteString &&
-                   actionCalls == 1,
-                   "main primary action accepts the edited review without another model request")
+                   actionCalls == 1 && actionModel.input.isEmpty,
+                   "main accepts the edited review once and clears the fully handled request")
         await actionModel.cancelAndWait()
+
+        let titleResult = try await smartPaperPresentationFixture()
+        let paperTitle = "Improving Language Understanding by Generative Pre-Training"
+        let titledPDF = root.appendingPathComponent("paper-without-metadata.pdf")
+        try createTextPDF(at: titledPDF, lines: ["Improving Language Understanding",
+                                               "by Generative Pre-Training", "Abstract"])
+        let titleTransport = SmartInputTransport(pdf: titledPDF), titleResolver = DelayedSmartResolver()
+        await titleTransport.suspend()
+        let titleState = root.appendingPathComponent("title-flow/workspace.json")
+        let titleModel = DownloadModel(engine: DownloadEngine(transport: titleTransport, pdfTransport: titleTransport,
+            requestInterval: 0, retryDelay: 0), preferences: preferences, stateURL: titleState,
+            smartSettings: settings, smartResolver: titleResolver)
+        titleModel.directory = root.appendingPathComponent("title-output")
+        titleModel.input = "下载 gpt-1 论文"
+        titleModel.start()
+        try await awaitSmart { await titleResolver.inputs.count == 1 }
+        await titleResolver.complete(0, with: titleResult)
+        try await awaitSmart { titleModel.smartInput.resolution != nil }
+        try expect(titleModel.smartInput.selectsOnlyPDFs, "paper review exposes its actual PDF destination")
+        titleModel.start()
+        try expect(titleModel.items.first?.title == paperTitle, "observed title reaches the accepted queue")
+        let queuedRestore = DownloadModel(preferences: preferences, stateURL: titleState, smartSettings: settings)
+        try expect(queuedRestore.items.first?.title == paperTitle && !queuedRestore.busy,
+                   "accepted title survives restart without resuming downloads")
+        await titleTransport.resume()
+        try await waitForQueue(titleModel)
+        try expect(titleModel.items.first?.state == .saved && titleModel.items.first?.title == paperTitle
+                   && titleModel.items.first?.savedURL?.lastPathComponent == paperTitle + ".pdf"
+                   && titleModel.papers.first?.title == paperTitle,
+                   "PDF content corroborates the title through file naming and library insertion")
+        titleModel.persistWorkspace()
+        let completedRestore = DownloadModel(preferences: preferences, stateURL: titleState, smartSettings: settings)
+        try expect(completedRestore.items.first?.title == paperTitle && completedRestore.papers.first?.title == paperTitle,
+                   "completed download and library retain the verified title after restart")
 
         let quickResolver = DelayedSmartResolver(), quickTransport = SmartInputTransport(pdf: pdf)
         await quickTransport.suspend()

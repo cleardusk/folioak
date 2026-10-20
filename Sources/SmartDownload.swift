@@ -11,6 +11,13 @@ import Combine
     @Published private(set) var failed = false
     var resolving: Bool { progress != nil }
     var inheritedFormat: MediaFormat { defaultFormat }
+    var selectsOnlyPDFs: Bool {
+        guard let resolution, !selections.isEmpty else { return false }
+        return selections.allSatisfy { selection in
+            guard let candidate = resolution.candidates.first(where: { $0.id == selection.candidateID }) else { return false }
+            return (try? DownloadSource.parse(candidate.url.absoluteString))?.isPaper == true
+        }
+    }
     private weak var model: DownloadModel?
     private let quick: Bool
     private let resolver: SmartResolving

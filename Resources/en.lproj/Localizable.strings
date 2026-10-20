@@ -881,6 +881,12 @@
 "粘贴链接，或描述想保存的资料" = "Paste links or describe what you want to save";
 "添加资源" = "Add resources";
 "下载请求" = "Download request";
+"查找资源" = "Find resources";
+"下载文件" = "Download";
+"核对下载" = "Review downloads";
+"返回修改" = "Edit request";
+"下载选项" = "Download options";
+"保存位置：" = "Save to: ";
 "停止解析" = "Stop resolving";
 "智能下载" = "Smart download";
 "默认（仅音频）" = "Default (audio only)";

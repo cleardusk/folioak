@@ -274,7 +274,31 @@ enum PDFStorage {
         guard let value, !value.isEmpty, value.utf8.count <= limit, value.utf8.allSatisfy({ $0 >= 32 && $0 < 127 }) else { return nil }
         return value
     }
-    static func existing(source: URL, directory: URL) throws -> Cached? {
+    // A resolver's title is only a hint. The complete title must occur in the
+    // actual first page; metadata and filenames remain the fallback.
+    private static func verifiedTitle(_ hint: String?, document: PDFDocument?) -> String? {
+        guard let hint, hint.count <= ResourceLimits.titleCharacters,
+              !hint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let text = document?.page(at: 0)?.string else { return nil }
+        func normalized(_ value: String) -> String {
+            value.precomposedStringWithCompatibilityMapping.lowercased()
+                .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+        let wanted = normalized(hint)
+        guard !["untitled", "unknown"].contains(wanted), !wanted.isEmpty else { return nil }
+        let page = normalized(String(text.prefix(100_000)))
+        let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: wanted) + "(?![\\p{L}\\p{N}])"
+        guard page.range(of: pattern, options: .regularExpression) != nil else { return nil }
+        return PaperMetadata.cleanTitle(hint)
+    }
+
+    private static func write(_ value: Record, at file: URL) {
+        var record = value
+        if (try? JSONEncoder().encode(record).count).map({ $0 > 16384 }) ?? true { record.title = nil }
+        PaperStorage.writeRecord(record, at: file, attribute: attribute, limit: 16384)
+    }
+
+    static func existing(source: URL, directory: URL, titleHint: String? = nil) throws -> Cached? {
         guard let entries = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [], options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { return nil }
         let sourceKey = key(source.absoluteString)
         var visited = 0
@@ -293,32 +317,50 @@ enum PDFStorage {
             do {
                 guard try fingerprint(file) == record.hash else { continue }
                 let pages = try PaperStorage.validatePDF(at: file)
-                let saved = SavedDocument(title: record.title.flatMap { $0.count <= ResourceLimits.titleCharacters ? $0 : nil } ?? file.deletingPathExtension().lastPathComponent, url: file.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: true, pages: pages)
+                let hint = verifiedTitle(titleHint, document: titleHint == nil ? nil : PDFDocument(url: file))
+                let title = hint ?? record.title.flatMap { $0.count <= ResourceLimits.titleCharacters ? $0 : nil }
+                    ?? file.deletingPathExtension().lastPathComponent
+                if let hint, hint != record.title {
+                    var updated = record; updated.title = hint
+                    write(updated, at: file)
+                }
+                let saved = SavedDocument(title: title, url: file.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: true, pages: pages)
                 return Cached(saved: saved, hash: record.hash, etag: header(record.etag, limit: 1024), modified: header(record.modified, limit: 128))
             } catch is CancellationError { throw CancellationError() }
             catch { continue }
         }
         return nil
     }
-    static func save(downloaded: URL, source: URL, response: HTTPURLResponse, directory: URL, namingSnapshot: AssetNamingSnapshot? = nil) throws -> SavedDocument {
+    static func save(downloaded: URL, source: URL, response: HTTPURLResponse, directory: URL, namingSnapshot: AssetNamingSnapshot? = nil, titleHint: String? = nil) throws -> SavedDocument {
         _ = try PaperStorage.validatePDF(at: downloaded)
         let suggested = response.suggestedFilename
         let fallback = suggested.flatMap { $0.utf8.count <= ResourceLimits.titleCharacters ? $0 : nil } ?? source.lastPathComponent
         let filename = (fallback as NSString).lastPathComponent
         let basename = filename.lowercased().hasSuffix(".pdf") ? String(filename.dropLast(4)) : filename
-        let raw = (PDFDocument(url: downloaded)?.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = PaperMetadata.cleanTitle(raw.flatMap { !$0.isEmpty && $0.count <= ResourceLimits.titleCharacters && !["untitled", "unknown"].contains($0.lowercased()) ? $0 : nil } ?? (basename.isEmpty || basename == "Unknown" ? (source.host ?? "PDF") + " document" : basename))
+        let document = PDFDocument(url: downloaded)
+        let hint = verifiedTitle(titleHint, document: document)
+        let raw = (document?.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = hint ?? PaperMetadata.cleanTitle(raw.flatMap { !$0.isEmpty && $0.count <= ResourceLimits.titleCharacters && !["untitled", "unknown"].contains($0.lowercased()) ? $0 : nil } ?? (basename.isEmpty || basename == "Unknown" ? (source.host ?? "PDF") + " document" : basename))
         let sourceKey = key(source.absoluteString)
-        let saved = try PaperStorage.publish(downloaded: downloaded, directory: directory, tag: String(sourceKey.prefix(10)),
-            filename: { PaperMetadata.filename(title: namingSnapshot?.savedTitle(extension: "pdf") ?? namingSnapshot?.title(title, kind: .documents, source: source) ?? title, ending: $0 + ".pdf") }, record: { file, hash in
+        let record: (URL, SHA256.Digest) -> Void = { file, hash in
                 // Validators identify this exact resource, not a redirect target.
                 let direct = response.url == source
-                var record = Record(schema: 1, source: sourceKey, hash: hash.map { String(format: "%02x", $0) }.joined(),
+                let record = Record(schema: 1, source: sourceKey, hash: hash.map { String(format: "%02x", $0) }.joined(),
                     etag: direct ? header(response.value(forHTTPHeaderField: "ETag"), limit: 1024) : nil,
                     modified: direct ? header(response.value(forHTTPHeaderField: "Last-Modified"), limit: 128) : nil, updated: Date(), title: title)
-                if (try? JSONEncoder().encode(record).count).map({ $0 > 16384 }) ?? true { record.title = nil }
-                PaperStorage.writeRecord(record, at: file, attribute: attribute, limit: 16384)
-            })
+                write(record, at: file)
+        }
+        // A corrected display title must not duplicate or rename an existing
+        // verified copy, including a user-renamed or previously allocated path.
+        if hint != nil, let cached = try existing(source: source, directory: directory) {
+            let hash = try PaperStorage.hash(at: downloaded)
+            if hash.map({ String(format: "%02x", $0) }).joined() == cached.hash {
+                record(cached.saved.url, hash)
+                return SavedDocument(title: title, url: cached.saved.url, alreadyExisted: true, pages: cached.saved.pages)
+            }
+        }
+        let saved = try PaperStorage.publish(downloaded: downloaded, directory: directory, tag: String(sourceKey.prefix(10)),
+            filename: { PaperMetadata.filename(title: namingSnapshot?.savedTitle(extension: "pdf") ?? namingSnapshot?.title(title, kind: .documents, source: source) ?? title, ending: $0 + ".pdf") }, record: record)
         return SavedDocument(title: title, url: saved.url.resolvingSymlinksInPath().standardizedFileURL, alreadyExisted: saved.existing, pages: saved.pages)
     }
 }
