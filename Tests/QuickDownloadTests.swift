@@ -101,7 +101,8 @@ extension CoreTests {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         try expect(!model.busy && model.downloads.count == 2 && model.downloads.allSatisfy { $0.state == .saved || $0.state == .existing } &&
-                   model.papers.count == 3 && model.papers.first { $0.id == completed.id }?.missing == true,
+                   model.papers.count == 3 && model.papers.first { $0.id == completed.id }?.missing == true &&
+                   model.papers.first { $0.id == completed.id }?.removed == true && model.library.count == 2,
                    "both remaining transfers finish, while trashed library entry stays missing")
         let restored = DownloadModel(preferences: preferences, stateURL: url)
         try expect(Set(restored.downloads.map(\.id)) == [active.id, queued.id] && restored.papers.first { $0.id == completed.id }?.missing == true &&

@@ -239,6 +239,7 @@ struct CoreTests {
                 let pdf = root.appendingPathComponent("fixture.pdf")
                 try createPDF(at: pdf)
                 try await libraryManagementTests(root: root, pdf: pdf)
+                try largeLibraryFileRefreshTests(root: root, pdf: pdf)
                 try await clearSingleDownloadRecordTests(root: root, pdf: pdf)
                 try fileListSelectionTests()
                 try await librarySelectionUITests()

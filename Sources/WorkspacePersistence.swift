@@ -46,6 +46,38 @@ import Foundation
         return try queue.sync { try WorkspaceStore.write(snapshot, to: stateURL) }
     }
 
+    // Trash has already moved the files. Keep the recovery metadata until all
+    // three stores accept the corresponding record removal.
+    func replaceTrashedFileRecords(_ snapshot: WorkspaceSnapshot, papers: [LibraryPaper], media: [DownloadItem]) throws -> WorkspaceSnapshot {
+        try prepareForSaving()
+        return try queue.sync {
+            let manager = FileManager.default
+            let targets = [libraryURL, mediaURL, stateURL]
+            let backups: [(URL, Data?)] = try targets.map { url in
+                (url, manager.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil)
+            }
+            var written: [URL] = []
+            do {
+                written.append(libraryURL); try LibraryStore.write(papers, to: libraryURL)
+                written.append(mediaURL); try MediaLibraryStore.write(media, to: mediaURL)
+                written.append(stateURL)
+                let retained = try WorkspaceStore.write(snapshot, to: stateURL)
+                return retained
+            } catch {
+                let originalError = error
+                var rollbackError: Error?
+                for (url, data) in backups.reversed() where written.contains(url) {
+                    do {
+                        if let data { try data.write(to: url, options: .atomic) }
+                        else if manager.fileExists(atPath: url.path) { try manager.removeItem(at: url) }
+                    } catch { rollbackError = error }
+                }
+                if let rollbackError { throw DownloadError.storage("记录未能保存，恢复原记录时发生错误：\(rollbackError.localizedDescription)") }
+                throw originalError
+            }
+        }
+    }
+
     func writeLibrary(_ papers: [LibraryPaper]) throws {
         try queue.sync { try LibraryStore.write(papers, to: libraryURL) }
     }

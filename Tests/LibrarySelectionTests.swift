@@ -337,18 +337,18 @@ extension CoreTests {
         model.busy = false
         try expect(try files.map { try Data(contentsOf: folder.appendingPathComponent("trash-" + $0.lastPathComponent)) } == originalBytes,
                    "confirmed Trash moves only these fixtures and preserves their bytes")
-        try expect(model.pendingFileTrash == nil && removedCount() == 0 && model.downloads.count == 2 && model.downloads.allSatisfy { $0.state == .missing },
-                   "confirmed Trash keeps active library and download records with missing file status")
+        try expect(model.pendingFileTrash == nil && removedCount() == 2 && model.downloads.isEmpty,
+                   "confirmed Trash removes corresponding downloads and hides every fully trashed library row")
         try expect(page == .library ? model.papers.count == 2 && model.papers.allSatisfy(\.missing) :
                    model.mediaLibrary.count == 2 && model.mediaLibrary.allSatisfy { $0.state == .missing },
-                   "document and media library entries both report the missing local files")
+                   "hidden document and media recovery entries retain missing-file status")
         try snapshot("trashed")
         let restored = DownloadModel(preferences: preferences, opener: { _ in true }, stateURL: folder.appendingPathComponent("workspace.json"))
-        try expect(page == .library ? restored.papers.filter { !$0.removed }.count == 2 : restored.mediaLibrary.filter { !$0.isLibraryRemoved }.count == 2,
-                   "separate file Trash does not remove library records after restart")
-        try expect(restored.downloads.count == 2 && restored.downloads.allSatisfy { $0.state == .missing } &&
+        try expect(page == .library ? restored.papers.filter { !$0.removed }.isEmpty : restored.mediaLibrary.filter { !$0.isLibraryRemoved }.isEmpty,
+                   "trashed library rows do not reappear in normal results after restart")
+        try expect(restored.downloads.isEmpty &&
                    (page == .library ? restored.papers.allSatisfy(\.missing) : restored.mediaLibrary.allSatisfy { $0.state == .missing }),
-                   "confirmed file status changes are durable across restart")
+                   "download cleanup and hidden recovery metadata are durable across restart")
         print("PASS library UI fixture: \(page == .library ? "documents" : "media") \(language == .chinese ? "zh" : "en") \(scheme == .light ? "light" : "dark")")
     }
 }

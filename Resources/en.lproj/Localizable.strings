@@ -452,7 +452,9 @@
 "清除记录并移到废纸篓" = "Clear Record and Trash Files";
 "资料库或下载记录尚未保存，文件和记录均保留。" = "The libraries or download records have not been saved. Files and records were kept.";
 "只可移除普通下载文件。" = "Only regular downloaded files can be moved to Trash.";
-"未能移除全部文件，记录已保留：%@" = "Some files could not be moved to Trash. The record was kept: %@";
+"移到废纸篓未全部完成，记录已保留：%@" = "The Trash operation could not be completed. Records were kept: %@";
+"记录未能保存，恢复原记录时发生错误：%@" = "Records could not be saved, and restoring the original records failed: %@";
+"部分文件仍在原位置，记录已保留。" = "Some files are still in their original location. Records were kept.";
 
 // Stable identifiers for new download errors and queue diagnostics.
 "download.invalid_input" = "Unrecognized input. Enter a paper, a video link from a supported site, or a direct HTTPS file link.";
@@ -615,7 +617,6 @@
 "将移出 %@ 项。文件和下载记录都会保留，可从「已移除」中恢复。" = "Remove %@ items from the library. Files and download records will be kept. You can restore the items from Removed.";
 "将文件移到废纸篓？" = "Move files to Trash?";
 "移到废纸篓" = "Move to Trash";
-"下载记录和资料库条目会保留，并更新文件状态。恢复库条目不会恢复文件，可从 Finder 废纸篓找回文件。" = "Download records and library entries will be kept, with their file status updated. Restoring an entry does not restore its files. You can recover files from Trash in Finder.";
 "已选 %@ 项" = "%@ selected";
 "全选当前结果" = "Select All Results";
 "取消选择" = "Deselect All";
@@ -797,7 +798,7 @@
 
 "清除" = "Clear";
 
-"成功移到废纸篓后，同时清除对应下载记录。资料库条目会保留并标记文件缺失，可从 Finder 废纸篓找回文件。" = "After the files are moved to Trash, the selected download records will also be cleared. Library entries will be kept and marked as missing. You can recover the files from Trash in Finder.";
+"成功移到废纸篓后，同时清除对应下载记录，并从资料库移除。文件可从 Finder 废纸篓找回。" = "After the files are moved to Trash, the corresponding download records will also be cleared and the entries removed from your libraries. You can recover the files from Trash in Finder.";
 
 "后退" = "Back";
 "前进" = "Forward";

@@ -149,9 +149,7 @@ struct FileTrashRequest: Identifiable {
     let files: [URL]
     var existingFiles: [URL] { files.filter { FileManager.default.fileExists(atPath: $0.path) } }
     var confirmationMessage: String {
-        collection == .downloads
-            ? "成功移到废纸篓后，同时清除对应下载记录。资料库条目会保留并标记文件缺失，可从 Finder 废纸篓找回文件。"
-            : "下载记录和资料库条目会保留，并更新文件状态。恢复库条目不会恢复文件，可从 Finder 废纸篓找回文件。"
+        "成功移到废纸篓后，同时清除对应下载记录，并从资料库移除。文件可从 Finder 废纸篓找回。"
     }
 }
 
@@ -715,29 +713,22 @@ final class DownloadModel: ObservableObject {
                 return true
             }
             for file in existing { try recycleFile(file) }
-            refreshMissingFiles(files)
-            if request.collection == .downloads {
-                let clearedIDs = Set(downloads.filter { request.ids.contains($0.id) }.map(\.id))
-                // Save updated libraries before atomically replacing download
-                // records; a failed save keeps the recovery rows visible.
-                guard replaceDownloadRecords(items: items.filter { !clearedIDs.contains($0.id) },
-                                             history: history.filter { !clearedIDs.contains($0.id) }) else { return false }
-                recordAnimation = UUID()
-                if let diagnosticItem, clearedIDs.contains(diagnosticItem.id) { self.diagnosticItem = nil }
-                for id in clearedIDs {
-                    trace.record(.historyCleared, context: .downloads, outcome: .succeeded, item: id, operation: operation, count: 1)
-                }
-                succeeded = true
-                return true
+            guard files.allSatisfy({ !FileManager.default.fileExists(atPath: $0.path) }) else {
+                throw DownloadError.storage("部分文件仍在原位置，记录已保留。")
             }
-            persistWorkspace()
-            if persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil { notice = nil }
-            succeeded = persistenceNotice == nil && libraryNotice == nil && mediaLibraryNotice == nil
-            return succeeded
+            let clearedIDs = try refreshMissingFiles(files, removing: request)
+            recordAnimation = UUID()
+            if let diagnosticItem, clearedIDs.contains(diagnosticItem.id) { self.diagnosticItem = nil }
+            for id in clearedIDs {
+                trace.record(.historyCleared, context: .downloads, outcome: .succeeded, item: id, operation: operation, count: 1)
+            }
+            notice = nil
+            succeeded = true
+            return true
         } catch {
-            refreshMissingFiles(files)
+            _ = try? refreshMissingFiles(files)
             persistWorkspace()
-            notice = "未能移除全部文件，记录已保留：\(error.localizedDescription)"
+            notice = "移到废纸篓未全部完成，记录已保留：\(error.localizedDescription)"
             return false
         }
     }
@@ -749,13 +740,14 @@ final class DownloadModel: ObservableObject {
         return url.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(url.lastPathComponent)
     }
 
-    private func refreshMissingFiles(_ files: Set<URL>) {
+    @discardableResult
+    private func refreshMissingFiles(_ files: Set<URL>, removing request: FileTrashRequest? = nil) throws -> Set<UUID> {
         fileRefreshRevision += 1
         #if TESTING
         fileRefreshPathResolutions = 0
         #endif
         let missing = files.filter { !FileManager.default.fileExists(atPath: $0.path) }
-        guard !missing.isEmpty else { return }
+        guard !missing.isEmpty else { return [] }
         let names = Set(missing.map(\.lastPathComponent))
         var parents: [URL: URL] = [:]
         func affected(_ url: URL) -> Bool {
@@ -774,6 +766,19 @@ final class DownloadModel: ObservableObject {
             return missing.contains(resolved.appendingPathComponent(url.lastPathComponent))
         }
         func affected(_ item: DownloadItem) -> Bool { item.localURLs.contains(where: affected) }
+        var explicitIDs = request?.ids ?? []
+        if request?.collection == .documents {
+            explicitIDs.formUnion(papers.filter { explicitIDs.contains($0.id) }.compactMap(\.taskID))
+        }
+        func fullyAffected(_ item: DownloadItem) -> Bool {
+            guard item.incompleteFileList != true || explicitIDs.contains(item.id) else { return false }
+            return !item.localURLs.isEmpty && item.localURLs.allSatisfy(affected)
+        }
+        // Use the effective current record, not an older history copy with the
+        // same ID. Partial groups retain their paths and surviving attachments.
+        let clearedIDs = request == nil ? Set<UUID>() : Set(downloads.filter {
+            $0.state.terminal && (fullyAffected($0) || ($0.localURLs.isEmpty && explicitIDs.contains($0.id)))
+        }.map(\.id))
         func mark(_ item: inout DownloadItem) {
             if item.state != .missing && item.incompleteFileList == nil { item.incompleteFileList = false }
             item.state = .missing
@@ -781,20 +786,54 @@ final class DownloadModel: ObservableObject {
             item.error = item.localURLs.contains { FileManager.default.fileExists(atPath: $0.path) }
                 ? "部分文件已不在原位置，仍可打开其余文件，或重新下载。" : "原位置的文件不存在，可重新下载。"
         }
-        func refreshed(_ records: [DownloadItem]) -> [DownloadItem]? {
-            var result = records, changed = false
-            for i in records.indices where affected(records[i]) { mark(&result[i]); changed = true }
+        func refreshed(_ records: [DownloadItem], library: Bool = false) -> [DownloadItem]? {
+            var result: [DownloadItem] = [], changed = false
+            let removedAt = Date()
+            for var item in records {
+                if !library && clearedIDs.contains(item.id) { changed = true; continue }
+                if affected(item) { mark(&item); changed = true }
+                if library, request != nil, fullyAffected(item), !item.isLibraryRemoved {
+                    item.libraryRemovedAt = removedAt; changed = true
+                }
+                result.append(item)
+            }
             return changed ? result : nil
         }
-        if let updated = refreshed(items) { items = updated }
-        if let updated = refreshed(history) { history = updated }
-        if let updated = refreshed(mediaLibrary) { mediaLibrary = updated }
+        let updatedItems = refreshed(items), updatedHistory = refreshed(history)
+        let updatedMedia = refreshed(mediaLibrary, library: true)
         var updatedPapers = papers, papersChanged = false
-        for i in papers.indices where !papers[i].missing && papers[i].file.map(affected) == true {
-            updatedPapers[i].missing = true; papersChanged = true
+        for i in papers.indices where papers[i].file.map(affected) == true {
+            if !papers[i].missing { updatedPapers[i].missing = true; papersChanged = true }
+            if request != nil, !papers[i].removed { updatedPapers[i].removed = true; papersChanged = true }
         }
+        var retained: WorkspaceSnapshot?
+        if request != nil, let persistence {
+            saveWork?.cancel(); saveWork = nil; pendingWorkspaceSave = false
+            persistenceSequence += 1; appliedPersistenceSequence = persistenceSequence
+            retained = try persistence.replaceTrashedFileRecords(
+                WorkspaceSnapshot(input: input, items: updatedItems ?? items, history: updatedHistory ?? history, logs: logs),
+                papers: updatedPapers, media: updatedMedia ?? mediaLibrary)
+        }
+        if let updatedItems { items = updatedItems }
+        if let retained { history = retained.history; logs = retained.logs }
+        else if let updatedHistory { history = updatedHistory }
+        if let updatedMedia { mediaLibrary = updatedMedia }
         if papersChanged { papers = updatedPapers }
+        if retained != nil {
+            libraryDirty = false; mediaLibraryDirty = false
+            libraryNotice = nil; mediaLibraryNotice = nil; persistenceNotice = nil
+        }
+        if request != nil {
+            if let diagnosticItem, fullyAffected(diagnosticItem) { self.diagnosticItem = nil }
+            if let undo = libraryUndo {
+                let touched = undo.collection == .documents
+                    ? papers.contains { undo.ids.contains($0.id) && $0.file.map(affected) == true }
+                    : mediaLibrary.contains { undo.ids.contains($0.id) && fullyAffected($0) }
+                if touched { libraryUndo = nil }
+            }
+        }
         if let previewURL, affected(previewURL) { self.previewURL = nil }
+        return clearedIDs
     }
 
     @discardableResult
