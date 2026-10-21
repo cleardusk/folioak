@@ -124,6 +124,7 @@ struct CoreTests {
                 try await inputFocusRaceTests()
                 try await inputColorTransitionTests()
                 try await inputScrollGutterTests()
+                try await sidebarLayoutTests()
                 return
             }
             if CommandLine.arguments.contains("--smart-only") || CommandLine.arguments.contains("--smart-core-only") || !CommandLine.arguments.contains(where: { $0.hasSuffix("-only") || $0.hasSuffix("-live") }) {

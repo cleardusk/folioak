@@ -776,7 +776,7 @@ struct DownloaderView: View {
                         HStack(spacing: 0) { pasteButton; downloadActions }
                             .buttonStyle(.plain).padding(.top, 2)
                     }
-                    .padding(.leading, WorkspaceMetrics.Space.compact).padding(.trailing, 10).padding(.top, 10)
+                    .padding(.leading, WorkspaceMetrics.Space.compact).padding(.trailing, 10).padding(.top, 14)
                 }
                 SmartInputStatusView(state: model.smartInput, palette: palette,
                                      showsReviewActions: false, onEdit: editSmartRequest)
@@ -805,8 +805,8 @@ struct DownloaderView: View {
                             primaryAction(recognition: recognition)
                         }
                     }.padding(.horizontal, WorkspaceMetrics.Space.inset)
-                        .padding(.top, reviewing || model.smartInput.message != nil ? 14 : 4)
-                        .padding(.bottom, 14)
+                        .padding(.top, reviewing || model.smartInput.message != nil ? 14 : 8)
+                        .padding(.bottom, reviewing ? 14 : 18)
                 }
             }
         }

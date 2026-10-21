@@ -1253,9 +1253,23 @@ extension CoreTests {
             model.input = "https://example.com/video.mp4"; await settle()
             try expect(input(view) === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1, "pasted and dropped content preserves the full-size input")
             model.input = ""; await settle()
-            if CommandLine.arguments.contains("--snapshots"), let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-                view.cacheDisplay(in: view.bounds, to: bitmap)
-                try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/workspace-input-\(scheme == .light ? "light" : "dark")-\(reducedMotion ? "reduced" : "motion").png"))
+            if CommandLine.arguments.contains("--snapshots") {
+                func snapshot(_ suffix: String) async throws {
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                    view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+                    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw TestFailure.failed("composer snapshot") }
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/workspace-input-\(scheme == .light ? "light" : "dark")-\(suffix)-\(reducedMotion ? "reduced" : "motion").png"))
+                }
+                try await snapshot("minimum")
+                model.theme = .grove
+                window.setContentSize(NSSize(width: 1100, height: 760)); await settle()
+                try await snapshot("normal")
+                model.input = "找一篇介绍 Transformer 的论文"; model.focusInput(); await settle()
+                try await snapshot("draft")
+                model.input = ""; model.theme = .graphite
+                window.makeFirstResponder(nil)
+                window.setContentSize(NSSize(width: 780, height: 540)); await settle()
             }
             // Settings/About now share the sidebar footer. Locate the rendered
             // Logs label instead of assuming its old distance from the bottom.

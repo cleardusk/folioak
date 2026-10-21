@@ -26,7 +26,7 @@ enum WorkspaceMetrics {
     static let headerHeight: CGFloat = 76
     static let controlHeight: CGFloat = 32
     static let rowIconSize: CGFloat = 44
-    static let inputHeight: CGFloat = 64
+    static let inputHeight: CGFloat = 128
 }
 
 struct ThemePalette {

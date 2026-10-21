@@ -1979,7 +1979,7 @@ struct LinkInput: NSViewRepresentable {
         editor.allowsUndo = true
         editor.drawsBackground = false
         editor.focusRingType = .none
-        editor.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        editor.font = .systemFont(ofSize: 14)
         editor.textContainerInset = NSSize(width: 7, height: 7)
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false
@@ -2030,7 +2030,7 @@ struct LinkInput: NSViewRepresentable {
             editor.inputContext?.discardMarkedText()
         }
         editor.naturalLanguageInput = true
-        let inputFont = NSFont.systemFont(ofSize: 13)
+        let inputFont = NSFont.systemFont(ofSize: 14)
         if !editor.hasMarkedText(), editor.font != inputFont { editor.font = inputFont }
         editor.setAccessibilityLabel(L("下载请求"))
         editor.needsDisplay = true
