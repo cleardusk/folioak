@@ -1369,7 +1369,8 @@ struct DownloadRow: View {
             model.requestFileTrash([item.id], in: .downloads)
         }.disabled(!model.canTrashFiles([item.id], in: .downloads))
         Divider()
-        Button(L("清除这条记录"), role: .destructive) { model.clearDownloadRecord(item.id) }.disabled(busy)
+        Button(L("清除这条记录"), role: .destructive) { model.clearDownloadRecord(item.id) }
+            .disabled(!model.canClearDownloadRecord(item.id))
     }
 
     private func retry() {

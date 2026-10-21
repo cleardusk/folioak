@@ -71,6 +71,54 @@ private final class QuickTestWindow: NSPanel {
 }
 
 extension CoreTests {
+    @MainActor static func clearRecordsDuringDownloadTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
+        let gate = QuickTransport(pdf: pdf)
+        await gate.block("/clear-second.pdf")
+        let engine = DownloadEngine(transport: gate, pdfTransport: gate, requestInterval: 0, retryDelay: 0)
+        let url = root.appendingPathComponent("clear-running/workspace.json")
+        let model = DownloadModel(engine: engine, preferences: preferences, stateURL: url)
+        model.directory = root.appendingPathComponent("clear-running/files")
+        defer { model.cancel() }
+        let historical = DownloadItem(original: "old", state: .saved, savedURL: pdf)
+        model.history = [historical]
+        model.input = "keep draft"
+        _ = try model.submitQuickDownload("https://example.com/clear-first.pdf\nhttps://example.com/clear-second.pdf\nhttps://example.com/clear-third.pdf")
+        for _ in 0..<400 {
+            if await gate.paths.count == 2 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(model.busy && model.items.count == 3 && model.items[0].state == .saved && model.items[2].state == .queued,
+                   "record-clear regression has a completed item, active transfer and queued item in one real worker")
+        let completed = model.items[0], active = model.items[1], queued = model.items[2], batch = model.batchID
+        let savedFile = completed.savedURL!, bytes = try Data(contentsOf: savedFile)
+        // Queue an old snapshot before explicit clearing, then let its completion
+        // arrive afterwards. It must not resurrect either removed record.
+        model.saveWorkspace()
+        model.clearDownloadRecord(historical.id)
+        model.clearDownloadRecord(completed.id)
+        model.clearDownloadRecord(active.id); model.clearDownloadRecord(queued.id)
+        try expect(model.busy && model.batchID == batch && model.downloads.map(\.id) == [active.id, queued.id] &&
+                   model.input == "keep draft" && model.papers.contains { $0.id == completed.id },
+                   "clearing old and just-completed records preserves the active queue, draft and library")
+        try expect(try Data(contentsOf: savedFile) == bytes && FileManager.default.fileExists(atPath: pdf.path),
+                   "clearing during a transfer leaves every downloaded file intact")
+        await gate.release("/clear-second.pdf")
+        for _ in 0..<600 {
+            if !model.busy { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(!model.busy && model.downloads.count == 2 && model.downloads.allSatisfy { $0.state == .saved || $0.state == .existing },
+                   "removing the completed row does not skip or interrupt remaining worker IDs")
+        try expect(await gate.paths == ["/clear-first.pdf", "/clear-second.pdf", "/clear-third.pdf"],
+                   "each queued transfer runs exactly once")
+        try expect(model.logs.last(where: { $0.diagnostic?.id == DiagnosticMessage.ID.finished.rawValue })?.diagnostic?.arguments == ["3", "0"],
+                   "batch completion count includes the cleared successful task")
+        let restored = DownloadModel(preferences: preferences, stateURL: url)
+        try expect(Set(restored.downloads.map(\.id)) == [active.id, queued.id] && restored.papers.count == 3 &&
+                   (try Data(contentsOf: savedFile)) == bytes,
+                   "later progress, archival and pending save completions cannot restore cleared records after restart")
+    }
+
     @MainActor static func quickDownloadTests() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-quick-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

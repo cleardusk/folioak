@@ -344,9 +344,12 @@ extension CoreTests {
         model.input = "unfinished draft"; model.duplicateCount = 3
         model.record(.info, "Keep logs", item: paper); model.persistWorkspace()
         let batch = model.batchID, logs = model.logs.map(\.id), bytes = try Data(contentsOf: pdf)
-        model.busy = true; model.clearDownloadRecord(paper.id)
-        try expect(model.downloads.count == 2, "busy guard rejects single record clearing")
-        model.busy = false; model.clearDownloadRecord(paper.id)
+        model.busy = true
+        try expect(model.canClearDownloadRecord(paper.id), "completed record action remains available while another task runs")
+        model.clearDownloadRecord(paper.id)
+        try expect(model.busy && model.downloads.map(\.id) == [other.id],
+                   "a finished record can be cleared without changing the running batch status")
+        model.busy = false
         try expect(model.items.map(\.id) == [other.id] && model.history.isEmpty && recycled.isEmpty && (try Data(contentsOf: pdf)) == bytes,
                    "single clear ignores the legacy trash preference and removes only the requested download record")
         try expect(model.papers.count == 1 && model.papers[0].favorite && model.papers[0].read && model.papers[0].tags == ["keep"] &&
@@ -390,6 +393,20 @@ extension CoreTests {
         restored.clearDownloadRecord(missing.id)
         try expect(restored.items.isEmpty && restored.history.map(\.id) == [other.id] && recycled.isEmpty,
                    "already-missing files do not prevent independent record clearing")
-        print("PASS single record clear: legacy deletion preference ignored, preserved files/libraries/shared groups, restart, active and save-failure guards")
+        for state: ItemState in [.queued, .coordinating, .metadata, .checkingLocal, .downloading, .validating, .retrying(1), .waiting(Date())] {
+            var active = paper; active.state = state
+            active.savedURL = folder.appendingPathComponent("missing-retry.pdf")
+            restored.items = [active]; restored.history = [paper]
+            try expect(restored.localFile(active) == nil && restored.items[0].state == state,
+                       "opening an absent file from a retry does not change worker-owned state \(state)")
+            for busy in [true, false] {
+                try expect(!restored.canClearDownloadRecord(active.id), "active record clear action stays disabled")
+                restored.busy = busy; restored.clearDownloadRecord(active.id)
+                try expect(restored.items.count == 1 && restored.items[0].state == state && restored.history.count == 1,
+                           "active state \(state) takes precedence over an older completed history copy, even between busy publications")
+            }
+        }
+        try await clearRecordsDuringDownloadTests(root: folder, pdf: pdf, preferences: prefs)
+        print("PASS single record clear: preserved files/libraries/shared groups, restart, running queue, active and save-failure guards")
     }
 }

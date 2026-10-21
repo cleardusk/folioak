@@ -369,8 +369,14 @@ final class DownloadModel: ObservableObject {
         duplicateCount = 0; batchID = UUID()
     }
 
+    func canClearDownloadRecord(_ id: UUID) -> Bool {
+        guard !libraryMutationInProgress,
+              let item = items.first(where: { $0.id == id }) ?? history.first(where: { $0.id == id }) else { return false }
+        return item.state.terminal
+    }
+
     func clearDownloadRecord(_ id: UUID) {
-        guard !busy, !libraryMutationInProgress, downloads.contains(where: { $0.id == id }) else { return }
+        guard canClearDownloadRecord(id) else { return }
         if replaceDownloadRecords(items: items.filter { $0.id != id }, history: history.filter { $0.id != id }) {
             recordAnimation = UUID()
             trace.record(.historyCleared, context: .downloads, outcome: .succeeded, item: id, count: 1)
@@ -1426,7 +1432,9 @@ final class DownloadModel: ObservableObject {
         }
         func refreshed(_ records: [DownloadItem]) -> [DownloadItem]? {
             var updated = records, changed = false
-            for i in records.indices where matches(records[i]) {
+            // A retry may retain an old file path. Only the worker may change
+            // its active state, even if opening that old path finds it missing.
+            for i in records.indices where records[i].state.terminal && matches(records[i]) {
                 var value = records[i]; refresh(&value)
                 if value.state != records[i].state || value.localURLs != records[i].localURLs ||
                    value.error != records[i].error || value.incompleteFileList != records[i].incompleteFileList ||
