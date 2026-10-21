@@ -88,9 +88,93 @@ extension CoreTests {
         try await libraryReplayTests(root: root, preferences: preferences)
         try await libraryRemovalFailureTests(root: root, pdf: pdf, preferences: preferences)
         try await libraryFileTrashTests(root: root, pdf: pdf, preferences: preferences)
+        try fileTrashDuringOtherTasksTests(root: root, preferences: preferences)
+        try await trashFilesDuringDownloadTests(root: root, pdf: pdf, preferences: preferences)
         try downloadFileTrashClearsRecordTests(root: root, pdf: pdf, preferences: preferences)
         try libraryFileTrashFailureTests(root: root, preferences: preferences)
         print("PASS library management: asynchronous remove/restore/undo, legacy migration, replay tombstones, bulk retention, shared-file trash, stale confirmations and failure recovery")
+    }
+
+    @MainActor private static func fileTrashDuringOtherTasksTests(root: URL, preferences: UserDefaults) throws {
+        let state = try LibraryManagementFixture.state(root, "trash-during-download")
+        var moves: [URL] = []
+        var active = LibraryManagementFixture.media(state.deletingLastPathComponent().appendingPathComponent("active.png"), name: "other")
+        active.state = .downloading
+        for collection in [RecordCollection.downloads, .media, .documents] {
+            let file = try LibraryManagementFixture.file(state, "completed-\(collection)." + (collection == .documents ? "pdf" : "png"))
+            let completed = LibraryManagementFixture.media(file)
+            let model = LibraryManagementFixture.model(state, preferences, recycle: { moves.append($0); try LibraryManagementFixture.recycle($0) })
+            model.items = [active]; model.history = [completed]; model.mediaLibrary = []; model.papers = []
+            if collection == .documents { model.upsertPaper(completed) } else { model.upsertMedia(completed) }
+            model.busy = true
+            try expect(model.canTrashFiles([completed.id], in: collection), "unrelated active task permits completed file trash in \(collection)")
+            let request = try LibraryManagementFixture.request(model, ids: [completed.id], in: collection)
+            try expect(model.canConfirmFileTrash(request) && model.confirmFileTrash(request) && model.busy && model.items.count == 1 &&
+                       model.items[0].state == .downloading && moves.last == file &&
+                       (collection == .documents ? model.papers[0].missing : model.mediaLibrary[0].state == .missing),
+                       "trashing an unrelated completed file preserves worker state and updates retained catalogs")
+        }
+
+        // A shared file is protected even through another record, an attachment,
+        // or a symlinked parent; selecting a safe sibling cannot bypass the guard.
+        let shared = try LibraryManagementFixture.file(state, "shared.png")
+        let safe = try LibraryManagementFixture.file(state, "safe.png")
+        let alias = state.deletingLastPathComponent().appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: state.deletingLastPathComponent())
+        let retained = LibraryManagementFixture.media(shared)
+        let sibling = LibraryManagementFixture.media(safe, name: "safe")
+        let model = LibraryManagementFixture.model(state, preferences, recycle: { moves.append($0); try LibraryManagementFixture.recycle($0) })
+        model.history = [retained, sibling]; model.mediaLibrary = [retained, sibling]; model.papers = []; model.busy = true
+        let before = moves.count
+        for taskState: ItemState in [.queued, .coordinating, .metadata, .checkingLocal, .downloading, .validating, .retrying(1), .waiting(Date())] {
+            active.state = taskState; active.additionalURLs = [alias.appendingPathComponent("shared.png")]
+            model.items = [active]
+            for collection in [RecordCollection.downloads, .media] {
+                try expect(!model.canTrashFiles([retained.id], in: collection) && !model.canTrashFiles([retained.id, sibling.id], in: collection),
+                           "shared file and whole selection stay protected during \(taskState) in \(collection)")
+                model.requestFileTrash([retained.id], in: collection)
+                try expect(model.pendingFileTrash == nil, "direct request also protects shared active files")
+            }
+        }
+        active.additionalURLs = nil; active.savedURL = nil; active.id = retained.id
+        model.items = [active]
+        try expect(!model.canTrashFiles([retained.id], in: .media), "same-ID retry is protected before it has local paths")
+        active.id = UUID(); active.directURL = retained.directURL; model.items = [active]
+        try expect(!model.canTrashFiles([retained.id], in: .downloads), "new task for the same source is protected before path discovery")
+
+        model.items = []
+        let stale = try LibraryManagementFixture.request(model, ids: [retained.id], in: .downloads)
+        model.items = [active]
+        try expect(!model.confirmFileTrash(stale) && moves.count == before && FileManager.default.fileExists(atPath: shared.path),
+                   "starting a related task after the dialog opens invalidates confirmation without touching any files")
+        model.pendingFileTrash = nil
+        model.items = []
+        let independent = try LibraryManagementFixture.request(model, ids: [sibling.id], in: .downloads)
+        model.items = [active]
+        try expect(model.confirmFileTrash(independent) && moves.count == before + 1 && FileManager.default.fileExists(atPath: shared.path),
+                   "starting an unrelated task after the dialog opens still permits confirmation")
+
+        let paperFile = try LibraryManagementFixture.file(state, "protected.pdf")
+        let ref = try ArxivReference.parse("1706.03762v1")
+        let download = DownloadItem(original: ref.identifier, reference: ref, state: .saved, savedURL: paperFile)
+        var paper = LibraryPaper(download); paper.id = UUID()
+        model.papers = [paper]
+        for version in [nil, 1, 2] as [Int?] {
+            let reference = ArxivReference(baseID: ref.baseID, version: version)
+            let task = DownloadItem(original: reference.identifier, reference: reference, state: .queued)
+            model.items = [task]
+            try expect(model.canTrashFiles([paper.id], in: .documents) == (version == 2),
+                       "arXiv latest and matching-version tasks protect an existing paper; distinct explicit versions stay independent")
+        }
+        model.items = [DownloadItem(id: download.id, original: "retry", state: .queued)]
+        try expect(!model.canTrashFiles([paper.id], in: .documents), "library taskID protects a pathless retry even without source metadata")
+        paper.reference = ArxivReference(baseID: ref.baseID, version: 2); model.papers = [paper]
+        var latest = DownloadItem(original: ref.baseID, reference: ArxivReference(baseID: ref.baseID, version: nil),
+                                  metadata: PaperMetadata(reference: ref, title: "old version", year: 2017, month: 6), state: .queued)
+        model.items = [latest]
+        try expect(!model.canTrashFiles([paper.id], in: .documents), "stale metadata on a latest-version retry cannot bypass source protection")
+        latest.restoreReference = ref; model.items = [latest]
+        try expect(model.canTrashFiles([paper.id], in: .documents), "explicit restore version follows the worker's actual source")
     }
 
     @MainActor private static func libraryRemovalTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
@@ -272,7 +356,10 @@ extension CoreTests {
             try expect(!(await readOnly.setLibraryRemoved([id], in: collection, removed: true)) && (try Data(contentsOf: library)) == future,
                        "future-schema \(name) stores remain read-only and byte-preserved")
             readOnly.items = [media]
-            let request = try LibraryManagementFixture.request(readOnly, ids: [media.id], in: .downloads)
+            readOnly.requestFileTrash([media.id], in: .downloads)
+            try expect(readOnly.pendingFileTrash == nil, "read-only catalogs reject opening a destructive confirmation")
+            let request = FileTrashRequest(collection: .downloads, ids: [media.id], files: [file])
+            readOnly.pendingFileTrash = request
             try expect(!readOnly.canTrashFiles([media.id], in: .downloads) && !readOnly.confirmFileTrash(request) && trashCalls == 0 &&
                        FileManager.default.fileExists(atPath: file.path) && (try Data(contentsOf: library)) == future,
                        "future-schema catalogs also prevent file trashing and retain the original file and bytes")
@@ -430,10 +517,11 @@ extension CoreTests {
         })
         model.items = [group]; model.history = [group]; model.upsertMedia(group)
         let request = try LibraryManagementFixture.request(model, ids: [group.id], in: .downloads)
-        model.busy = true
-        try expect(!model.confirmFileTrash(request) && calls == 0, "download activity invalidates a previously opened deletion confirmation")
-        model.busy = false
-        try expect(!model.confirmFileTrash(request) && calls == 2 && model.items[0].state == .missing &&
+        model.busy = true; model.items[0].state = .downloading
+        try expect(!model.canConfirmFileTrash(request) && !model.confirmFileTrash(request) && calls == 0, "related download activity invalidates a previously opened deletion confirmation")
+        model.items[0].state = .saved
+        let partialRequest = try LibraryManagementFixture.request(model, ids: [group.id], in: .downloads)
+        try expect(!model.confirmFileTrash(partialRequest) && calls == 2 && model.items[0].state == .missing &&
                    model.mediaLibrary[0].state == .missing && model.mediaLibrary[0].localURLs == group.localURLs &&
                    !FileManager.default.fileExists(atPath: first.path) && FileManager.default.fileExists(atPath: second.path),
                    "partial trash failure reports failure and retains the full group plus surviving files")

@@ -303,7 +303,7 @@ struct DownloaderView: View {
             Button(L("取消"), role: .cancel) { model.pendingFileTrash = nil }
             Button(L("移到废纸篓"), role: .destructive) {
                 if let request = model.pendingFileTrash { _ = model.confirmFileTrash(request) }
-            }.disabled(model.busy)
+            }.disabled(model.pendingFileTrash.map { !model.canConfirmFileTrash($0) } ?? true)
         } message: {
             if let request = model.pendingFileTrash {
                 let files = request.existingFiles

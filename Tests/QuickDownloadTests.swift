@@ -71,6 +71,64 @@ private final class QuickTestWindow: NSPanel {
 }
 
 extension CoreTests {
+    @MainActor static func trashFilesDuringDownloadTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
+        let gate = QuickTransport(pdf: pdf)
+        await gate.block("/trash-second.pdf")
+        let engine = DownloadEngine(transport: gate, pdfTransport: gate, requestInterval: 0, retryDelay: 0)
+        let url = root.appendingPathComponent("trash-running/workspace.json")
+        var moved: [URL] = []
+        let model = DownloadModel(engine: engine, preferences: preferences, stateURL: url, recycleFile: { file in
+            try FileManager.default.moveItem(at: file, to: file.deletingLastPathComponent().appendingPathComponent("recycled-" + file.lastPathComponent))
+            moved.append(file)
+        })
+        model.directory = root.appendingPathComponent("trash-running/files")
+        defer { model.cancel() }
+        _ = try model.submitQuickDownload("https://example.com/trash-first.pdf\nhttps://example.com/trash-second.pdf\nhttps://example.com/trash-third.pdf")
+        for _ in 0..<400 {
+            if await gate.paths.count == 2 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(model.busy && model.items.count == 3 && model.items[0].state == .saved, "trash fixture holds the second real transfer")
+        let completed = model.items[0], active = model.items[1], queued = model.items[2]
+        model.saveWorkspace()
+        model.requestFileTrash([completed.id], in: .downloads)
+        guard let request = model.pendingFileTrash else { throw TestFailure.failed("completed file trash remains available during another download") }
+        try expect(model.confirmFileTrash(request) && moved == [completed.savedURL!] && model.items.map(\.id) == [active.id, queued.id],
+                   "trashing the completed file leaves remaining worker IDs intact")
+        await gate.release("/trash-second.pdf")
+        for _ in 0..<600 {
+            if !model.busy { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(!model.busy && model.downloads.count == 2 && model.downloads.allSatisfy { $0.state == .saved || $0.state == .existing } &&
+                   model.papers.count == 3 && model.papers.first { $0.id == completed.id }?.missing == true,
+                   "both remaining transfers finish, while trashed library entry stays missing")
+        let restored = DownloadModel(preferences: preferences, stateURL: url)
+        try expect(Set(restored.downloads.map(\.id)) == [active.id, queued.id] && restored.papers.first { $0.id == completed.id }?.missing == true &&
+                   !FileManager.default.fileExists(atPath: completed.savedURL!.path), "late worker saves and restart preserve trash results")
+
+        // A new source can reuse a file by content, without an old path/source
+        // association. Model the file disappearing before the result is delivered.
+        let vanished = root.appendingPathComponent("vanished-output.png")
+        let surviving = root.appendingPathComponent("surviving-output.png")
+        try Data("survivor".utf8).write(to: surviving)
+        for grouped in [false, true] {
+            let missingEngine = DownloadEngine(mediaDownload: { _, _, _, _, _, _, _ in
+                try Data("output".utf8).write(to: vanished)
+                _ = try vanished.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                try FileManager.default.removeItem(at: vanished)
+                return SavedDocument(title: "output", url: grouped ? surviving : vanished, alreadyExisted: true, pages: 0,
+                                     additionalURLs: grouped ? [vanished] : [])
+            })
+            let missing = DownloadModel(engine: missingEngine, preferences: preferences)
+            missing.directory = root
+            _ = try missing.submitQuickDownload("https://www.youtube.com/watch?v=abcdefghijk")
+            try await waitForQueue(missing)
+            try expect(missing.items[0].state == .failed && missing.mediaLibrary.isEmpty && FileManager.default.fileExists(atPath: surviving.path),
+                       "missing \(grouped ? "attachment" : "main file") at publication cannot be reported or catalogued as a successful download")
+        }
+    }
+
     @MainActor static func clearRecordsDuringDownloadTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
         let gate = QuickTransport(pdf: pdf)
         await gate.block("/clear-second.pdf")

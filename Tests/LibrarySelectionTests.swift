@@ -329,10 +329,12 @@ extension CoreTests {
         try expect(try files.map { try Data(contentsOf: $0) } == originalBytes,
                    "batch remove, restore and cancelled Trash preserve original file bytes")
         try snapshot("restored")
+        model.busy = true; await settle()
         try await menu(L("将所选文件移到废纸篓…"))
         try await alert(L("移到废纸篓"))
-        try expect(Set(recycled) == Set(files) && files.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
-                   "the native Trash confirmation invokes the recycler for every selected file")
+        try expect(model.busy && Set(recycled) == Set(files) && files.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+                   "native Trash menu and confirmation remain enabled for independent files while the model is busy")
+        model.busy = false
         try expect(try files.map { try Data(contentsOf: folder.appendingPathComponent("trash-" + $0.lastPathComponent)) } == originalBytes,
                    "confirmed Trash moves only these fixtures and preserves their bytes")
         try expect(model.pendingFileTrash == nil && removedCount() == 0 && model.downloads.count == 2 && model.downloads.allSatisfy { $0.state == .missing },

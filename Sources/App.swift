@@ -625,12 +625,56 @@ final class DownloadModel: ObservableObject {
     }
 
     func canTrashFiles(_ ids: Set<UUID>, in collection: RecordCollection) -> Bool {
-        !busy && !libraryMutationInProgress && (stateURL == nil || (libraryWritable && mediaLibraryWritable)) &&
-            filesForRecords(ids, in: collection).contains { FileManager.default.fileExists(atPath: $0.path) }
+        let files = filesForRecords(ids, in: collection)
+        guard !libraryMutationInProgress, stateURL == nil || (libraryWritable && mediaLibraryWritable),
+              files.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) else { return false }
+        if collection == .downloads, items.contains(where: { ids.contains($0.id) && !$0.state.terminal }) { return false }
+        return !filesAreInUse(files)
+    }
+
+    private func filesAreInUse(_ files: Set<URL>) -> Bool {
+        let active = items.filter { !$0.state.terminal }
+        guard !active.isEmpty else { return false }
+        let names = Set(files.map(\.lastPathComponent))
+        var parents: [URL: URL] = [:]
+        func matches(_ url: URL) -> Bool {
+            guard url.isFileURL, names.contains(url.lastPathComponent) else { return false }
+            let parent = url.deletingLastPathComponent().standardizedFileURL
+            let canonical = parents[parent] ?? parent.resolvingSymlinksInPath()
+            parents[parent] = canonical
+            return files.contains(canonical.appendingPathComponent(url.lastPathComponent))
+        }
+        if active.contains(where: { $0.localURLs.contains(where: matches) }) { return true }
+        // A library retry or a fresh submission may not yet know its output
+        // paths. Retained references also protect shared files and attachments.
+        let records = (items + history + mediaLibrary).filter { $0.localURLs.contains(where: matches) }
+        let documents = papers.filter { $0.file.map(matches) == true }
+        let ids = Set(records.map(\.id) + documents.flatMap { [$0.id, $0.taskID].compactMap { $0 } })
+        func source(_ item: DownloadItem) -> DownloadSource? {
+            (item.restoreReference ?? item.metadata?.reference ?? item.reference).map(DownloadSource.arxiv) ?? item.source
+        }
+        let sources = records.compactMap(source) + documents.compactMap(\.source)
+        func sameSource(_ lhs: DownloadSource, _ rhs: DownloadSource) -> Bool {
+            if let a = lhs.reference, let b = rhs.reference {
+                return a.baseID == b.baseID && (a.version == nil || b.version == nil || a.version == b.version)
+            }
+            return lhs.webURL == rhs.webURL
+        }
+        return active.contains { item in
+            // Match the source actually requested by executeSource. Metadata on
+            // a retry can describe a previous version of a "latest" request.
+            let requested = item.restoreReference.map(DownloadSource.arxiv) ?? item.source
+            return ids.contains(item.id) || requested.map { value in sources.contains { sameSource(value, $0) } } == true
+        }
+    }
+
+    func canConfirmFileTrash(_ request: FileTrashRequest) -> Bool {
+        pendingFileTrash?.id == request.id && Set(request.files) == filesForRecords(request.ids, in: request.collection) &&
+            canTrashFiles(request.ids, in: request.collection)
     }
 
     func requestFileTrash(_ ids: Set<UUID>, in collection: RecordCollection) {
-        guard !busy else { return }
+        guard canTrashFiles(ids, in: collection) else { return }
         let files = filesForRecords(ids, in: collection).sorted { $0.path < $1.path }
         guard files.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
             notice = "没有可移到废纸篓的文件。"; return
@@ -644,12 +688,13 @@ final class DownloadModel: ObservableObject {
         var succeeded = false
         trace.user(.filesTrashed, outcome: .requested, operation: operation, count: request.files.count)
         defer { trace.record(.filesTrashed, outcome: succeeded ? .succeeded : .failed, operation: operation, count: request.files.count) }
-        guard !busy, !libraryMutationInProgress, pendingFileTrash?.id == request.id else { return false }
+        guard !libraryMutationInProgress, pendingFileTrash?.id == request.id else { return false }
         defer { if pendingFileTrash?.id == request.id { pendingFileTrash = nil } }
         let files = Set(request.files)
         guard files == filesForRecords(request.ids, in: request.collection), !files.isEmpty else {
             notice = "文件位置已变化，请重新选择。"; return false
         }
+        guard canConfirmFileTrash(request) else { return false }
         // Keep all recovery records durable before moving any file.
         persistWorkspace()
         guard stateURL == nil || (libraryWritable && mediaLibraryWritable && !libraryDirty && !mediaLibraryDirty && persistenceNotice == nil) else {
@@ -1627,6 +1672,12 @@ final class DownloadModel: ObservableObject {
                     titleHint: item.smartRequestID == nil ? nil : item.documentTitle) { event in sink.yield(event) }
                 sink.finish()
                 await listener.value
+                // An unrelated source can reuse a same-content file just before
+                // Trash runs. Do not publish a missing result as a success.
+                guard ([saved.url] + saved.additionalURLs).allSatisfy({ file in
+                    // URL resourceValues may still cache the pre-Trash state.
+                    (try? FileManager.default.attributesOfItem(atPath: file.path)[.type]) as? FileAttributeType == .typeRegular
+                }) else { throw DownloadError.storage("下载文件已不在原位置，请重试。") }
                 update(id) {
                     $0.namingSnapshot = snapshot.saving([saved.url] + saved.additionalURLs)
                     $0.metadata = saved.metadata
