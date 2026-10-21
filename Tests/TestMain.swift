@@ -118,13 +118,15 @@ struct CoreTests {
             if CommandLine.arguments.contains("--smart-live") {
                 try await smartResolverLiveTests(); return
             }
-            if CommandLine.arguments.contains("--smart-only") || !CommandLine.arguments.contains(where: { $0.hasSuffix("-only") || $0.hasSuffix("-live") }) {
+            if CommandLine.arguments.contains("--smart-only") || CommandLine.arguments.contains("--smart-core-only") || !CommandLine.arguments.contains(where: { $0.hasSuffix("-only") || $0.hasSuffix("-live") }) {
                 try await smartSettingsTests()
                 try await smartResolverTests()
                 try await smartInputTests()
-                try await smartInputUITests(snapshots: CommandLine.arguments.contains("--snapshots"))
+                if !CommandLine.arguments.contains("--smart-core-only") {
+                    try await smartInputUITests(snapshots: CommandLine.arguments.contains("--snapshots"))
+                }
             }
-            if CommandLine.arguments.contains("--smart-only") {
+            if CommandLine.arguments.contains("--smart-only") || CommandLine.arguments.contains("--smart-core-only") {
                 return
             }
             if CommandLine.arguments.contains("--trace-only") {

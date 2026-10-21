@@ -25,13 +25,17 @@ private actor SmartUIConnectionValidator: SmartCredentialValidating {
 
 private struct SmartUIResolver: SmartResolving {
     enum Mode { case review, pending, failure }
+    static let pendingQuery = "Attention Is All You Need PDF"
     let result: SmartResolution
     var mode = Mode.review
     func resolve(_ input: String, apiKey: String, thinking: SmartThinkingEffort,
                  progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution {
         if mode == .failure { throw SmartResolverError.unavailable }
         if mode == .pending {
-            progress(.searching)
+            progress(.searchingQuery("transformer original paper"))
+            progress(.readingSource("https://arxiv.org/abs/1706.03762?access=private-fixture"))
+            progress(.checkingSources(2))
+            progress(.searchingQuery(Self.pendingQuery))
             try await Task.sleep(nanoseconds: 30_000_000_000)
         }
         return result
@@ -164,10 +168,15 @@ private final class SmartUIPanel: NSPanel {
                 $0.placeholderString == L("DeepSeek API Key") && $0.window === surface.window }) else {
             throw TestFailure.failed("connection form has a visible enabled native secure API key field with its exact localized placeholder")
         }
+        field.window?.makeKeyAndOrderFront(nil)
         field.selectText(nil)
+        // Returning to a mounted settings tab establishes a new focus binding.
+        // Let that native focus event finish before simulating text input.
+        try await settle()
         guard let editor = field.currentEditor() as? NSTextView else {
             throw TestFailure.failed("connection secure field has its native editor")
         }
+        try expect(field.window?.firstResponder === editor, "native key entry targets the focused secure editor")
         editor.insertText(key, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
     }
     func returnKey(in view: NSView? = nil) async throws {
@@ -201,15 +210,26 @@ private final class SmartUIPanel: NSPanel {
         func normalized(_ value: String) -> String {
             String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
         }
-        guard let observation = request.results?.first(where: {
+        let observations = request.results ?? []
+        let exact = observations.first(where: {
             normalized($0.topCandidates(1).first?.string ?? "") == normalized(label)
-        }) else { throw TestFailure.failed("visible connection action: " + label) }
-        let box = observation.boundingBox
+        })?.boundingBox
+        // Vision may group a disclosure chevron or a neighboring button into
+        // the same text line. Click only the requested label's own bounds.
+        let labelBounds = try observations.compactMap { observation -> CGRect? in
+            guard let recognized = observation.topCandidates(1).first,
+                  let range = recognized.string.range(of: label) else { return nil }
+            return try recognized.boundingBox(for: range)?.boundingBox
+        }
+        guard let box = exact ?? (labelBounds.count == 1 ? labelBounds.first : nil) else {
+            let text = observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: " | ")
+            throw TestFailure.failed("visible action: \(label); actual: \(text)")
+        }
         let point = NSPoint(x: box.midX * view.bounds.width,
                             y: (view.isFlipped ? 1 - box.midY : box.midY) * view.bounds.height)
         targetWindow.makeKeyAndOrderFront(nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil),
+            targetWindow.sendEvent(NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil),
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: targetWindow.windowNumber, context: nil, eventNumber: 0,
                 clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!)
@@ -479,7 +499,7 @@ extension CoreTests {
                     if useQuick { quick.submit() } else { model.start() }
                     if stage == "progress" || stage == "error" {
                         try await waitForFixture {
-                            stage == "progress" ? state.progress == .searching : state.failed
+                            stage == "progress" ? state.progress == .searchingQuery(SmartUIResolver.pendingQuery) : state.failed
                         }
                     }
                     if stage == "postaccept" {
@@ -503,7 +523,7 @@ extension CoreTests {
                 let labels: [String]
                 switch stage {
                 case "idle": labels = [L("查找资源"), "Earlier saved paper"]
-                case "progress": labels = [L("正在查找资源…"), L("取消")]
+                case "progress": labels = [L("正在查找资源…"), SmartUIResolver.pendingQuery, L("检索步骤"), L("取消")]
                 case "error": labels = [L("未能完成查找"), L("重试"), original]
                 default: labels = ["Deep Residual", L("停止")]
                 }
@@ -522,22 +542,48 @@ extension CoreTests {
                                    "idle and recoverable errors retain the native 13-point request editor")
                     }
                 }
+                if stage == "progress" {
+                    try await surface.press(L("检索步骤"))
+                    if useQuick { surface.fitHeight(width: 380); try await surface.settle() }
+                    try surface.verify(name + "-activity", labels: ["transformer original paper", "arxiv.org", L("取消")],
+                        absentLabels: ["private-fixture"], snapshots: snapshots)
+                    if useQuick { try expect(surface.host.bounds.height <= 720, "expanded retrieval activity keeps Quick compact") }
+                    else { try surface.verifyVisibleQueueRow() }
+                }
                 surface.window.close()
                 state.cancel()
                 await model.cancelAndWait()
             }
         }
-        let pending = makeModel(.pending)
-        pending.input = "查找论文及附件"
-        pending.start()
-        try await waitForFixture { pending.smartInput.progress == .searching }
-        let progress = SmartUISurface(SmartInputStatusView(state: pending.smartInput, palette: pending.theme.palette(dark: false))
-            .padding(12), size: NSSize(width: 380, height: 90))
-        try await progress.settle()
-        try expect(pending.smartInput.resolving, "pending UI fixture remains cancellable")
-        try progress.verify("progress", labels: [L("正在查找资源…"), L("取消")], snapshots: snapshots)
-        pending.smartInput.cancel()
-        progress.window.close()
+        for language in [AppLanguage.chinese, .english] {
+            let pending = makeModel(.pending)
+            pending.language = language
+            pending.input = "查找论文及附件"
+            pending.start()
+            try await waitForFixture { pending.smartInput.progress == .searchingQuery(SmartUIResolver.pendingQuery) }
+            let progress = SmartUISurface(SmartInputStatusView(state: pending.smartInput,
+                palette: pending.theme.palette(dark: false), compact: true).padding(12)
+                    .background(ThemePalette.color(pending.theme.palette(dark: false).surface)),
+                size: NSSize(width: 380, height: 90))
+            progress.fitHeight(width: 380)
+            try await progress.settle()
+            try expect(pending.smartInput.resolving, "pending UI fixture remains cancellable")
+            try progress.verify("progress-" + language.rawValue,
+                labels: [L("正在查找资源…"), SmartUIResolver.pendingQuery, L("检索步骤"), L("取消")],
+                absentLabels: ["arxiv.org", "transformer original paper", "private-fixture"], snapshots: snapshots)
+            try await progress.press(L("检索步骤"))
+            progress.fitHeight(width: 380)
+            try await progress.settle()
+            try expect(progress.host.bounds.height <= 210, "expanded narrow activity has a bounded height")
+            try progress.verify("progress-expanded-" + language.rawValue,
+                labels: ["transformer original paper", "arxiv.org", L("官方资料"), L("取消")],
+                absentLabels: ["private-fixture"], snapshots: snapshots)
+            try await progress.press(L("取消"))
+            try expect(!pending.smartInput.resolving && pending.smartInput.activityHistory.isEmpty && pending.input == "查找论文及附件",
+                       "visible cancel clears session activity and preserves the request draft")
+            progress.window.close()
+        }
+        AppLocalization.shared.language = .chinese
 
         let failed = makeModel(.failure)
         failed.input = "查找论文"
@@ -721,9 +767,11 @@ extension CoreTests {
             try await configuration.settle()
             try await configuration.enterKey("sk-ui-cancel-before-save")
             try await configuration.settle()
+            try configuration.verify("connection-settings-before-\(leavesPage)", labels: [L("连接")], snapshots: snapshots)
             try await configuration.press(L("连接"))
             let calls = await pendingValidator.calls
-            try expect(calls == (leavesPage ? 2 : 1), "native connection starts validation")
+            try configuration.verify("connection-settings-after-\(leavesPage)", labels: [], snapshots: snapshots)
+            try expect(calls == (leavesPage ? 2 : 1), "native connection starts validation; leavesPage=\(leavesPage), calls=\(calls)")
             if leavesPage { configurationModel.preferencesPage = nil }
             else { configurationModel.settingsTab = "通用" }
             try await configuration.settle()

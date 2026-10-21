@@ -12,7 +12,7 @@ enum SmartThinkingEffort: String, CaseIterable, Sendable {
         }
     }
     var deadline: TimeInterval {
-        switch self { case .off: return 15; case .low: return 25; case .high: return 45; case .max: return 60 }
+        switch self { case .off: return 25; case .low: return 35; case .high: return 50; case .max: return 75 }
     }
     var maxOutputTokens: Int {
         switch self { case .off: return 1200; case .low: return 2400; case .high: return 4800; case .max: return 8000 }
@@ -89,14 +89,43 @@ struct SmartSubmission {
     let duplicates: Int
 }
 
-enum SmartProgress: Sendable {
+enum SmartProgress: Sendable, Equatable {
     case understanding, searching, reading, checking
+    case searchingQuery(String), readingSource(String), checkingSources(Int)
     var label: String {
         switch self {
         case .understanding: return "正在理解请求…"
-        case .searching: return "正在查找资源…"
-        case .reading: return "正在读取页面…"
+        case .searching, .searchingQuery: return "正在查找资源…"
+        case .reading, .readingSource: return "正在读取页面…"
+        case .checkingSources: return "正在读取官方资料…"
         case .checking: return "正在核对候选…"
+        }
+    }
+
+    var detail: String? {
+        switch self {
+        case .searchingQuery(let query): return query
+        case .readingSource(let source): return source
+        case .checkingSources(let count): return L("\(count) 篇论文")
+        default: return nil
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .searching, .searchingQuery: return "magnifyingglass"
+        case .reading, .readingSource: return "globe"
+        case .checkingSources: return "doc.text.magnifyingglass"
+        case .understanding, .checking: return "sparkle"
+        }
+    }
+
+    // Only tool actions belong in the visible activity history. Thinking and
+    // semantic decisions remain the agent's private work.
+    var isToolAction: Bool {
+        switch self {
+        case .searchingQuery, .readingSource, .checkingSources: return true
+        default: return false
         }
     }
 }
@@ -115,8 +144,11 @@ extension SmartResolving {
 
 enum SmartInput {
     static let targetLimit = 10
+    static let modelCallLimit = 5
+    static let readCallLimit = 4
+    static let candidateLimit = 90
     static let inputLimit = 8 * 1024
-    static let deadline: TimeInterval = 15
+    static let deadline = SmartThinkingEffort.off.deadline
     private static let attachedCommand = try! NSRegularExpression(
         pattern: #"[，。；！？：](?=(?:只要|只下载|只保存|只取|仅|请|下载|保存|跳过|已有|不要|帮我|提取|获取|音频|视频|把这个|把这些|但|并|还要))"#)
 

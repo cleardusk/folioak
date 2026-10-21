@@ -5,6 +5,7 @@ import Combine
 // acceptance; cancellation after that point belongs to the existing queue.
 @MainActor final class SmartDownloadState: ObservableObject {
     @Published private(set) var progress: SmartProgress?
+    @Published private(set) var activityHistory: [SmartProgress] = []
     @Published private(set) var resolution: SmartResolution?
     @Published var selections: [SmartSelection] = []
     @Published private(set) var message: String?
@@ -31,6 +32,7 @@ import Combine
     private var defaultFormat = MediaFormat.automatic
     private var onAccepted: ((Bool) -> Void)?
     private var subscriptions = Set<AnyCancellable>()
+    static let activityLimit = 12
 
     init(model: DownloadModel, quick: Bool = false, resolver: SmartResolving? = nil) {
         self.model = model; self.quick = quick
@@ -82,12 +84,12 @@ import Combine
                     let result = try await resolver.resolve(input, apiKey: key, thinking: thinking) { [weak self] phase in
                         Task { @MainActor [weak self] in
                             guard self?.sessionID == id, self?.resolving == true else { return }
-                            self?.progress = phase
+                            self?.receiveProgress(phase)
                         }
                     }
                     guard let self, self.sessionID == id, !Task.isCancelled,
                           self.model?.isTerminating == false, self.model?.smartSettings.enabled == true else { return }
-                    self.worker = nil; self.progress = nil
+                    self.worker = nil; self.progress = nil; self.activityHistory = []
                     self.resolution = result; self.selections = result.selections
                     // Discovery is reviewed even if the model asks to auto-submit.
                     let review = result.needsReview || !result.unresolved.isEmpty ||
@@ -98,7 +100,7 @@ import Combine
                     } else { self.acceptSelection() }
                 } catch {
                     guard let self, self.sessionID == id, !Task.isCancelled else { return }
-                    self.worker = nil; self.progress = nil
+                    self.worker = nil; self.progress = nil; self.activityHistory = []
                     if case SmartResolverError.unauthorized = error {
                         self.needsSetup = true; self.requiresNewKey = true
                         return
@@ -123,10 +125,35 @@ import Combine
         if input != original && (sessionID != nil || message != nil || !remainingRequirements.isEmpty) { cancel() }
     }
 
+    private func receiveProgress(_ phase: SmartProgress) {
+        let value: SmartProgress
+        switch phase {
+        case .searchingQuery(let query):
+            let text = query.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            value = .searchingQuery(String(text.prefix(160)))
+        case .readingSource(let source):
+            // Progress may receive a URL in the future. Keep access parameters
+            // and paths out of this compact, session-only presentation.
+            let parts = URLComponents(string: source.contains("://") ? source : "https://" + source)
+            value = .readingSource(String((parts?.host ?? L("网页")).lowercased().prefix(253)))
+        case .checkingSources(let count):
+            value = .checkingSources(min(SmartInput.candidateLimit, max(0, count)))
+        default: value = phase
+        }
+        let repeated = progress == value
+        progress = value
+        guard value.isToolAction, !repeated else { return }
+        activityHistory.append(value)
+        if activityHistory.count > Self.activityLimit {
+            activityHistory.removeFirst(activityHistory.count - Self.activityLimit)
+        }
+    }
+
     func cancel() {
         if let owner = setupConnectionOwner { model?.smartSettings.cancelPendingConnection(owner: owner) }
         sessionID = nil
         worker?.cancel(); worker = nil; progress = nil
+        activityHistory = []
         resolution = nil; selections = []; message = nil; remainingRequirements = []; failed = false; onAccepted = nil
         needsSetup = false; requiresNewKey = false; original = ""
     }

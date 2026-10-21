@@ -13,18 +13,10 @@ struct SmartInputStatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let progress = state.progress {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(L(progress.label)).font(.system(size: 12))
-                        .accessibilityIdentifier("smart-input-progress")
-                    Spacer(minLength: 4)
-                    Button(L("取消")) {
+                SmartRetrievalProgressView(state: state, progress: progress, palette: palette,
+                    compact: compact, onCancel: {
                         if let onEdit { onEdit() } else { state.cancel() }
-                    }
-                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(secondary)
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityIdentifier("smart-input-cancel")
-                }
+                    })
             } else {
                 if let message = state.message, !message.isEmpty {
                     HStack(alignment: .top, spacing: 8) {
@@ -219,6 +211,94 @@ private struct SmartResourceMark: View {
         .frame(width: 42, height: 56)
         .background(ThemePalette.color(palette.accent).opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
         .overlay(RoundedRectangle(cornerRadius: 5).stroke(ThemePalette.color(palette.accent).opacity(0.18), lineWidth: 1))
+    }
+}
+
+private struct SmartRetrievalProgressView: View {
+    @ObservedObject var state: SmartDownloadState
+    let progress: SmartProgress
+    let palette: ThemePalette
+    let compact: Bool
+    let onCancel: () -> Void
+    @WorkspaceViewState private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var secondary: Color { ThemePalette.color(palette.secondary) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                ProgressView().controlSize(.small).accessibilityHidden(true)
+                Text(L(progress.label)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    .accessibilityIdentifier("smart-input-progress")
+                Spacer(minLength: 4)
+                if !state.activityHistory.isEmpty {
+                    Button {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) { expanded.toggle() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(L("检索步骤"))
+                            Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                                .rotationEffect(.degrees(expanded ? 180 : 0))
+                        }.frame(minHeight: 28).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(secondary)
+                    .accessibilityIdentifier("smart-input-activity-toggle")
+                    .accessibilityValue(L(expanded ? "已展开" : "已折叠"))
+                }
+                Button(action: onCancel) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "stop.fill").font(.system(size: 7))
+                        Text(L("取消")).font(.system(size: 11))
+                    }.padding(.horizontal, 9).frame(height: 28)
+                        .background(secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                        .contentShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain).foregroundStyle(secondary)
+                .keyboardShortcut(.cancelAction)
+                .accessibilityIdentifier("smart-input-cancel")
+            }
+            if let detail = progress.detail, !detail.isEmpty {
+                Text(verbatim: detail).font(.system(size: 12)).foregroundStyle(secondary)
+                    .lineLimit(1).truncationMode(.middle).help(detail)
+                    .padding(.leading, 25).accessibilityIdentifier("smart-input-progress-detail")
+            }
+            if expanded {
+                ScrollViewReader { reader in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(Array(state.activityHistory.enumerated()), id: \.offset) { index, action in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: action.symbol).font(.system(size: 11))
+                                        .frame(width: 15, height: 16).accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(L(actionTitle(action))).font(.system(size: 11, weight: .medium))
+                                        if let detail = action.detail {
+                                            Text(verbatim: detail).font(.system(size: 11)).lineLimit(1)
+                                                .truncationMode(.middle).help(detail)
+                                        }
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                }.foregroundStyle(secondary).id(index)
+                            }
+                        }.padding(.vertical, 2).padding(.trailing, 4)
+                    }
+                    .frame(height: min(compact ? 104 : 120, CGFloat(state.activityHistory.count) * 42))
+                    .onChange(of: state.activityHistory) { _ in
+                        reader.scrollTo(state.activityHistory.count - 1, anchor: .bottom)
+                    }
+                }
+                .padding(.leading, 25).padding(.top, 2)
+                .accessibilityIdentifier("smart-input-activity-history")
+            }
+        }
+    }
+
+    private func actionTitle(_ action: SmartProgress) -> String {
+        switch action {
+        case .searchingQuery: return "搜索"
+        case .readingSource: return "读取页面"
+        case .checkingSources: return "官方资料"
+        default: return action.label
+        }
     }
 }
 

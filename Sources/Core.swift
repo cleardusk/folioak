@@ -151,11 +151,13 @@ final class AtomParser: NSObject, XMLParserDelegate {
         parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
         guard parser.parse() else { throw DownloadError.metadata("arXiv 元数据无法解析，请稍后重试。") }
+        var wrongVersion = false
         for entry in delegate.entries {
             guard let id = entry["id"], let reference = try? ArxivReference.parse(id),
                   reference.baseID == requested.baseID else { continue }
             if let wanted = requested.version, reference.version != wanted {
-                throw DownloadError.metadata("arXiv 返回的版本与请求版本不一致，已停止下载。")
+                wrongVersion = true
+                continue
             }
             guard reference.version != nil,
                   let title = entry["title"], !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -169,6 +171,7 @@ final class AtomParser: NSObject, XMLParserDelegate {
             return PaperMetadata(reference: reference, title: title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " "), year: year, month: month,
                                  authors: entry["authors"].map { $0.split(separator: "\n").map(String.init) })
         }
+        if wrongVersion { throw DownloadError.metadata("arXiv 返回的版本与请求版本不一致，已停止下载。") }
         throw DownloadError.metadata("arXiv 未返回这篇论文或指定版本的元数据。")
     }
 

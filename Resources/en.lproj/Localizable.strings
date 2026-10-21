@@ -919,4 +919,11 @@
 "低" = "Low";
 "高" = "High";
 "最高" = "Max";
+"检索步骤" = "Activity";
+"读取页面" = "Read page";
+"官方资料" = "Official metadata";
+"正在读取官方资料…" = "Reading official metadata…";
+"%@ 篇论文" = "%@ papers";
+"1 篇论文" = "1 paper";
+"网页" = "Web page";
 "默认关闭。更高强度可能增加等待时间和用量，仅影响新请求。" = "Off by default. Higher effort may take longer and use more tokens. Applies to new requests.";

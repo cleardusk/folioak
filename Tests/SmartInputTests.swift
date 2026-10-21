@@ -17,16 +17,19 @@ private struct AcceptedSmartCredential: SmartCredentialValidating {
 private actor DelayedSmartResolver: SmartResolving {
     private(set) var inputs: [String] = []
     private var pending: [Int: CheckedContinuation<SmartResolution, Never>] = [:]
+    private var progressCallbacks: [Int: @Sendable (SmartProgress) -> Void] = [:]
     func resolve(_ input: String, apiKey: String, thinking: SmartThinkingEffort,
                  progress: @escaping @Sendable (SmartProgress) -> Void) async throws -> SmartResolution {
         let index = inputs.count
         inputs.append(input)
+        progressCallbacks[index] = progress
         progress(.understanding)
         return await withCheckedContinuation { pending[index] = $0 }
     }
     func complete(_ index: Int, with result: SmartResolution) {
         pending.removeValue(forKey: index)?.resume(returning: result)
     }
+    func emit(_ index: Int, _ phase: SmartProgress) { progressCallbacks[index]?(phase) }
 }
 
 private actor SmartInputTransport: HTTPTransport {
@@ -113,6 +116,40 @@ extension CoreTests {
         try expect(await directResolver.inputs.isEmpty, "direct submission never calls the model")
         try expect(direct.successes == 1, "enabled intelligent mode preserves native direct downloads")
 
+        let activityResolver = DelayedSmartResolver()
+        let activity = DownloadModel(preferences: preferences, smartSettings: settings, smartResolver: activityResolver)
+        activity.smartInput.submit("寻找论文")
+        try await awaitSmart { await activityResolver.inputs.count == 1 }
+        await activityResolver.emit(0, .searchingQuery("Attention Is All You Need PDF"))
+        try await awaitSmart { activity.smartInput.activityHistory.count == 1 }
+        await activityResolver.emit(0, .searchingQuery("Attention Is All You Need PDF"))
+        await activityResolver.emit(0, .checking)
+        try await awaitSmart { activity.smartInput.progress == .checking }
+        try expect(activity.smartInput.activityHistory == [.searchingQuery("Attention Is All You Need PDF")],
+                   "only actual tool actions appear in activity; duplicate callbacks and model thinking add no invented steps")
+        await activityResolver.emit(0, .readingSource("https://arxiv.org/abs/1706.03762?token=private-fixture"))
+        try await awaitSmart { activity.smartInput.progress == .readingSource("arxiv.org") }
+        try expect(activity.smartInput.activityHistory.last?.detail == "arxiv.org",
+                   "source activity exposes only its host, never URL paths or access parameters")
+        for index in 0..<(SmartDownloadState.activityLimit + 3) {
+            await activityResolver.emit(0, .searchingQuery("query \(index)"))
+        }
+        try await awaitSmart {
+            activity.smartInput.activityHistory.last == .searchingQuery("query \(SmartDownloadState.activityLimit + 2)")
+        }
+        try expect(activity.smartInput.activityHistory.count == SmartDownloadState.activityLimit &&
+                   activity.smartInput.activityHistory.first == .searchingQuery("query 3"),
+                   "session activity stays bounded and retains the latest real actions")
+        await activityResolver.emit(0, .searchingQuery(String(repeating: "x", count: 500)))
+        try await awaitSmart { activity.smartInput.progress?.detail?.count == 160 }
+        await activityResolver.complete(0, with: proposal("activity.pdf", review: true))
+        try await awaitSmart { activity.smartInput.resolution != nil }
+        await activityResolver.emit(0, .searchingQuery("late-after-completion"))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try expect(activity.smartInput.progress == nil && activity.smartInput.activityHistory.isEmpty,
+                   "completion replaces activity with candidates and rejects late progress")
+        activity.smartInput.cancel()
+
         // Setup belongs to the submitted intent. It must neither contact a
         // model before consent nor replay a stale/main-window draft from Quick.
         for entry in ["main", "quick", "cancel", "edit", "disabled", "stale-key"] {
@@ -190,6 +227,8 @@ extension CoreTests {
             try await Task.sleep(nanoseconds: 10_000_000)
             try expect(await resolver.inputs.count == 1 && model.smartInput.resolving,
                        "repeated main submission during parsing cannot restart or duplicate the request")
+            await resolver.emit(0, .searchingQuery("active-query"))
+            try await awaitSmart { model.smartInput.activityHistory.count == 1 }
             switch boundary {
             case "cancel": model.smartInput.cancel()
             case "edit":
@@ -198,11 +237,14 @@ extension CoreTests {
             case "disable": settings.enabled = false
             default: model.beginTermination()
             }
+            await resolver.emit(0, .readingSource("late.example.org"))
             await resolver.complete(0, with: proposal("late.pdf"))
             try await Task.sleep(nanoseconds: 40_000_000)
             try expect(model.items.isEmpty && !model.busy && model.smartInput.resolution == nil,
                        "\(boundary) rejects a late resolver result before queue acceptance")
             try expect(await transport.requests.isEmpty, "\(boundary) prevents download side effects")
+            try expect(model.smartInput.activityHistory.isEmpty && model.smartInput.progress == nil,
+                       "\(boundary) clears activity and rejects late tool callbacks")
             model.smartInput.cancel()
         }
         settings.enabled = true
@@ -216,9 +258,13 @@ extension CoreTests {
         superseded.smartInput.cancel()
         superseded.smartInput.submit("找论文")
         try await awaitSmart { await supersededResolver.inputs.count == 2 }
+        await supersededResolver.emit(1, .searchingQuery("current-query"))
+        try await awaitSmart { superseded.smartInput.activityHistory.count == 1 }
+        await supersededResolver.emit(0, .searchingQuery("obsolete-query"))
         await supersededResolver.complete(0, with: proposal("obsolete.pdf", review: true))
         try await Task.sleep(nanoseconds: 25_000_000)
-        try expect(superseded.smartInput.resolving && superseded.smartInput.resolution == nil,
+        try expect(superseded.smartInput.resolving && superseded.smartInput.resolution == nil &&
+                   superseded.smartInput.activityHistory == [.searchingQuery("current-query")],
                    "old session cannot publish candidates into a new session")
         await supersededResolver.complete(1, with: proposal("current.pdf", review: true, unresolved: ["未找到补充材料"]))
         try await awaitSmart { superseded.smartInput.resolution != nil }
