@@ -319,14 +319,22 @@ struct QuickLinkEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? Editor else { return }
+        if editor.hasMarkedText(), text != context.coordinator.syncedText {
+            context.coordinator.replacingDraft = true
+            defer { context.coordinator.replacingDraft = false }
+            editor.unmarkText()
+            editor.inputContext?.discardMarkedText()
+        }
         editor.submit = submit; editor.close = close; editor.captureTrace = captureTrace
         editor.captureInput = captureInput
         editor.rejected = rejected
         editor.isEditable = isEnabled; editor.isSelectable = isEnabled
         if !isEnabled, editor.window?.firstResponder === editor { editor.window?.makeFirstResponder(nil) }
-        editor.textColor = .labelColor; editor.insertionPointColor = .labelColor
+        if !editor.hasMarkedText(), editor.textColor != .labelColor { editor.textColor = .labelColor }
+        editor.insertionPointColor = .labelColor
         editor.setAccessibilityLabel(L("下载链接"))
-        if editor.string != text { editor.string = text; editor.undoManager?.removeAllActions() }
+        if !editor.hasMarkedText(), editor.string != text { editor.string = text; editor.undoManager?.removeAllActions() }
+        if !editor.hasMarkedText() { context.coordinator.syncedText = text }
         if isEnabled && editor.focusRequest != focusRequest {
             editor.focusRequest = focusRequest
             DispatchQueue.main.async { [weak editor] in
@@ -337,9 +345,12 @@ struct QuickLinkEditor: NSViewRepresentable {
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: QuickLinkEditor
-        init(_ parent: QuickLinkEditor) { self.parent = parent }
+        var syncedText: String
+        var replacingDraft = false
+        init(_ parent: QuickLinkEditor) { self.parent = parent; syncedText = parent.text }
         func textDidChange(_ notification: Notification) {
-            if let editor = notification.object as? NSTextView { parent.text = editor.string }
+            guard !replacingDraft else { return }
+            if let editor = notification.object as? NSTextView { parent.text = editor.string; syncedText = parent.text }
         }
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
             guard let replacementString else { return true }

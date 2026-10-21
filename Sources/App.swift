@@ -1819,7 +1819,10 @@ final class LinkTextView: NSTextView {
     var captureFailure: ((String) -> Void)?
 
     func styleReferences(textColor: NSColor, accentColor: NSColor, underlineRecognized: Bool) {
-        guard styledInput != string || styledTextColor != textColor || styledAccentColor != accentColor || styledUnderline != underlineRecognized,
+        // The input method owns its marked range until it commits or cancels.
+        // Reformatting that storage can end composition and relocate the caret.
+        guard !hasMarkedText(),
+              styledInput != string || styledTextColor != textColor || styledAccentColor != accentColor || styledUnderline != underlineRecognized,
               let storage = textStorage else { return }
         styledInput = string
         styledTextColor = textColor
@@ -1959,21 +1962,32 @@ struct LinkInput: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? LinkTextView else { return }
+        if editor.hasMarkedText(), model.input != context.coordinator.syncedText {
+            // An explicit clear/replacement wins over the in-progress edit.
+            // unmarkText also sends textDidChange for the abandoned draft.
+            context.coordinator.replacingDraft = true
+            defer { context.coordinator.replacingDraft = false }
+            editor.unmarkText()
+            editor.inputContext?.discardMarkedText()
+        }
         editor.naturalLanguageInput = true
         let inputFont = NSFont.systemFont(ofSize: 13)
-        if editor.font != inputFont { editor.font = inputFont }
+        if !editor.hasMarkedText(), editor.font != inputFont { editor.font = inputFont }
         editor.setAccessibilityLabel(L("下载请求"))
         editor.needsDisplay = true
         editor.isEditable = !model.busy
         let textColor = ThemePalette.nativeColor(palette.text)
         let accentColor = ThemePalette.nativeColor(palette.accent)
         let placeholderColor = ThemePalette.nativeColor(palette.secondary).blended(withFraction: scheme == .dark ? 0.34 : 0.12, of: ThemePalette.nativeColor(palette.surface)) ?? ThemePalette.nativeColor(palette.secondary)
-        if editor.string != model.input {
+        // Marked text is intentionally ahead of the committed model draft.
+        // An unrelated SwiftUI refresh must not replace that native edit.
+        if !editor.hasMarkedText(), editor.string != model.input {
             editor.string = model.input
             editor.undoManager?.removeAllActions()
             editor.sizeToFit()
             editor.needsDisplay = true
         }
+        if !editor.hasMarkedText() { context.coordinator.syncedText = model.input }
         editor.updateColors(text: textColor, accent: accentColor, placeholder: placeholderColor, underline: model.theme == .graphite,
                             animated: !reduceMotion && editor.window?.isVisible == true)
         let selectToken = context.coordinator.selectionRequest != model.editRequest
@@ -1997,7 +2011,11 @@ struct LinkInput: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: LinkInput
         var selectionRequest: UUID
-        init(_ parent: LinkInput) { self.parent = parent; selectionRequest = parent.model.editRequest }
+        var syncedText: String
+        var replacingDraft = false
+        init(_ parent: LinkInput) {
+            self.parent = parent; selectionRequest = parent.model.editRequest; syncedText = parent.model.input
+        }
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard let replacementString else { return true }
             guard replacementString.utf8.count <= ResourceLimits.inputBytes else {
@@ -2012,8 +2030,9 @@ struct LinkInput: NSViewRepresentable {
             return true
         }
         func textDidChange(_ notification: Notification) {
-            guard let editor = notification.object as? LinkTextView else { return }
+            guard !replacingDraft, let editor = notification.object as? LinkTextView else { return }
             parent.model.input = editor.string
+            syncedText = parent.model.input
             if editor.string != parent.model.input {
                 editor.string = parent.model.input
                 editor.undoManager?.removeAllActions()

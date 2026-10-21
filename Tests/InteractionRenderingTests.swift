@@ -327,6 +327,132 @@ extension CoreTests {
         print("PASS menu chevron: native tracking, continuous shape reversal, reduced motion and menu isolation")
     }
 
+    @MainActor static func inputEditingTests() async throws {
+        let suite = "folioak-input-editing-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        preferences.set(false, forKey: "updates.automatic")
+        preferences.set(false, forKey: "showsMenuBarIcon")
+        let model = DownloadModel(preferences: preferences)
+        let prefix = "下载2026 年 ", suffix = "站播放量最高的视频"
+        model.input = prefix + suffix
+        let host = InteractionTestHost(rootView: DownloaderView(model: model))
+        let window = SelectionTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 600),
+                                         styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        func settle() async throws {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            window.contentView?.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        }
+        func input(_ view: NSView) -> LinkTextView? {
+            (view as? LinkTextView) ?? view.subviews.lazy.compactMap(input).first
+        }
+        try await settle()
+        guard let editor = input(host) else { throw TestFailure.failed("mounted native request editor") }
+        window.makeFirstResponder(editor)
+        try await settle()
+        let insertion = (prefix as NSString).length
+        editor.setSelectedRange(NSRange(location: insertion, length: 0))
+        var inserted = ""
+        for character in "YouTube" {
+            editor.insertText(String(character), replacementRange: editor.selectedRange())
+            inserted.append(character)
+            try await settle()
+            try expect(editor.string == prefix + inserted + suffix && model.input == editor.string,
+                       "middle typing preserves the suffix after \(inserted)")
+            try expect(editor.selectedRange() == NSRange(location: insertion + inserted.utf16.count, length: 0),
+                       "middle typing keeps the caret after \(inserted), got \(editor.selectedRange())")
+        }
+
+        model.input = prefix + suffix
+        try await settle()
+        editor.setSelectedRange(NSRange(location: insertion, length: 0))
+        let currentSelection = NSRange(location: NSNotFound, length: 0)
+        for composing in ["Y", "You", "YouTube"] {
+            editor.setMarkedText(composing, selectedRange: NSRange(location: composing.utf16.count, length: 0),
+                                 replacementRange: currentSelection)
+            let marked = editor.markedRange(), selection = editor.selectedRange()
+            if composing == "You" { model.theme = .graphite }
+            model.objectWillChange.send()
+            try await settle()
+            try expect(editor.hasMarkedText() && editor.markedRange() == marked,
+                       "redraw preserves IME marked text \(composing): \(editor.markedRange()) vs \(marked)")
+            try expect(editor.selectedRange() == selection && editor.string == prefix + composing + suffix,
+                       "redraw preserves the middle IME caret and surrounding text")
+        }
+        editor.insertText("YouTube", replacementRange: currentSelection)
+        try await settle()
+        try expect(!editor.hasMarkedText() && editor.string == prefix + "YouTube" + suffix && model.input == editor.string &&
+                   editor.selectedRange() == NSRange(location: insertion + 7, length: 0),
+                   "IME commit inserts YouTube in place without jumping to the end")
+
+        model.input = "📚 下载2026 年 站播放量最高的视频"
+        try await settle()
+        let chinesePosition = ("📚 下载2026 年 " as NSString).length
+        editor.setSelectedRange(NSRange(location: chinesePosition, length: 0))
+        editor.setMarkedText("you", selectedRange: NSRange(location: 3, length: 0), replacementRange: currentSelection)
+        try await settle()
+        editor.setMarkedText("油管", selectedRange: NSRange(location: 2, length: 0), replacementRange: currentSelection)
+        try await settle()
+        editor.insertText("油管", replacementRange: currentSelection)
+        try await settle()
+        try expect(editor.string == "📚 下载2026 年 油管站播放量最高的视频" && model.input == editor.string &&
+                   editor.selectedRange() == NSRange(location: chinesePosition + 2, length: 0),
+                   "Chinese composition after a UTF-16 surrogate pair keeps the insertion position")
+        editor.breakUndoCoalescing()
+        try expect(editor.undoManager?.canUndo == true, "committed composition retains native undo")
+        editor.undoManager?.undo()
+        try await settle()
+        try expect(editor.string == "📚 下载2026 年 站播放量最高的视频" && model.input == editor.string,
+                   "undo removes the committed composition without losing the surrounding draft")
+        editor.undoManager?.redo()
+        try await settle()
+        try expect(editor.string == "📚 下载2026 年 油管站播放量最高的视频" && model.input == editor.string,
+                   "redo restores the committed composition in place")
+        editor.setMarkedText("next", selectedRange: NSRange(location: 4, length: 0), replacementRange: currentSelection)
+        model.input = "新的草稿"
+        try await settle()
+        try expect(!editor.hasMarkedText() && editor.string == "新的草稿" && model.input == editor.string,
+                   "explicit main draft replacement ends composition and takes precedence: editor=\(editor.string), model=\(model.input), marked=\(editor.markedRange())")
+        editor.insertText("!", replacementRange: editor.selectedRange())
+        try await settle()
+        try expect(model.input == "新的草稿!", "typing after external replacement cannot restore the old composition")
+
+        let quick = QuickDownloadState(model: model)
+        quick.draft = prefix + suffix
+        let quickHost = InteractionTestHost(rootView: QuickDownloadView(state: quick, model: model,
+            openWindow: {}, openSettings: {}, quit: {}, close: {}))
+        window.contentView = quickHost
+        window.setContentSize(NSSize(width: 380, height: 400))
+        try await settle()
+        func quickInput(_ view: NSView) -> QuickLinkEditor.Editor? {
+            (view as? QuickLinkEditor.Editor) ?? view.subviews.lazy.compactMap(quickInput).first
+        }
+        guard let quickEditor = quickInput(quickHost) else { throw TestFailure.failed("mounted menu-bar request editor") }
+        window.makeFirstResponder(quickEditor)
+        try await settle()
+        quickEditor.setSelectedRange(NSRange(location: insertion, length: 0))
+        quickEditor.setMarkedText("YouTube", selectedRange: NSRange(location: 7, length: 0), replacementRange: currentSelection)
+        let marked = quickEditor.markedRange(), selection = quickEditor.selectedRange()
+        quick.objectWillChange.send()
+        try await settle()
+        try expect(quickEditor.hasMarkedText() && quickEditor.markedRange() == marked && quickEditor.selectedRange() == selection &&
+                   quickEditor.string == prefix + "YouTube" + suffix,
+                   "menu-bar redraw preserves native marked text and the middle caret")
+        quickEditor.insertText("YouTube", replacementRange: currentSelection)
+        try await settle()
+        try expect(quick.draft == prefix + "YouTube" + suffix && quickEditor.selectedRange() == NSRange(location: insertion + 7, length: 0),
+                   "menu-bar IME commit synchronizes the draft without relocating the caret")
+        quickEditor.setMarkedText("next", selectedRange: NSRange(location: 4, length: 0), replacementRange: currentSelection)
+        quick.draft = ""
+        try await settle()
+        try expect(!quickEditor.hasMarkedText() && quickEditor.string.isEmpty && quickEditor.undoManager?.canUndo == false,
+                   "explicit menu-bar clear ends composition and resets text and undo")
+        print("PASS native request editing: middle typing, English/Chinese IME, redraws, theme changes, UTF-16, undo/redo and menu-bar input")
+    }
+
     @MainActor static func inputFocusRaceTests() async throws {
         let suite = "arxiv-input-focus-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!

@@ -118,6 +118,14 @@ struct CoreTests {
             if CommandLine.arguments.contains("--smart-live") {
                 try await smartResolverLiveTests(); return
             }
+            if CommandLine.arguments.contains("--input-only") {
+                try await inputEditingTests()
+                try inputLayoutTests()
+                try await inputFocusRaceTests()
+                try await inputColorTransitionTests()
+                try await inputScrollGutterTests()
+                return
+            }
             if CommandLine.arguments.contains("--smart-only") || CommandLine.arguments.contains("--smart-core-only") || !CommandLine.arguments.contains(where: { $0.hasSuffix("-only") || $0.hasSuffix("-live") }) {
                 try await smartSettingsTests()
                 try await smartResolverTests()
@@ -253,6 +261,7 @@ struct CoreTests {
                 try sidebarMotionTests()
                 try themeTests()
                 try inputLayoutTests()
+                try await inputEditingTests()
                 try await inputFocusRaceTests()
                 try windowChromeTests()
                 try filterRenderingTests()
@@ -346,6 +355,7 @@ struct CoreTests {
             try sidebarMotionTests()
             try themeTests()
             try inputLayoutTests()
+            try await inputEditingTests()
             try await inputFocusRaceTests()
             try windowChromeTests()
             try filterRenderingTests()
