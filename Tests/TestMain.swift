@@ -232,6 +232,26 @@ struct CoreTests {
                 try await quickDownloadUITests()
                 return
             }
+            if CommandLine.arguments.contains("--lifecycle-only") {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-lifecycle-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let pdf = root.appendingPathComponent("fixture.pdf")
+                try createPDF(at: pdf)
+                try await huggingFaceTests(root: root, pdf: pdf)
+                try await githubPDFTests(root: root, pdf: pdf)
+                try await queueTests(root: root, pdf: pdf)
+                try await completedInputTests(root: root, pdf: pdf)
+                try await restoreVersionTests(root: root, pdf: pdf)
+                try await workspaceTests(root: root, pdf: pdf)
+                try await importTerminationTests(root: root, pdf: pdf)
+                try await quickDownloadTests()
+                try await backgroundPersistenceTests(root: root, pdf: pdf)
+                try await messagePersistenceTests(root: root, pdf: pdf)
+                try await clearDownloadRecordsTests(root: root, pdf: pdf)
+                print("PASS focused lifecycle: source routing, queue/retry, drafts, import termination, recovery and persistence")
+                return
+            }
             if CommandLine.arguments.contains("--library-management-only") {
                 let root = FileManager.default.temporaryDirectory.appendingPathComponent("folioak-library-management-" + UUID().uuidString)
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -688,23 +708,44 @@ struct CoreTests {
         model.input = "kept"
         model.input = String(repeating: "x", count: ResourceLimits.inputBytes + 1)
         try expect(model.input == "kept" && model.notice != nil, "oversized input rejected")
-        model.input = Array(repeating: "bad", count: ResourceLimits.batchCount + 1).joined(separator: "\n")
+        let oversizedIntent = Array(repeating: "bad", count: ResourceLimits.batchCount + 1).joined(separator: "\n")
+        try rejects({ _ = try BatchInput(oversizedIntent) }, "raw batch parser enforces its token limit")
+        let intentModel = DownloadModel(engine: DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0), preferences: preferences)
+        intentModel.input = oversizedIntent
+        intentModel.start()
+        try expect(intentModel.items.isEmpty && !intentModel.busy && intentModel.input == oversizedIntent && intentModel.smartInput.needsSetup,
+                   "unrecognized text remains a complete smart request instead of becoming invalid download rows")
+        let mixed = "2501.12345\nhttps://arxiv.org/pdf/2501.12345\nbad-link\n2501.12345v2"
+        let parsed = try BatchInput(mixed)
+        try expect(parsed.entries.count == 3 && parsed.duplicates == 1 && parsed.entries.filter { $0.source == nil }.count == 1,
+                   "raw batch parsing retains invalid entries and normalizes equivalent links")
+        intentModel.input = mixed
+        intentModel.start()
+        try expect(intentModel.input == mixed && intentModel.items.isEmpty && !intentModel.busy && intentModel.smartInput.needsSetup,
+                   "mixed requests preserve every word and require smart setup before downloading")
+        let intentCalls = await (transport.metadataCalls, transport.pdfCalls)
+        try expect(intentCalls.0 == 0 && intentCalls.1 == 0,
+                   "mixed and unrecognized requests never partially download their embedded links")
+        model.input = Array(repeating: "2501.12345", count: ResourceLimits.batchCount + 1).joined(separator: "\n")
+        model.notice = nil
         model.start()
-        try expect(model.items.isEmpty && !model.busy && model.notice != nil, "oversized batch rejected without rows")
-        model.input = "2501.12345\nhttps://arxiv.org/pdf/2501.12345\nbad-link\n2501.12345v2"
+        try expect(model.items.isEmpty && !model.busy && model.notice != nil && !model.smartInput.needsSetup &&
+                   DownloadSource.tokens(in: model.input).count == ResourceLimits.batchCount + 1,
+                   "oversized direct batch is rejected without rows and preserves the complete draft")
+        model.input = "2501.12345\nhttps://arxiv.org/pdf/2501.12345\n2501.12345v2"
         model.start()
-        try expect(model.items.count == 3 && model.duplicateCount == 1, "queue duplicate normalization")
+        try expect(model.items.count == 2 && model.duplicateCount == 1, "queue duplicate normalization")
         try expect(model.busy, "queue running")
         model.start()
-        try expect(model.items.count == 3, "double start changed active queue")
+        try expect(model.items.count == 2, "double start changed active queue")
         try await waitForQueue(model)
-        try expect(model.successes == 1 && model.failures == 2 && model.canRetry, "permanent failure prevented later success")
-        try expect(ArxivReference.tokens(in: model.input) == ["2501.12345", "https://arxiv.org/pdf/2501.12345", "bad-link"], "failed and invalid inputs retained; only saved version removed")
+        try expect(model.successes == 1 && model.failures == 1 && model.canRetry, "permanent failure prevented later success")
+        try expect(ArxivReference.tokens(in: model.input) == ["2501.12345", "https://arxiv.org/pdf/2501.12345"], "failed inputs retained; only saved version removed")
         model.retry()
         try await waitForQueue(model)
-        try expect(model.successes == 2 && model.failures == 1, "retry did not preserve successful or invalid items")
-        try expect(model.input == "bad-link", "successful retry clears all equivalent input links")
-        try expect(model.items[0].savedURL == model.items[2].savedURL, "queue duplicate file reused")
+        try expect(model.successes == 2 && model.failures == 0, "retry preserves successful items and recovers the failure")
+        try expect(model.input.isEmpty, "successful retry clears all equivalent input links")
+        try expect(model.items[0].savedURL == model.items[1].savedURL, "queue duplicate file reused")
         try expect(preferences.string(forKey: "downloadRootDirectory") == output.path, "directory preference")
         model.naming = .identifierTitle
         model.appearance = .dark
@@ -864,16 +905,16 @@ struct CoreTests {
         let transport = MockTransport(sourcePDF: pdf, delay: 150_000_000)
         let model = DownloadModel(engine: DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0), preferences: preferences)
         model.directory = output
-        model.input = "https://arxiv.org/abs/2501.12345; https://arxiv.org/html/2501.12345\n2501.12345v2，bad-link"
+        model.input = "https://arxiv.org/abs/2501.12345; https://arxiv.org/html/2501.12345\n2501.12345v2"
         model.start()
         let deadline = ContinuousClock().now.advanced(by: .seconds(3))
         while model.successes == 0 {
             if ContinuousClock().now > deadline { throw TestFailure.failed("first completed input timed out") }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        try expect(model.busy && ArxivReference.tokens(in: model.input) == ["2501.12345v2", "bad-link"], "clear per paper while running; preserve distinct requested versions")
+        try expect(model.busy && ArxivReference.tokens(in: model.input) == ["2501.12345v2"], "clear per paper while running; preserve distinct requested versions")
         try await waitForQueue(model)
-        try expect(model.input == "bad-link" && model.successes == 2 && model.failures == 1, "retain result rows and invalid input")
+        try expect(model.input.isEmpty && model.successes == 2 && model.failures == 0, "successful downloads clear the submitted draft and retain result rows")
         try expect(model.items[1].state == .existing, "validated existing file also clears input")
 
         let corruptFolder = root.appendingPathComponent("completed-input-corrupt", isDirectory: true)
@@ -986,7 +1027,7 @@ struct CoreTests {
             return root.subviews.lazy.compactMap { findEditor($0) }.first
         }
         settle()
-        guard var editor = findEditor(view), let layout = editor.layoutManager, let container = editor.textContainer else { throw TestFailure.failed("native input text layout missing") }
+        guard let editor = findEditor(view), let layout = editor.layoutManager, let container = editor.textContainer else { throw TestFailure.failed("native input text layout missing") }
         try expect(editor.frame.width > 500 && editor.frame.height >= (editor.enclosingScrollView?.contentSize.height ?? 62), "input document must fill scroll area")
         let placeholder = editor.placeholderFirstGlyphOrigin
         model.input = LinkTextView.example
@@ -1012,12 +1053,21 @@ struct CoreTests {
         try expect(editor.frame.height == WorkspaceMetrics.inputHeight, "clearing input restores document height")
         model.busy = true
         settle()
-        try expect(findEditor(view) == nil, "busy input is replaced by the compact download progress row")
+        try expect(findEditor(view) === editor && editor.isEditable,
+                   "busy downloads retain the same editable native draft")
+        window.makeFirstResponder(editor)
+        editor.setMarkedText("中文", selectedRange: NSRange(location: 1, length: 0),
+                             replacementRange: NSRange(location: NSNotFound, length: 0))
+        let markedRange = editor.markedRange(), markedSelection = editor.selectedRange()
         model.busy = false
         settle()
-        guard let restoredEditor = findEditor(view) else { throw TestFailure.failed("idle input editor is restored") }
-        editor = restoredEditor
-        try expect(editor.isEditable && editor.allowsUndo && !editor.isAutomaticDashSubstitutionEnabled, "input restores editing and preserves URL punctuation")
+        try expect(findEditor(view) === editor && editor.hasMarkedText() && editor.markedRange() == markedRange &&
+                   editor.selectedRange() == markedSelection,
+                   "queue completion preserves native composition and its middle caret")
+        editor.unmarkText()
+        model.input = ""; settle()
+        try expect(editor.isEditable && editor.allowsUndo && !editor.isAutomaticDashSubstitutionEnabled,
+                   "input remains editable and preserves URL punctuation")
         window.makeFirstResponder(editor)
         editor.insertText("2501.12345v2", replacementRange: NSRange(location: 0, length: 0))
         settle()
@@ -1025,13 +1075,12 @@ struct CoreTests {
         model.busy = true
         model.input = ""
         settle()
-        try expect(findEditor(view) == nil && model.input.isEmpty, "automatic cleanup clears the request while the busy editor is unmounted")
+        try expect(findEditor(view) === editor && editor.isEditable && editor.string.isEmpty && model.input.isEmpty,
+                   "automatic cleanup synchronizes the mounted editable input while busy")
         model.busy = false
         settle()
-        guard let clearedEditor = findEditor(view) else { throw TestFailure.failed("input editor returns after automatic cleanup") }
-        editor = clearedEditor
-        try expect(editor.isEditable && editor.allowsUndo && editor.string.isEmpty && editor.undoManager?.canUndo == false,
-                   "the restored empty input discards undo actions for the completed request")
+        try expect(findEditor(view) === editor && editor.isEditable && editor.allowsUndo && editor.string.isEmpty && editor.undoManager?.canUndo == false,
+                   "the same empty input discards undo actions for the completed request")
         model.input = "https://arxiv.org/html/2501.12345v2\n2501.12345\nhttps://example.com/paper\nbad-link"
         settle()
         for theme in AppTheme.allCases {

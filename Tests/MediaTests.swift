@@ -457,7 +457,8 @@ extension CoreTests {
         model.directory = folder
         try expect(!FileManager.default.fileExists(atPath: folder.path), "choosing root does not eagerly create folders")
         model.input = "bad-link"; model.start()
-        try expect(!FileManager.default.fileExists(atPath: folder.path), "invalid input creates no root")
+        try expect(!FileManager.default.fileExists(atPath: folder.path) && model.smartInput.needsSetup &&
+                   model.items.isEmpty && model.input == "bad-link", "unrecognized input creates no root or partial queue and retains its draft for intelligent setup")
         model.input = "2501.12345v2\nhttps://example.com/photo.png"
         model.start(); model.directory = next
         try await waitForQueue(model)
@@ -687,7 +688,12 @@ extension CoreTests {
         let restored = DownloadModel(engine: engine, preferences: preferences, stateURL: state)
         try expect(restored.persistenceNotice == nil && restored.items.first?.id == legacy.id && restored.items.first?.directURL?.host == "raw.githubusercontent.com", "old GitHub media records normalize without losing their identity")
         restored.retry(legacy.id); try await waitForQueue(restored)
-        try expect(restored.items.first?.state == .existing && restored.input.isEmpty && FixtureProtocol.count("/Org/Repo/blob/main/photo.png") == 0, "old GitHub media retry keeps the raw route and avoids duplicate saved files")
+        try expect(restored.items.first?.state == .existing && restored.items.first?.savedURL != nil &&
+                   restored.items.first?.savedURL == model.items.first?.savedURL &&
+                   restored.items.first?.directURL?.host == "raw.githubusercontent.com" &&
+                   FixtureProtocol.count("/Org/Repo/blob/main/photo.png") == 0,
+                   "old GitHub media retry keeps the raw route and reuses the original saved file")
+        try expect(restored.input == link, "legacy media retry preserves the exact restored draft without resubmitting it")
         print("PASS GitHub files: user WebP case, all supported types, encoded refs, safety, deduplication, shared UI/CLI raw routing and legacy retry")
     }
 }

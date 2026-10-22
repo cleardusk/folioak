@@ -278,7 +278,12 @@ extension CoreTests {
         let restored = DownloadModel(engine: engine, preferences: prefs, stateURL: state)
         try expect(restored.persistenceNotice == nil && restored.items.first?.id == legacy.id && restored.history.first?.directURL?.absoluteString == raw && restored.logs.first?.id == log.id, "old GitHub sources migrate without losing queue, history or logs")
         restored.retry(legacy.id); try await waitForQueue(restored)
-        try expect(restored.items[0].state == .existing && restored.input.isEmpty && FixtureProtocol.count("/openai/math/blob/main/overview.pdf") == 0, "legacy GitHub retry uses raw PDF cache")
+        try expect(restored.items[0].state == .existing && restored.items[0].savedURL != nil &&
+                   restored.items[0].savedURL == model.items[0].savedURL &&
+                   restored.items[0].directURL?.absoluteString == raw &&
+                   FixtureProtocol.count("/openai/math/blob/main/overview.pdf") == 0,
+                   "legacy GitHub retry uses the raw PDF cache and original saved file")
+        try expect(restored.input == shared, "legacy GitHub retry preserves the exact restored draft without resubmitting it")
         print("PASS GitHub PDF: encoded paths, strict host matching, shared deduplication, UI/CLI raw routing, cache reuse and legacy retry")
     }
 
@@ -316,11 +321,21 @@ extension CoreTests {
         let transport = MockTransport(sourcePDF: pdf, latestVersion: 1)
         let generic = MockTransport(sourcePDF: pdf, pdf: [.failure(.invalidPDF)])
         let engine = DownloadEngine(transport: transport, pdfTransport: generic, requestInterval: 0, retryDelay: 0)
+        let mixed = DownloadModel(engine: engine, preferences: prefs)
+        let mixedDraft = shared + "\n2608.15763\nbad-link"
+        mixed.input = mixedDraft
+        mixed.start()
+        try expect(mixed.smartInput.needsSetup && mixed.items.isEmpty && !mixed.busy,
+                   "HF links mixed with unrecognized text use the intelligent request setup instead of partial submission")
+        try expect(mixed.input == mixedDraft, "intelligent setup preserves the exact mixed HF request")
+
         let model = DownloadModel(engine: engine, preferences: prefs)
-        model.input = shared + "\n2608.15763\nbad-link"
+        model.input = shared + "\n2608.15763"
         model.start()
         try await waitForQueue(model)
-        try expect(model.successes == 1 && model.duplicateCount == 1 && model.input == "bad-link", "UI downloads HF and clears equivalent completed inputs")
+        try expect(model.successes == 1, "direct HF submission downloads successfully")
+        try expect(model.duplicateCount == 1, "direct HF submission deduplicates equivalent paper links")
+        try expect(model.input.isEmpty, "successful HF submission clears all equivalent completed inputs")
         try expect(model.items[0].metadata?.reference.identifier == "2608.15763v1" && model.items[0].directURL == nil, "HF UI task retains arxiv metadata")
         try expect(await transport.pdfURLs == [URL(string: "https://arxiv.org/pdf/2608.15763v1")!], "HF download requests the arxiv PDF directly")
         try expect(await generic.pdfCalls == 0, "HF page is never fetched as a generic PDF")
@@ -335,7 +350,10 @@ extension CoreTests {
         try expect(restored.items[1].directURL == other.directURL, "unrecognized older HF pages remain readable")
         restored.retry(legacy.id)
         try await waitForQueue(restored)
-        try expect(restored.items[0].state == .existing && restored.input.isEmpty, "old HF retry reuses the trusted arxiv PDF and clears its input")
+        try expect(restored.items[0].state == .existing && restored.items[0].savedURL != nil &&
+                   restored.items[0].savedURL == model.items[0].savedURL,
+                   "old HF retry reuses the trusted arxiv PDF and original saved file")
+        try expect(restored.input == link, "legacy HF retry preserves the exact restored draft without resubmitting it")
         let calls = await (transport.pdfCalls, generic.pdfCalls)
         try expect(calls == (1, 0), "old HF retry does not duplicate the PDF transfer")
         print("PASS HF papers: canonicalization, aliases, shared deduplication, UI arxiv routing, input clearing and legacy retry")

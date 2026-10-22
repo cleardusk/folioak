@@ -7,7 +7,8 @@ extension CoreTests {
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let state = root.appendingPathComponent("clear-records/workspace.json")
-        let model = DownloadModel(preferences: preferences, stateURL: state)
+        let model = DownloadModel(engine: DownloadEngine(transport: MockTransport(sourcePDF: pdf), requestInterval: 0, retryDelay: 0),
+                                  preferences: preferences, stateURL: state)
         let paper = DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"),
                                  state: .saved, savedURL: pdf, pages: 1, documentTitle: "Keep this paper")
         let mediaFile = root.appendingPathComponent("keep-this-media.m4a")
@@ -56,8 +57,12 @@ extension CoreTests {
         model.clearDownloadRecords()
         try expect(model.batchID == clearedBatch, "clearing an empty list is a no-op")
         model.input = "new-invalid-input"; model.start()
+        try expect(model.smartInput.needsSetup && model.downloads.isEmpty && model.input == "new-invalid-input",
+                   "unrecognized input preserves its draft without resurrecting cleared records")
+        model.directory = root.appendingPathComponent("after-clear-downloads")
+        model.input = "2501.12345v2"; model.start()
         try await waitForQueue(model)
-        try expect(model.downloads.count == 1 && model.downloads[0].original == "new-invalid-input",
+        try expect(model.downloads.count == 1 && model.downloads[0].original == "2501.12345v2" && model.downloads[0].state == .saved,
                    "starting another batch cannot resurrect cleared current results")
 
         for blockedName in ["library.json", "media-library.json", "workspace.json"] {
@@ -204,9 +209,15 @@ extension CoreTests {
         let output = root.appendingPathComponent("workspace-papers")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let transport = MockTransport(sourcePDF: pdf)
-        let model = DownloadModel(engine: DownloadEngine(transport: transport, requestInterval: 0, retryDelay: 0), preferences: prefs, stateURL: state)
+        let failingPDF = MockTransport(sourcePDF: pdf, pdf: [.status(404)])
+        let model = DownloadModel(engine: DownloadEngine(transport: transport, pdfTransport: failingPDF, requestInterval: 0, retryDelay: 0), preferences: prefs, stateURL: state)
         model.directory = output
-        model.input = "2501.12345v2\nbad-link"
+        let mixedDraft = "2501.12345v2\nbad-link"
+        model.input = mixedDraft; model.start()
+        try expect(model.smartInput.needsSetup && model.items.isEmpty && model.input == mixedDraft,
+                   "mixed workspace input waits for intelligent setup and preserves the exact draft")
+        let failedLink = "https://example.com/missing.pdf"
+        model.input = "2501.12345v2\n" + failedLink
         model.start()
         try await waitForQueue(model)
         try expect(model.logs.contains { $0.level == .error } && model.logs.contains { $0.level == .success }, "structured success and failure logs")
@@ -214,7 +225,7 @@ extension CoreTests {
               let validationIndex = model.logs.firstIndex(where: { $0.message == ItemState.validating.label }) else { throw TestFailure.failed("missing ordered events") }
         try expect(validationIndex < successIndex, "validation must appear before completion in logs")
         let restored = DownloadModel(preferences: prefs, stateURL: state)
-        try expect(restored.items.count == 2 && restored.successes == 1 && restored.input == "bad-link", "queue and draft survive restart")
+        try expect(restored.items.count == 2 && restored.successes == 1 && restored.items[1].state == .failed && restored.input == failedLink, "queue and draft survive restart")
         try expect(restored.history.count == 2 && restored.history.contains { $0.savedURL == model.items[0].savedURL } && restored.library.count == 1, "history retains success and failure while paper library retains the PDF")
         try expect(restored.logs.map(\.id) == model.logs.map(\.id), "log identity persists")
         let permissions = try FileManager.default.attributesOfItem(atPath: state.path)[.posixPermissions] as? NSNumber
@@ -250,16 +261,20 @@ extension CoreTests {
         model.persistWorkspace()
         try expect(try WorkspaceStore.read(state)?.logs.count == WorkspaceStore.logLimit, "bounded logs roundtrip")
 
-        let missing = model.history[0]
-        try FileManager.default.removeItem(at: missing.savedURL!)
+        guard let missing = model.history.first(where: { $0.id == savedID }), let missingURL = missing.savedURL else {
+            throw TestFailure.failed("saved history record remains available for repair")
+        }
+        try FileManager.default.removeItem(at: missingURL)
         model.openFile(missing)
-        let libraryMissing = model.history[0]
+        guard let libraryMissing = model.history.first(where: { $0.id == savedID }) else {
+            throw TestFailure.failed("missing-file update preserves history identity")
+        }
         try expect(libraryMissing.state == .missing && libraryMissing.savedURL == missing.savedURL, "missing file updates library state")
         model.input = "2503.99999"
         model.retryFromLibrary(libraryMissing)
         try await waitForQueue(model)
         try expect(model.items.count == 1 && model.successes == 1 && model.input == "2503.99999", "library repair downloads one exact version and preserves draft")
-        try expect(model.history.count == 2 && model.history[0].id == missing.id && model.history[0].state == .saved, "library repair replaces missing record without discarding failed history")
+        try expect(model.history.count == 2 && model.history.first(where: { $0.id == missing.id })?.state == .saved, "library repair replaces missing record without discarding failed history")
 
         let export1 = try WorkspaceStore.export(Data("one".utf8), named: "log.txt", to: output)
         let export2 = try WorkspaceStore.export(Data("two".utf8), named: "log.txt", to: output)

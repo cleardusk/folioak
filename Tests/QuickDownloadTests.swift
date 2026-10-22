@@ -71,6 +71,114 @@ private final class QuickTestWindow: NSPanel {
 }
 
 extension CoreTests {
+    @MainActor static func mainWindowQueueTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
+        let gate = QuickTransport(pdf: pdf)
+        await gate.block("/main-first.pdf"); await gate.block("/main-second.pdf")
+        let url = root.appendingPathComponent("main-append/workspace.json")
+        let model = DownloadModel(engine: DownloadEngine(transport: gate, pdfTransport: gate, requestInterval: 0, retryDelay: 0),
+                                  preferences: preferences, stateURL: url)
+        model.directory = root.appendingPathComponent("main-append/files")
+        defer { model.cancel() }
+        model.input = "https://example.com/main-first.pdf"
+        model.start()
+        for _ in 0..<400 {
+            if await gate.paths.count == 1 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let batch = model.batchID, edit = model.editRequest, first = model.items.first?.id
+        model.appendInput("https://example.com/main-second.pdf")
+        model.start()
+        try expect(model.busy && model.items.count == 2 && model.items.first?.id == first &&
+                   model.batchID == batch && model.editRequest == edit && model.duplicateCount == 1,
+                   "main busy append reuses the queue and deduplication without changing page or focus")
+        try expect(try WorkspaceStore.read(url)?.items.count == 2,
+                   "main appended task is persisted before submission returns")
+        let acceptedDraft = model.input
+        model.start()
+        try expect(model.items.count == 2 && model.input == acceptedDraft && model.notice != nil,
+                   "repeated main submit rejects active duplicates while preserving the draft")
+        let window = QuickTestWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+                                     styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = QuickTestHost(rootView: DownloaderView(model: model))
+        window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        func nativeInput(_ view: NSView) -> LinkTextView? {
+            (view as? LinkTextView) ?? view.subviews.lazy.compactMap(nativeInput).first
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        host.layoutSubtreeIfNeeded()
+        guard let editor = nativeInput(host) else { throw TestFailure.failed("main queue native editor") }
+        window.makeFirstResponder(editor)
+        editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        editor.setMarkedText("中文", selectedRange: NSRange(location: 2, length: 0),
+                             replacementRange: NSRange(location: NSNotFound, length: 0))
+        let markedDraft = editor.string, markedRange = editor.markedRange(), markedSelection = editor.selectedRange()
+        await gate.release("/main-first.pdf")
+        for _ in 0..<400 {
+            if await gate.paths.count == 2 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        host.layoutSubtreeIfNeeded()
+        try expect(model.items.first?.state == .saved && nativeInput(host) === editor && editor.hasMarkedText() &&
+                   editor.string == markedDraft && editor.markedRange() == markedRange && editor.selectedRange() == markedSelection,
+                   "real background completion preserves native marked text, selection and editor identity")
+        editor.unmarkText()
+        model.input = "https://example.com/main-third.pdf"
+        model.start()
+        try expect(model.items.count == 2 && model.items.last?.state == .queued,
+                   "main window can append after the earlier result was archived")
+        model.cancel()
+        let count = model.items.count
+        model.input = "https://example.com/main-rejected.pdf"
+        model.start()
+        try expect(model.items.count == count && model.input.hasSuffix("main-rejected.pdf") && model.notice != nil,
+                   "main submission during cancellation is rejected with its draft intact")
+        await model.cancelAndWait()
+        try expect(await gate.paths == ["/main-first.pdf", "/main-second.pdf"],
+                   "stop cancels active work and never begins appended main tasks")
+        let restored = DownloadModel(preferences: preferences, stateURL: url)
+        try expect(restored.downloads.count == 3 && restored.downloads.filter { $0.state == .cancelled }.count == 2,
+                   "restart retains accepted main tasks after cancellation")
+
+        let retryModel = DownloadModel(engine: DownloadEngine(transport: gate, pdfTransport: gate, requestInterval: 0), preferences: preferences)
+        retryModel.directory = root.appendingPathComponent("main-retry/files")
+        let oldURL = URL(string: "https://example.com/main-old.pdf")!
+        retryModel.items = [DownloadItem(original: oldURL.absoluteString, directURL: oldURL, state: .failed)]
+        let retryDraft = "  待整理的中文草稿 https://example.com/main-old.pdf\n\n请保留空白和要求  "
+        retryModel.input = retryDraft
+        retryModel.retry()
+        try await waitForQueue(retryModel)
+        try expect(retryModel.items.first?.state == .saved && retryModel.input == retryDraft,
+                   "retrying an older task never authorizes cleanup of a newer unsubmitted draft")
+        let terminatingURL = URL(string: "https://example.com/main-exit-retry.pdf")!
+        retryModel.items = [DownloadItem(original: terminatingURL.absoluteString, directURL: terminatingURL, state: .failed)]
+        let retryID = retryModel.items[0].id
+        retryModel.beginTermination()
+        retryModel.retry()
+        retryModel.retryFromLibrary(DownloadItem(original: oldURL.absoluteString, directURL: oldURL, state: .missing))
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let retryPaths = await gate.paths
+        try expect(!retryModel.busy && retryModel.items[0].id == retryID && retryModel.items[0].state == .failed &&
+                   !retryPaths.contains("/main-exit-retry.pdf"),
+                   "termination refuses retry without changing the queue or starting a transport")
+
+        let blocker = root.appendingPathComponent("main-commit-blocker")
+        try Data("block".utf8).write(to: blocker)
+        let blocked = DownloadModel(engine: DownloadEngine(transport: gate, pdfTransport: gate, requestInterval: 0),
+                                   preferences: preferences, stateURL: blocker.appendingPathComponent("workspace.json"))
+        blocked.input = "https://example.com/main-never.pdf"
+        blocked.start()
+        try expect(blocked.items.isEmpty && !blocked.busy && blocked.input.hasSuffix("main-never.pdf") && blocked.notice != nil,
+                   "failed main durable admission retains the draft and launches no work")
+        try expect(!(await gate.paths).contains("/main-never.pdf"), "failed main admission performs no transfer")
+        blocked.beginTermination()
+        blocked.start()
+        try expect(blocked.items.isEmpty && blocked.input.hasSuffix("main-never.pdf"),
+                   "termination rejects main submission without losing the draft")
+    }
+
     @MainActor static func trashFilesDuringDownloadTests(root: URL, pdf: URL, preferences: UserDefaults) async throws {
         let gate = QuickTransport(pdf: pdf)
         await gate.block("/trash-second.pdf")
@@ -187,6 +295,7 @@ extension CoreTests {
         defer { preferences.removePersistentDomain(forName: suite) }
         let pdf = root.appendingPathComponent("sample.pdf")
         try createPDF(at: pdf)
+        try await mainWindowQueueTests(root: root, pdf: pdf, preferences: preferences)
         let gate = QuickTransport(pdf: pdf)
         await gate.block("/first.pdf"); await gate.block("/second.pdf"); await gate.block("/third.pdf")
         let engine = DownloadEngine(transport: gate, pdfTransport: gate, requestInterval: 0, retryDelay: 0)

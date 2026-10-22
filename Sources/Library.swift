@@ -159,7 +159,7 @@ extension DownloadModel {
         if tags != papers[index].tags { trace.user(.tagsChanged, context: .documents, item: id, count: papers[index].tags.count) }
     }
     func importPDFs() {
-        guard !importingPDFs, !assetRenameInProgress, canChangeLibrary() else { return }
+        guard !isTerminating, !importingPDFs, !assetRenameInProgress, canChangeLibrary() else { return }
         let panel = NSOpenPanel(); panel.title = L("导入 PDF"); panel.allowedContentTypes = [.pdf]; panel.allowsMultipleSelection = true
         present(panel) { [weak self] response in
             guard response == .OK, let self else { return }
@@ -167,14 +167,15 @@ extension DownloadModel {
         }
     }
     func importPDFs(_ urls: [URL]) {
-        guard !importingPDFs, !assetRenameInProgress, canChangeLibrary() else { return }
+        guard !isTerminating, !importingPDFs, !assetRenameInProgress, canChangeLibrary() else { return }
         notice = nil
         guard urls.count <= ResourceLimits.batchCount else { notice = "每次最多导入 200 篇。"; return }
         importingPDFs = true
-        Task { [weak self] in
+        let importer = pdfImporter
+        importWorker = Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) { () -> ([LibraryPaper], Int) in
                 var imported: [LibraryPaper] = []; var failed = 0
-                for url in urls { do { imported.append(try LibraryStore.imported(url)) } catch { failed += 1 } }
+                for url in urls { do { imported.append(try await importer(url)) } catch { failed += 1 } }
                 return (imported, failed)
             }.value
             guard let self else { return }
@@ -183,6 +184,7 @@ extension DownloadModel {
                 self.papers.append(paper)
             }
             self.importingPDFs = false
+            self.importWorker = nil
             self.trace.record(.libraryImported, context: .documents, outcome: result.1 == 0 ? .succeeded : .failed, count: result.0.count)
             if result.1 > 0 { self.notice = "\(result.1) 个文件无法读取。" }
             self.saveWorkspace()

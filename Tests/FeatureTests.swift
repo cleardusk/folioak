@@ -107,7 +107,11 @@ extension CoreTests {
         while !model.input.contains("1706.03762v1") && ContinuousClock().now < dropDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
         try expect(model.input == "2003.07733\nhttps://github.com/openai/math/blob/main/overview.pdf\nhttps://arxiv.org/abs/1706.03762v1", "drop appends in provider order and extracts prose without replacing input")
         model.busy = true
-        try expect(!model.acceptDrop([provider]), "busy queue rejects drops")
+        let beforeBusyDrop = model.input
+        try expect(model.acceptDrop([provider]), "busy queue accepts a new draft drop")
+        let busyDropDeadline = ContinuousClock().now.advanced(by: .seconds(3))
+        while model.input == beforeBusyDrop && ContinuousClock().now < busyDropDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        try expect(model.input == beforeBusyDrop + "\nhttps://github.com/openai/math/blob/main/overview.pdf", "busy drop appends to draft without submitting")
         model.busy = false; model.input = ""
         model.appendInput("论文 [Example](https://arxiv.org/abs/2501.12345v2)")
         model.start(); try await waitForQueue(model)

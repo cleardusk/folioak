@@ -362,7 +362,7 @@ struct SmartInputReviewActionsView: View {
                        action: state.acceptSelection)
                     .buttonStyle(PrimaryActionStyle(palette: palette))
                     .keyboardShortcut(submitShortcut)
-                    .disabled(state.selections.isEmpty || state.selections.count > SmartInput.targetLimit)
+                    .disabled(!state.canAcceptSelection)
                     .accessibilityIdentifier("smart-input-accept")
             }
         }.fixedSize(horizontal: true, vertical: false)

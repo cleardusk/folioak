@@ -14,6 +14,11 @@ import Combine
     @Published private(set) var needsSetup = false
     @Published private(set) var requiresNewKey = false
     var resolving: Bool { progress != nil }
+    var canAcceptSelection: Bool {
+        guard let model else { return false }
+        return !model.isTerminating && !model.cancelling && !model.libraryMutationInProgress &&
+            !resolving && !selections.isEmpty && selections.count <= SmartInput.targetLimit
+    }
     var setupConnectionOwner: UUID? { needsSetup ? sessionID : nil }
     var inheritedFormat: MediaFormat { defaultFormat }
     var selectsOnlyPDFs: Bool {
@@ -54,7 +59,7 @@ import Combine
         cancel()
         guard let model, !model.isTerminating else { return }
         do {
-            guard !model.cancelling, quick || !model.busy else { throw DownloadError.limit("正在下载，请稍后再试。") }
+            guard !model.cancelling, !model.libraryMutationInProgress else { throw DownloadError.limit("队列正在处理其他操作，请稍后再试。") }
             guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   input.utf8.count <= SmartInput.inputLimit else { throw DownloadError.limit("智能请求请控制在 8 KB 以内。") }
             let id = UUID()

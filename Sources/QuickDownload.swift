@@ -137,7 +137,7 @@ struct QuickDownloadView: View {
                         Button(L(state.smart.failed ? "重试" : !SmartInput.isDirect(state.draft) && !state.draft.isEmpty
                                  ? "查找资源" : model.busy ? "加入队列" : "开始下载"), action: state.submit)
                             .buttonStyle(PrimaryActionStyle(palette: palette))
-                            .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling)
+                            .disabled(state.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.cancelling || model.libraryMutationInProgress || model.isTerminating)
                             .help(L("⌘ Return 下载"))
                             .accessibilityIdentifier("quick-download-submit")
                     }

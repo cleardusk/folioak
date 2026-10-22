@@ -82,6 +82,7 @@ extension CoreTests {
         protected.upsertPaper(item); protected.importPDFs([pdf])
         try expect(protected.papers.isEmpty && !protected.importingPDFs && protected.notice != nil, "read-only library rejects changes that cannot be saved")
 
+        try await importTerminationTests(root: root, pdf: pdf)
         try await githubLibraryMigrationTests(root: root, pdf: pdf, ordinary: LibraryPaper(item))
 
         let shortcuts = ShortcutSettings(preferences)
@@ -199,5 +200,170 @@ extension CoreTests {
         try rejects({ _ = try LibraryStore.read(invalidURL) }, "source migration still rejects unsafe old library URLs")
         try expect(try Data(contentsOf: invalidURL) == invalid, "rejected library is not changed by migration")
         print("PASS GitHub library migration: mixed historical PDFs, preserved metadata and identity, raw retry, safe validation and read-only loading")
+    }
+}
+
+// The importer is suspended explicitly, so termination tests do not depend on
+// PDF complexity, disk speed, or sleeps racing the worker.
+private actor ImportTerminationGate {
+    private(set) var entered = false
+    private var released = false
+    private var release: CheckedContinuation<Void, Never>?
+    private(set) var calls = 0
+
+    func hold() async {
+        calls += 1
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            release = continuation
+            entered = true
+        }
+    }
+    func resume() { released = true; release?.resume(); release = nil }
+}
+
+private actor ImportTerminationTransport: HTTPTransport {
+    private(set) var entered = false
+    private(set) var cancelled = false
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) { throw URLError(.unsupportedURL) }
+    func download(for request: URLRequest, progress: @escaping @Sendable (DownloadProgress) -> Void) async throws -> (URL, HTTPURLResponse) {
+        entered = true
+        do {
+            while true { try await Task.sleep(nanoseconds: 30_000_000_000) }
+        } catch {
+            cancelled = Task.isCancelled
+            throw error
+        }
+    }
+}
+
+extension CoreTests {
+    // Poll observable milestones instead of racing a non-cancellable continuation
+    // in a task group: a failed milestone must let the test itself return.
+    @MainActor private static func awaitImportMilestone(_ name: String,
+                                                        _ ready: () async -> Bool) async throws {
+        let deadline = ContinuousClock().now.advanced(by: .seconds(5))
+        while !(await ready()) {
+            guard ContinuousClock().now < deadline else {
+                throw TestFailure.failed("PDF import termination timed out: \(name)")
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
+    @MainActor private static func finishHeldImport(_ model: DownloadModel, gate: ImportTerminationGate,
+                                                    cancelDownloads: Bool = false) async throws {
+        var started = false, cancellationFinished = !cancelDownloads, completed = false
+        var importingAtFlush: [Bool] = []
+        model.terminationPhaseObserver = { phase in
+            switch phase {
+            case .started: started = true
+            case .willFlush: importingAtFlush.append(model.importingPDFs)
+            }
+        }
+        defer { model.terminationPhaseObserver = nil }
+        let termination = Task {
+            if cancelDownloads {
+                await model.cancelAndWait()
+                cancellationFinished = true
+            }
+            await model.finishTermination()
+            completed = true
+        }
+        do {
+            try await awaitImportMilestone("download cancellation did not finish") { cancellationFinished }
+            try await awaitImportMilestone("finishTermination did not report started") { started }
+            // Release only after finishTermination starts. Without its import
+            // await, willFlush runs in that same MainActor turn and records true.
+            await gate.resume()
+            try await awaitImportMilestone("finishTermination did not complete") { completed }
+        } catch {
+            await gate.resume()
+            termination.cancel()
+            model.cancel()
+            throw error
+        }
+        try expect(importingAtFlush == [false], "termination must finish the held import before taking its final snapshot")
+    }
+
+    @MainActor static func importTerminationTests(root: URL, pdf: URL) async throws {
+        let suite = "folioak-import-termination-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let gate = ImportTerminationGate()
+        defer { Task { await gate.resume() } }
+        let imported = try LibraryStore.imported(pdf)
+        let invalid = root.appendingPathComponent("invalid-import.pdf")
+        let state = root.appendingPathComponent("import-termination.json")
+        let model = DownloadModel(preferences: preferences, stateURL: state, pdfImporter: { url in
+            if url == invalid { throw DownloadError.invalidPDF }
+            await gate.hold()
+            return imported
+        })
+        model.importPDFs([pdf, invalid])
+        try await awaitImportMilestone("importer did not start") { await gate.entered }
+        try expect(model.importingPDFs && model.importWorker != nil && model.papers.isEmpty,
+                   "accepted import retains its worker until the full batch is published")
+        model.beginTermination()
+        model.importPDFs([pdf])
+        // The same held worker must survive termination and reject a second batch.
+        try expect(model.isTerminating && model.importingPDFs, "termination preserves an already accepted import")
+        try await finishHeldImport(model, gate: gate)
+        try expect(!model.importingPDFs && model.importWorker == nil && model.papers.count == 1,
+                   "termination waits for valid imports and releases the worker despite a failed file")
+        try expect(model.notice != nil, "import failures retain the ordinary error notice during termination")
+        let library = state.deletingLastPathComponent().appendingPathComponent(state.lastPathComponent + ".library.json")
+        try expect(try LibraryStore.read(library)?.map(\.file) == [pdf],
+                   "final termination flush durably stores the accepted import")
+        model.importPDFs([pdf])
+        let importerCalls = await gate.calls
+        try expect(!model.importingPDFs && model.importWorker == nil && importerCalls == 1,
+                   "termination rejects new imports even after the prior worker completes")
+        let restored = DownloadModel(preferences: preferences, stateURL: state)
+        try expect(restored.papers.count == 1 && restored.papers[0].file == pdf,
+                   "an import completed during normal termination survives restart")
+        model.beginTermination()
+        try await finishHeldImport(model, gate: gate, cancelDownloads: true)
+        try expect(try LibraryStore.read(library)?.count == 1, "download cancellation and repeated termination preserve the imported catalog")
+
+        let activeGate = ImportTerminationGate(), transport = ImportTerminationTransport()
+        defer { Task { await activeGate.resume() } }
+        let activeState = root.appendingPathComponent("active-import-termination.json")
+        let active = DownloadModel(engine: DownloadEngine(transport: transport, pdfTransport: transport,
+            requestInterval: 0, retryDelay: 0), preferences: preferences, stateURL: activeState, pdfImporter: { _ in
+                await activeGate.hold(); return imported
+            })
+        defer { active.cancel() }
+        active.directory = root.appendingPathComponent("active-import-downloads")
+        active.input = "https://example.com/held.pdf"
+        active.start()
+        try await awaitImportMilestone("download transport did not start") { await transport.entered }
+        active.importPDFs([pdf])
+        try await awaitImportMilestone("concurrent importer did not start") { await activeGate.entered }
+        try expect(active.busy && active.importingPDFs, "download and accepted import are both active before termination")
+        active.beginTermination()
+        try await finishHeldImport(active, gate: activeGate, cancelDownloads: true)
+        let cancelled = await transport.cancelled
+        try expect(cancelled && !active.busy && !active.importingPDFs && active.importWorker == nil &&
+                   active.items.count == 1 && active.items[0].state == .cancelled,
+                   "download termination cancels its transport while allowing the held PDF import to finish")
+        let activeRestored = DownloadModel(preferences: preferences, stateURL: activeState)
+        try expect(activeRestored.papers.count == 1 && activeRestored.papers[0].file == pdf &&
+                   activeRestored.items.first?.state == .cancelled,
+                   "concurrent download cancellation and import completion are both durable on restart")
+
+        let failureGate = ImportTerminationGate()
+        defer { Task { await failureGate.resume() } }
+        let failureState = root.appendingPathComponent("failed-import-termination.json")
+        let allFailed = DownloadModel(preferences: preferences, stateURL: failureState, pdfImporter: { _ in
+            await failureGate.hold(); throw DownloadError.invalidPDF
+        })
+        allFailed.importPDFs([invalid])
+        try await awaitImportMilestone("failing importer did not start") { await failureGate.entered }
+        allFailed.beginTermination()
+        try await finishHeldImport(allFailed, gate: failureGate)
+        try expect(!allFailed.importingPDFs && allFailed.importWorker == nil && allFailed.papers.isEmpty && allFailed.notice != nil,
+                   "an entirely failed import releases its worker and permits final termination without fabricating a library record")
+        try expect(try WorkspaceStore.read(failureState) != nil, "all-failed import still completes the final workspace flush")
     }
 }

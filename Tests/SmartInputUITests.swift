@@ -419,9 +419,10 @@ extension CoreTests {
                     throw TestFailure.failed("returning to edit remounts the native input")
                 }
                 try expect(paperModel.smartInput.resolution == nil && paperModel.input == "下载 gpt-1 论文"
-                           && restoredEditor.naturalLanguageInput
-                           && restoredEditor.font?.pointSize == 13,
-                           "return to edit preserves the exact request and native editor, including CJK font fallback")
+                           && restoredEditor.naturalLanguageInput,
+                           "return to edit preserves the exact request in the native natural-language editor")
+                try expect(restoredEditor.font?.pointSize == 14,
+                           "return to edit retains the main composer's 14-point input typography")
                 try paperReview.verify("paper-edit-" + name, labels: [L("查找资源")],
                     absentLabels: ["Improving Language Understanding by Generative Pre-Training"], snapshots: snapshots)
                 paperReview.window.close()
@@ -538,8 +539,10 @@ extension CoreTests {
                     try surface.verifyVisibleQueueRow()
                     if stage == "idle" || stage == "error" {
                         let editor = SmartUISurface.descendants(surface.host).compactMap { $0 as? LinkTextView }.first
-                        try expect(editor?.font?.pointSize == 13 && editor?.string == original,
-                                   "idle and recoverable errors retain the native 13-point request editor")
+                        try expect(editor?.string == original,
+                                   "idle and recoverable errors preserve the exact request in the native editor")
+                        try expect(editor?.font?.pointSize == 14,
+                                   "idle and recoverable errors retain the main composer's 14-point input typography")
                     }
                 }
                 if stage == "progress" {
@@ -666,8 +669,26 @@ extension CoreTests {
         try await longMain.press(L("还有 10 项待补充"))
         try longMain.verify("main-long-partial-expanded", labels: ["要求 1", "Already queued paper"], snapshots: snapshots)
         try longMain.verifyVisibleQueueRow()
+        let partialEditor = SmartUISurface.descendants(longMain.host).compactMap { $0 as? LinkTextView }.first
+        partial.busy = true
+        try await longMain.settle()
+        try longMain.verify("main-long-partial-expanded-busy",
+            labels: ["要求 1", "Already queued paper", L("停止"), L("查找资源")], snapshots: snapshots)
+        try longMain.verifyVisibleQueueRow()
+        let busyEditor = SmartUISurface.descendants(longMain.host).compactMap { $0 as? LinkTextView }.first
+        try expect(partialEditor != nil && busyEditor === partialEditor && busyEditor?.isEditable == true,
+                   "busy expanded results keep the same editable native draft beside a visible queue")
+        partial.busy = false
+        try await longMain.settle()
         try await longMain.scrollDetailsToEnd()
         try longMain.verify("main-long-partial-last-detail", labels: ["Final remaining requirement"], snapshots: snapshots)
+        partial.input = "https://example.com/another-paper.pdf"
+        partial.busy = true
+        try await longMain.settle()
+        try longMain.verify("main-busy-append-controls",
+            labels: [L("加入队列"), L("停止"), "Already queued paper"], snapshots: snapshots)
+        try longMain.verifyVisibleQueueRow()
+        partial.busy = false
         longMain.window.close()
 
         let partialQuick = QuickDownloadState(model: partial)

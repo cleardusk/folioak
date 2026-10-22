@@ -162,10 +162,16 @@ final class DownloadModel: ObservableObject {
                 notice = "输入超过 64 KB，请分批粘贴。"
             }
             workspaceRevision += 1
+            inputRevision += 1
             schedulePersistence()
             mainSmartState?.inputChanged(input)
         }
     }
+    private var inputRevision = 0
+    private var submittedInputRevision: Int?
+    // Marked text may not have reached the model yet. Invalidate completion
+    // cleanup at the native edit boundary, before the input method changes it.
+    func beginDraftEditing() { submittedInputRevision = nil }
     @Published var directory: URL {
         didSet { preferences.set(directory.path, forKey: "downloadRootDirectory"); directoryNotice = nil; traceSetting(.directory) }
     }
@@ -237,6 +243,8 @@ final class DownloadModel: ObservableObject {
     @Published var papers: [LibraryPaper] = [] { didSet { libraryRevision += 1; libraryDirty = true; schedulePersistence() } }
     @Published var libraryNotice: String?
     @Published var importingPDFs = false
+    var importWorker: Task<Void, Never>?
+    let pdfImporter: @Sendable (URL) async throws -> LibraryPaper
     @Published var checkingVersions = Set<UUID>()
     var versionWorker: Task<Void, Never>?
     @Published var logs: [ActivityEntry] = [] { didSet { workspaceRevision += 1 } }
@@ -313,7 +321,8 @@ final class DownloadModel: ObservableObject {
     private var smartChanges: AnyCancellable?
     private var libraryURL: URL? { persistence?.libraryURL }
 
-    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil, recycleFile: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }, updates: UpdateChecker? = nil, revealer: @escaping ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }, smartSettings: SmartSettings? = nil, smartResolver: SmartResolving? = nil) {
+    init(engine: DownloadEngine? = nil, preferences: UserDefaults = DownloadPreferences.shared, opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }, stateURL: URL? = nil, recycleFile: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }, updates: UpdateChecker? = nil, revealer: @escaping ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }, smartSettings: SmartSettings? = nil, smartResolver: SmartResolving? = nil, pdfImporter: @escaping @Sendable (URL) async throws -> LibraryPaper = { try LibraryStore.imported($0) }) {
+        self.pdfImporter = pdfImporter
         self.smartSettings = smartSettings ?? SmartSettings(preferences)
         self.smartResolver = smartResolver ?? DeepSeekResolver()
         let authenticationSettings = BrowserAuthenticationSettings(preferences)
@@ -908,8 +917,21 @@ final class DownloadModel: ObservableObject {
 
     private func restoreLibrary() {
         do {
-            if let libraryURL, let saved = try LibraryStore.read(libraryURL) { papers = saved; libraryDirty = false; return }
-            for item in (history + items).reversed() { upsertPaper(item) }
+            if let libraryURL, let saved = try LibraryStore.read(libraryURL) { papers = saved; libraryDirty = false }
+            // A catalog write can fail while the workspace still saves. Recover
+            // missing records, but let the catalog own edits and relinked paths.
+            // Newest first also prevents an older retry from winning migration.
+            let records = (items + history).sorted {
+                ($0.finishedAt ?? $0.createdAt) > ($1.finishedAt ?? $1.createdAt)
+            }
+            for item in records where [.saved, .existing, .missing].contains(item.state) {
+                let incoming = LibraryPaper(item)
+                guard LibraryStore.valid(incoming), !papers.contains(where: {
+                    $0.id == item.id || $0.taskID == item.id || $0.identity == incoming.identity ||
+                    ($0.file != nil && $0.file == incoming.file && ($0.source == nil || incoming.source == nil))
+                }) else { continue }
+                upsertPaper(item)
+            }
         } catch { libraryWritable = false; libraryNotice = "文档库无法读取，原文件已保留：\(error.localizedDescription)" }
     }
     private func persistLibrary() {
@@ -919,7 +941,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func appendInput(_ capturedText: String) {
-        guard !busy else { return }
+        guard !isTerminating else { return }
         let text: String
         do { text = try captureInput(capturedText) } catch { notice = error.localizedDescription; return }
         let joined = input.isEmpty ? text : input + (input.hasSuffix("\n") ? "" : "\n") + text
@@ -933,7 +955,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func importLinks() {
-        guard !busy else { return }
+        guard !isTerminating else { return }
         let panel = NSOpenPanel()
         panel.title = L("导入链接"); panel.allowedContentTypes = [.plainText]; panel.allowsMultipleSelection = false
         present(panel) { [weak self] response in
@@ -991,7 +1013,7 @@ final class DownloadModel: ObservableObject {
 
     func retryFromLibrary(_ item: DownloadItem) {
         trace.user(.retryRequested, context: .documents, outcome: .requested, item: item.id)
-        guard !busy, !libraryMutationInProgress, let source = item.source else { return }
+        guard !busy, !libraryMutationInProgress, !isTerminating, let source = item.source else { return }
         // Restore the exact version, even when the original request used “latest”.
         let original = item.metadata?.reference.identifier ?? source.webURL.absoluteString
         archiveResults()
@@ -1160,7 +1182,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func acceptDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard !busy, !providers.isEmpty, providers.count <= ResourceLimits.batchCount else { return false }
+        guard !isTerminating, !providers.isEmpty, providers.count <= ResourceLimits.batchCount else { return false }
         Task { [weak self] in
             var texts: [String] = []
             var bytes = 0
@@ -1224,7 +1246,7 @@ final class DownloadModel: ObservableObject {
     }
 
     func start() {
-        guard !busy, !isTerminating, mainSmartState?.resolving != true, mainSmartState?.needsSetup != true else { return }
+        guard !isTerminating, mainSmartState?.resolving != true, mainSmartState?.needsSetup != true else { return }
         if mainSmartState?.resolution != nil {
             mainSmartState?.acceptSelection()
             return
@@ -1268,14 +1290,16 @@ final class DownloadModel: ObservableObject {
     private func performSubmitDownload(_ text: String, quick: Bool, operation: UUID?) throws -> Int {
         guard !isTerminating else { throw DownloadError.limit("应用正在退出，未添加下载。") }
         guard !libraryMutationInProgress else { throw DownloadError.limit("正在保存资料库，请稍后添加任务。") }
-        guard !cancelling, quick || !busy else { throw DownloadError.limit("正在停止，请稍后添加任务。") }
+        guard !cancelling else { throw DownloadError.limit("正在停止，请稍后添加任务。") }
         let batch = try BatchInput(text)
         if quick, let invalid = batch.entries.first(where: { $0.source == nil }) {
             throw DownloadError.invalidLink(invalid.original)
         }
         let active = items.filter { !$0.state.terminal }
         let entries = batch.entries.filter { entry in
-            guard quick, let source = entry.source else { return true }
+            guard let source = entry.source else {
+                return !busy || !items.contains { $0.source == nil && $0.original == entry.original }
+            }
             let format = source.supportsAudioExtraction ? mediaFormat : .automatic
             return !active.contains { $0.source?.webURL == source.webURL && ($0.mediaFormat ?? .automatic) == format }
         }
@@ -1325,7 +1349,10 @@ final class DownloadModel: ObservableObject {
         }
         self.duplicateCount = duplicateCount
         notice = nil; persistenceNotice = nil
-        if !quick { batchID = UUID() }
+        if !quick {
+            submittedInputRevision = inputRevision
+            if !busy { batchID = UUID() }
+        }
         record(.info, duplicateCount > 0
             ? DiagnosticMessage(.startDeduplicated, String(added.count), String(duplicateCount))
             : DiagnosticMessage(.start, String(added.count)))
@@ -1338,7 +1365,7 @@ final class DownloadModel: ObservableObject {
                              quick: Bool, defaultFormat: MediaFormat) throws -> SmartSubmission {
         guard !isTerminating, smartSettings.enabled else { throw DownloadError.limit("智能请求已失效，请重新提交。") }
         guard !acceptedSmartSessions.contains(sessionID) else { throw DownloadError.limit("此请求已处理，请勿重复提交。") }
-        guard !libraryMutationInProgress, !cancelling, quick || !busy else {
+        guard !libraryMutationInProgress, !cancelling else {
             throw DownloadError.limit("队列正在处理其他操作，请稍后再试。")
         }
         guard !selections.isEmpty, selections.count <= SmartInput.targetLimit,
@@ -1404,8 +1431,26 @@ final class DownloadModel: ObservableObject {
         smartCancellation.send()
     }
 
+    #if TESTING
+    enum TerminationPhase { case started, willFlush }
+    var terminationPhaseObserver: ((TerminationPhase) -> Void)?
+    #endif
+
+    // An accepted local import finishes before the final snapshot and process exit.
+    func finishTermination() async {
+        #if TESTING
+        terminationPhaseObserver?(.started)
+        #endif
+        await importWorker?.value
+        #if TESTING
+        terminationPhaseObserver?(.willFlush)
+        #endif
+        await persistWorkspaceAndWait()
+        await finishTrace()
+    }
+
     func retry(_ single: UUID? = nil, context: InteractionEvent.Context = .downloads) {
-        guard !busy, !libraryMutationInProgress else { return }
+        guard !busy, !libraryMutationInProgress, !isTerminating else { return }
         if single == nil, history.contains(where: { old in old.canRetry && !items.contains(where: { $0.id == old.id }) }) {
             let candidates = Array(downloads.filter(\.canRetry).prefix(ResourceLimits.batchCount))
             archiveResults(); items = candidates; duplicateCount = 0; batchID = UUID()
@@ -1731,11 +1776,14 @@ final class DownloadModel: ObservableObject {
                 }
                 runSuccesses += 1
                 if let result = items.first(where: { $0.id == id }) { record(.success, result.state.message, item: result); upsertPaper(result); upsertMedia(result) }
-                if item.preservesInput != true && item.smartRequestID == nil &&
+                // Once the user edits the draft, completion must not rewrite
+                // it or disturb an in-progress native input-method composition.
+                if item.preservesInput != true && item.smartRequestID == nil && submittedInputRevision == inputRevision &&
                     (!smartSettings.enabled || SmartInput.isDirect(input)) {
                     input = DownloadSource.tokens(in: input)
                         .filter { (try? DownloadSource.parse($0)) != source }
                         .joined(separator: "\n")
+                    submittedInputRevision = inputRevision
                 }
             } catch is CancellationError {
                 sink.finish()
@@ -1915,6 +1963,12 @@ final class LinkTextView: NSTextView {
     }
     var captureTrace: ((Bool) -> Void)?
     var captureFailure: ((String) -> Void)?
+    var compositionWillChange: (() -> Void)?
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        compositionWillChange?()
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
 
     func styleReferences(textColor: NSColor, accentColor: NSColor, underlineRecognized: Bool) {
         // The input method owns its marked range until it commits or cancels.
@@ -2038,6 +2092,7 @@ struct LinkInput: NSViewRepresentable {
         editor.setAccessibilityLabel(L("下载链接，每行一个"))
         editor.delegate = context.coordinator
         editor.captureFailure = { [weak model] in model?.notice = $0 }
+        editor.compositionWillChange = { [weak model] in model?.beginDraftEditing() }
         editor.captureInput = { [weak model] text in try model?.captureInput(text) ?? PaperInput.captured(text) }
         editor.captureTrace = { [weak model] accepted in
             model?.trace.user(accepted ? .inputCaptured : .inputRejected, context: .mainWindow, outcome: accepted ? .succeeded : .failed)
@@ -2073,7 +2128,7 @@ struct LinkInput: NSViewRepresentable {
         if !editor.hasMarkedText(), editor.font != inputFont { editor.font = inputFont }
         editor.setAccessibilityLabel(L("下载请求"))
         editor.needsDisplay = true
-        editor.isEditable = !model.busy
+        editor.isEditable = !model.isTerminating
         let textColor = ThemePalette.nativeColor(palette.text)
         let accentColor = ThemePalette.nativeColor(palette.accent)
         let placeholderColor = ThemePalette.nativeColor(palette.secondary).blended(withFraction: scheme == .dark ? 0.34 : 0.12, of: ThemePalette.nativeColor(palette.surface)) ?? ThemePalette.nativeColor(palette.secondary)
@@ -2090,11 +2145,11 @@ struct LinkInput: NSViewRepresentable {
                             animated: !reduceMotion && editor.window?.isVisible == true)
         let selectToken = context.coordinator.selectionRequest != model.editRequest
         context.coordinator.selectionRequest = model.editRequest
-        if !model.busy && (selectToken || (focused && editor.window?.firstResponder !== editor)) {
+        if !model.isTerminating && (selectToken || (focused && editor.window?.firstResponder !== editor)) {
             let editRequest = model.editRequest, listRequest = model.listRequest
             let searchRequest = model.searchRequest
             DispatchQueue.main.async { [weak editor, weak coordinator = context.coordinator] in
-                guard let editor, let coordinator, coordinator.parent.focused, !coordinator.parent.model.busy,
+                guard let editor, let coordinator, coordinator.parent.focused, !coordinator.parent.model.isTerminating,
                       coordinator.parent.model.editRequest == editRequest, coordinator.parent.model.listRequest == listRequest,
                       coordinator.parent.model.searchRequest == searchRequest,
                       let window = editor.window else { return }
@@ -2448,8 +2503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             model.cancelVersionCheck()
             terminationPending = true
             Task { [self] in
-                await model.persistWorkspaceAndWait()
-                await model.finishTrace()
+                await model.finishTermination()
                 sender.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater
@@ -2464,7 +2518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model.beginTermination()
         Task { [self] in
             await model.cancelAndWait()
-            await model.finishTrace()
+            await model.finishTermination()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -2491,7 +2545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func focusInput() {
         if menuBar?.focusInputIfShown() == true { return }
-        guard window.attachedSheet == nil, !model.busy else { return }
+        guard window.attachedSheet == nil, !model.isTerminating else { return }
         window.makeKeyAndOrderFront(nil)
         model.focusInput()
     }
@@ -2504,7 +2558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model.searchRequest = UUID()
     }
     @objc private func startDownload() {
-        guard model.preferencesPage == nil, NSApp.keyWindow === window, window.attachedSheet == nil, !model.busy else { return }
+        guard model.preferencesPage == nil, NSApp.keyWindow === window, window.attachedSheet == nil, !model.isTerminating else { return }
         model.start()
     }
 

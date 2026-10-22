@@ -2,6 +2,7 @@ import Foundation
 
 extension CoreTests {
     @MainActor static func backgroundPersistenceTests(root: URL, pdf: URL) async throws {
+        try libraryRecoveryTests(root: root, pdf: pdf)
         let suite = "folioak-background-save-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
@@ -78,5 +79,64 @@ extension CoreTests {
             guard ContinuousClock().now < deadline else { throw TestFailure.failed("background save timed out") }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
+    }
+
+    @MainActor static func libraryRecoveryTests(root: URL, pdf: URL) throws {
+        let suite = "folioak-library-recovery-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let folder = root.appendingPathComponent("library-recovery")
+        let state = folder.appendingPathComponent("workspace.json")
+        let persistence = WorkspacePersistence(state)
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let old = DownloadItem(original: "1706.03762v1", reference: try ArxivReference.parse("1706.03762v1"),
+            state: .saved, savedURL: pdf, pages: 1, documentTitle: "Original", finishedAt: date)
+        var retained = LibraryPaper(old)
+        retained.title = "My edited title"; retained.tags = ["Keep"]; retained.favorite = true
+        retained.read = true; retained.removed = true
+        retained.file = folder.appendingPathComponent("manually-relinked.pdf")
+        retained.latest = try ArxivReference.parse("1706.03762v3"); retained.checkedAt = date
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        let retainedBytes = try encoder.encode(retained)
+        try persistence.writeLibrary([retained])
+
+        let missing = DownloadItem(original: "2003.07733v1", reference: try ArxivReference.parse("2003.07733v1"),
+            state: .saved, savedURL: folder.appendingPathComponent("newest.pdf"), pages: 1,
+            documentTitle: "Recovered paper", finishedAt: date.addingTimeInterval(10))
+        var olderCopy = missing
+        olderCopy.id = UUID(); olderCopy.finishedAt = date.addingTimeInterval(5)
+        olderCopy.savedURL = folder.appendingPathComponent("older.pdf")
+        let newerVersion = DownloadItem(original: "1706.03762v2", reference: try ArxivReference.parse("1706.03762v2"),
+            state: .saved, savedURL: pdf, pages: 1, documentTitle: "New version", finishedAt: date.addingTimeInterval(20))
+        let failed = DownloadItem(original: "2310.00001v1", reference: try ArxivReference.parse("2310.00001v1"), state: .failed)
+        // Force the catalog write to fail before replacing its valid prior data,
+        // while the same save commits the successful downloads to the workspace.
+        var invalid = retained; invalid.tags = Array(repeating: "tag", count: 21)
+        let snapshot = WorkspaceSnapshot(input: "", items: [missing, newerVersion], history: [old, olderCopy, missing, failed], logs: [])
+        let result = persistence.flush(WorkspacePersistence.Request(sequence: 1, revision: 1, libraryRevision: 1, mediaRevision: 0,
+            snapshot: snapshot, stateURL: state, libraryURL: persistence.libraryURL, mediaURL: nil,
+            papers: [invalid, LibraryPaper(missing)], media: nil))
+        try expect(result.libraryError != nil, "fixture fails the catalog write independently")
+        _ = try result.workspace.get()
+        try expect(try LibraryStore.read(persistence.libraryURL)?.count == 1, "failed catalog save retains its prior valid records")
+
+        let recovered = DownloadModel(preferences: preferences, stateURL: state)
+        try expect(recovered.papers.count == 3, "restart recovers missing successes and distinct versions, not failed tasks or duplicate history")
+        try expect(try encoder.encode(recovered.papers.first { $0.id == retained.id }!) == retainedBytes,
+                   "recovery preserves edited title, tags, favorite, read/removal state, version check and relinked path exactly")
+        try expect(recovered.papers.first { $0.identity == LibraryPaper(missing).identity }?.file == missing.savedURL,
+                   "newest successful retry wins when the catalog lacks that resource")
+        let recoveredBytes = try encoder.encode(recovered.papers)
+        let restarted = DownloadModel(preferences: preferences, stateURL: state)
+        try expect(try encoder.encode(restarted.papers) == recoveredBytes, "recovered catalog is durable and restart is idempotent")
+
+        let corrupt = Data("unreadable catalog".utf8)
+        try corrupt.write(to: persistence.libraryURL)
+        let protected = DownloadModel(preferences: preferences, stateURL: state)
+        protected.persistWorkspace()
+        try expect(!protected.libraryWritable && protected.papers.isEmpty && protected.libraryNotice != nil &&
+                   (try Data(contentsOf: persistence.libraryURL)) == corrupt,
+                   "recovery never replaces a damaged read-only catalog with download history")
+        print("PASS library recovery: independent write failure, restart, newest success, deduplication, metadata protection and corrupt catalog")
     }
 }

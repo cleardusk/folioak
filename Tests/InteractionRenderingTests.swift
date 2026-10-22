@@ -1252,6 +1252,21 @@ extension CoreTests {
             try expect(input(view) === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1, "cleared idle draft stays full-size without replacing its native view")
             model.input = "https://example.com/video.mp4"; await settle()
             try expect(input(view) === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1, "pasted and dropped content preserves the full-size input")
+            editor.setSelectedRange(NSRange(location: 8, length: 0))
+            editor.setMarkedText("中文", selectedRange: NSRange(location: 2, length: 0),
+                                 replacementRange: NSRange(location: NSNotFound, length: 0))
+            let markedDraft = editor.string, markedRange = editor.markedRange(), markedSelection = editor.selectedRange()
+            model.busy = true; await settle()
+            try expect(input(view) === editor && editor.isEditable && editor.hasMarkedText() &&
+                       editor.string == markedDraft && editor.markedRange() == markedRange && editor.selectedRange() == markedSelection,
+                       "starting downloads preserves the mounted editable input, native composition and selection")
+            model.cancelling = true; await settle()
+            try expect(input(view) === editor && editor.isEditable && editor.hasMarkedText(),
+                       "stopping the queue still permits safe draft editing")
+            model.busy = false; model.cancelling = false; await settle()
+            try expect(input(view) === editor && editor.hasMarkedText() && editor.markedRange() == markedRange,
+                       "queue completion does not remount or discard the input method composition")
+            editor.unmarkText()
             model.input = ""; await settle()
             if CommandLine.arguments.contains("--snapshots") {
                 func snapshot(_ suffix: String) async throws {

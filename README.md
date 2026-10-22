@@ -22,7 +22,7 @@ Folioak checks for stable updates daily while running. Automatic checks can be d
 
 ## Use
 
-1. Paste or drop links, then click Download or press `⌘ Return`. Click again to stop. The menu bar panel also accepts links, including during a download.
+1. Paste or drop links, then click Download or press `⌘ Return`. Both the main window and menu bar panel let you add to the queue during a download. Use Stop to cancel active and waiting downloads; your draft stays editable.
 2. Find saved files in the document or media library. Switch between list and grid, double-click to open, or press Space to preview. Clearing download history keeps library entries and files.
 3. Set your save location, language, and appearance in Settings. Naming Rules supports `{title}`, `{date}`, `{source}`, and `{id}` with a live preview; existing files are never overwritten.
 

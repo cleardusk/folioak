@@ -496,6 +496,9 @@ struct DownloaderView: View {
                 }
                 else {
                     papers.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.recordAnimation)
+                        // Keep the filter and a readable queue row beside expanded
+                        // smart results; the native draft viewport can yield space.
+                        .frame(minHeight: page == .downloads && !model.downloads.isEmpty ? 110 : 0)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
             footer.padding(.top, 12).padding(.bottom, 16)
@@ -719,7 +722,7 @@ struct DownloaderView: View {
 
     private var downloadActions: some View {
         Menu {
-            Button(L("从文本文件导入链接…"), action: model.importLinks).disabled(model.busy)
+            Button(L("从文本文件导入链接…"), action: model.importLinks).disabled(model.isTerminating)
             if model.hasMediaInput {
                 Toggle(L("视频仅下载音频"), isOn: Binding(get: { model.mediaFormat == .audio }, set: { model.mediaFormat = $0 ? .audio : .automatic }))
                     .disabled(model.busy)
@@ -740,7 +743,7 @@ struct DownloaderView: View {
     private var pasteButton: some View {
         Button(action: model.paste) { Image(systemName: "doc.on.clipboard").frame(width: 32, height: 32).contentShape(Rectangle()) }
             .buttonStyle(RoundButtonStyle(palette: palette))
-            .help(L("追加剪贴板中的链接")).accessibilityLabel(L("粘贴链接")).disabled(model.busy)
+            .help(L("追加剪贴板中的链接")).accessibilityLabel(L("粘贴链接")).disabled(model.isTerminating)
     }
 
     private var composer: some View {
@@ -748,74 +751,61 @@ struct DownloaderView: View {
         let reviewing = model.smartInput.resolution != nil
         let resolving = model.smartInput.resolving
         return VStack(alignment: .leading, spacing: 0) {
-            if model.busy && !reviewing && !resolving {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(L("下载进行中")).font(.system(size: 12)).foregroundStyle(secondary)
-                    Spacer(minLength: 8)
-                    primaryAction(recognition: recognition)
-                }.padding(.horizontal, WorkspaceMetrics.Space.inset).padding(.vertical, 12)
-                if !model.smartInput.remainingRequirements.isEmpty {
-                    SmartInputDetailsView(label: L("还有 \(model.smartInput.remainingRequirements.count) 项待补充"),
-                        details: model.smartInput.remainingRequirements, palette: palette, identifier: "smart-input-unresolved")
-                        .padding(.horizontal, WorkspaceMetrics.Space.inset).padding(.bottom, 12)
-                }
-            } else {
-                if reviewing || resolving {
-                    Text(model.input.trimmingCharacters(in: .whitespacesAndNewlines))
-                        .font(.system(size: 12)).foregroundStyle(secondary)
-                        .lineLimit(1).help(model.input).frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, WorkspaceMetrics.Space.inset)
-                        .padding(.top, 16).padding(.bottom, 14)
-                        .accessibilityIdentifier("smart-input-request")
-                    if reviewing { Divider().padding(.horizontal, WorkspaceMetrics.Space.inset).padding(.bottom, 16) }
-                } else {
-                    HStack(alignment: .top, spacing: 4) {
-                        LinkInput(model: model, focused: $inputFocused, palette: palette)
-                            .frame(height: WorkspaceMetrics.inputHeight)
-                        HStack(spacing: 0) { pasteButton; downloadActions }
-                            .buttonStyle(.plain).padding(.top, 2)
-                    }
-                    .padding(.leading, WorkspaceMetrics.Space.compact).padding(.trailing, 10).padding(.top, 14)
-                }
-                SmartInputStatusView(state: model.smartInput, palette: palette,
-                                     showsReviewActions: false, onEdit: editSmartRequest)
+            if reviewing || resolving {
+                Text(model.input.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.system(size: 12)).foregroundStyle(secondary)
+                    .lineLimit(1).help(model.input).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, WorkspaceMetrics.Space.inset)
-                    .padding(.bottom, resolving ? 16 : 0)
-                if !resolving {
-                    HStack(spacing: WorkspaceMetrics.Space.regular) {
-                        DirectoryMenu(model: model, palette: palette, pdfOnly: model.smartInput.selectsOnlyPDFs)
-                            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 36, alignment: .leading)
-                        Spacer(minLength: WorkspaceMetrics.Space.compact)
-                        if reviewing {
-                            SmartInputReviewActionsView(state: model.smartInput, palette: palette,
-                                submitShortcut: KeyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)),
-                                                                 modifiers: model.shortcuts[.download].swiftModifiers),
-                                onEdit: editSmartRequest)
-                        } else {
-                            if model.hasMediaInput && model.mediaFormat == .audio {
-                                Button { model.mediaFormat = .automatic } label: {
-                                    Image(systemName: "waveform").foregroundStyle(secondary)
-                                }.buttonStyle(.plain).help(L("视频链接仅保存音频，点按恢复下载视频"))
-                                    .accessibilityLabel(L("仅音频模式，点按恢复视频"))
-                            }
-                            if SmartInput.isDirect(model.input) {
-                                InputRecognitionChips(recognition: recognition, palette: palette)
-                            }
-                            primaryAction(recognition: recognition)
-                        }
-                    }.padding(.horizontal, WorkspaceMetrics.Space.inset)
-                        .padding(.top, reviewing || model.smartInput.message != nil ? 14 : 8)
-                        .padding(.bottom, reviewing ? 14 : 18)
+                    .padding(.top, 16).padding(.bottom, 14)
+                    .accessibilityIdentifier("smart-input-request")
+                if reviewing { Divider().padding(.horizontal, WorkspaceMetrics.Space.inset).padding(.bottom, 16) }
+            } else {
+                HStack(alignment: .top, spacing: 4) {
+                    LinkInput(model: model, focused: $inputFocused, palette: palette)
+                        .frame(minHeight: 44, idealHeight: WorkspaceMetrics.inputHeight,
+                               maxHeight: WorkspaceMetrics.inputHeight)
+                    HStack(spacing: 0) { pasteButton; downloadActions }
+                        .buttonStyle(.plain).padding(.top, 2)
                 }
+                .padding(.leading, WorkspaceMetrics.Space.compact).padding(.trailing, 10).padding(.top, 14)
+            }
+            SmartInputStatusView(state: model.smartInput, palette: palette,
+                                 showsReviewActions: false, onEdit: editSmartRequest)
+                .padding(.horizontal, WorkspaceMetrics.Space.inset)
+                .padding(.bottom, resolving ? 16 : 0)
+            if !resolving {
+                HStack(spacing: WorkspaceMetrics.Space.regular) {
+                    DirectoryMenu(model: model, palette: palette, pdfOnly: model.smartInput.selectsOnlyPDFs)
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                    Spacer(minLength: WorkspaceMetrics.Space.compact)
+                    if reviewing {
+                        SmartInputReviewActionsView(state: model.smartInput, palette: palette,
+                            submitShortcut: KeyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)),
+                                                             modifiers: model.shortcuts[.download].swiftModifiers),
+                            onEdit: editSmartRequest)
+                    } else {
+                        if model.hasMediaInput && model.mediaFormat == .audio {
+                            Button { model.mediaFormat = .automatic } label: {
+                                Image(systemName: "waveform").foregroundStyle(secondary)
+                            }.buttonStyle(.plain).help(L("视频链接仅保存音频，点按恢复下载视频"))
+                                .accessibilityLabel(L("仅音频模式，点按恢复视频"))
+                        }
+                        if SmartInput.isDirect(model.input) {
+                            InputRecognitionChips(recognition: recognition, palette: palette)
+                        }
+                        primaryAction(recognition: recognition)
+                    }
+                }.padding(.horizontal, WorkspaceMetrics.Space.inset)
+                    .padding(.top, reviewing || model.smartInput.message != nil ? 14 : 8)
+                    .padding(.bottom, reviewing ? 14 : 18)
             }
         }
         .background(ThemePalette.color(palette.surface).contentShape(Rectangle()).onTapGesture {
-            if model.busy { dismissEditing() } else if !reviewing && !resolving { model.focusInput() }
+            if !reviewing && !resolving { model.focusInput() }
         })
         .clipShape(RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel))
         .overlay {
-            if dropTargeted && !model.busy {
+            if dropTargeted && !model.isTerminating {
                 ZStack {
                     RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).fill(accent.opacity(0.07))
                     RoundedRectangle(cornerRadius: WorkspaceMetrics.Radius.panel).strokeBorder(accent, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
@@ -837,23 +827,23 @@ struct DownloaderView: View {
         model.focusInput()
     }
 
+    private var stopAction: some View {
+        Button(action: model.cancel) {
+            HStack(spacing: 6) {
+                if model.cancelling { ProgressView().controlSize(.small); Text(L("正在取消")) }
+                else { Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)); Text(L("停止")) }
+            }
+        }.buttonStyle(RowActionStyle(palette: palette))
+            .keyboardShortcut(searchFocused || inputFocused || model.smartInput.resolving || model.smartInput.resolution != nil ? nil : .cancelAction).disabled(model.cancelling)
+            .help(model.cancelling ? L("正在取消") : L("取消下载（Esc）"))
+            .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
+    }
+
     @ViewBuilder private func primaryAction(recognition: InputRecognition) -> some View {
-        if model.smartInput.resolving {
-            EmptyView()
-        } else if model.busy {
-            Button(action: model.cancel) {
-                HStack(spacing: 6) {
-                    if model.cancelling { ProgressView().controlSize(.small); Text(L("正在取消")) }
-                    else { Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)); Text(L("停止")) }
-                }
-            }.buttonStyle(RowActionStyle(palette: palette))
-                .keyboardShortcut(searchFocused ? nil : .cancelAction).disabled(model.cancelling)
-                .help(model.cancelling ? L("正在取消") : L("取消下载（Esc）"))
-                .accessibilityLabel(model.cancelling ? L("正在取消") : L("取消下载"))
-        } else if model.smartInput.resolution == nil {
+        if !model.smartInput.resolving && model.smartInput.resolution == nil {
             let count = recognition.total
             let actionLabel = model.smartInput.failed ? L("重试") : !SmartInput.isDirect(model.input) && !model.input.isEmpty ? L("查找资源") :
-                count == 0 ? L("开始下载") : L("下载 \(count) 项")
+                model.busy ? L("加入队列") : count == 0 ? L("开始下载") : L("下载 \(count) 项")
             Button(action: model.start) {
                 HStack(spacing: 6) {
                     Image(systemName: model.smartInput.failed ? "arrow.clockwise" : !SmartInput.isDirect(model.input) && !model.input.isEmpty
@@ -863,7 +853,7 @@ struct DownloaderView: View {
             }
                 .buttonStyle(PrimaryActionStyle(palette: palette))
                 .keyboardShortcut(KeyEquivalent(Character(model.shortcuts[.download].key)), modifiers: model.shortcuts[.download].swiftModifiers)
-                .disabled(model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.smartInput.needsSetup)
+                .disabled(model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.smartInput.needsSetup || model.cancelling || model.libraryMutationInProgress || model.isTerminating)
                 .help(L("开始下载（\(model.shortcuts[.download].label)）"))
                 .accessibilityLabel(actionLabel)
         }
@@ -1114,7 +1104,7 @@ struct DownloaderView: View {
                         Label(L("已完成 \(model.successes) 项"), systemImage: "checkmark.circle.fill").foregroundStyle(UIColors.success).lineLimit(1)
                     } else { Text(L(model.summary)).lineLimit(1) }
                     Spacer()
-
+                    if model.busy { stopAction }
                 } else if page == .logs {
                     Text(L("\(visibleLogs.count) 条")).monospacedDigit()
                     Spacer()
@@ -1125,7 +1115,8 @@ struct DownloaderView: View {
                     else if !model.checkingVersions.isEmpty { Text(L("正在检查版本 · 剩余 \(model.checkingVersions.count) 篇")) }
                     Spacer()
                 }
-            }.font(.system(size: 11)).foregroundStyle(secondary).frame(height: 18)
+            }.font(.system(size: 11)).foregroundStyle(secondary)
+                .frame(height: page == .downloads && model.busy ? 28 : 18)
         }
     }
 

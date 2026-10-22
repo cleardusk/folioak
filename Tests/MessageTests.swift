@@ -113,12 +113,17 @@ extension CoreTests {
         let state = root.appendingPathComponent("queue-messages/workspace.json")
         let output = root.appendingPathComponent("queue-message-files")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        let failing = DownloadEngine(transport: MockTransport(sourcePDF: pdf, metadata: [.status(403)]), requestInterval: 0, retryDelay: 0)
+        let failing = DownloadEngine(transport: MockTransport(sourcePDF: pdf, metadata: [.status(403), .status(404)]), requestInterval: 0, retryDelay: 0)
         let queue = DownloadModel(engine: failing, preferences: preferences, stateURL: state)
-        queue.directory = output; queue.input = "2501.12345v2\nbad-link"; queue.start()
+        queue.directory = output
+        let mixedDraft = "2501.12345v2\nbad-link"
+        queue.input = mixedDraft; queue.start()
+        try expect(queue.smartInput.needsSetup && queue.items.isEmpty && queue.input == mixedDraft,
+                   "mixed invalid input preserves the complete draft for intelligent setup without partial queue failures")
+        queue.input = "2501.12345v2\n2502.12345v2"; queue.start()
         try await waitForQueue(queue)
         let saved = try WorkspaceStore.read(state)!
-        try expect(saved.items.map { $0.errorMessage?.id } == [DiagnosticMessage.ID.forbidden.rawValue, DiagnosticMessage.ID.invalidInput.rawValue] &&
+        try expect(saved.items.map { $0.errorMessage?.id } == [DiagnosticMessage.ID.forbidden.rawValue, DiagnosticMessage.ID.notFound.rawValue] &&
                    saved.logs.contains { $0.diagnostic?.id == DiagnosticMessage.ID.forbidden.rawValue } &&
                    saved.logs.contains { $0.diagnostic?.id == DiagnosticMessage.ID.finished.rawValue },
                    "queue failures and completion diagnostics persist stable identities")
