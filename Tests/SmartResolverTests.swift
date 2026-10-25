@@ -1042,9 +1042,9 @@ extension CoreTests {
         let history = try observations(requests.last!)
         let finalTools = final["tools"] as! [[String: Any]]
         let official = (history[2]["resources"] as! [[String: Any]])[0]["official_metadata"] as? [String: Any]
-        try expect(result.modelCalls == SmartInput.modelCallLimit && result.toolCalls == SmartInput.readCallLimit &&
-                   history.count == 4 && history.last?["remaining_read_calls"] as? Int == 0 &&
-                   finalTools.count == 1 && (finalTools[0]["function"] as? [String: Any])?["name"] as? String == "propose_downloads" &&
+        try expect(result.modelCalls == 5 && result.toolCalls == 4 &&
+                   history.count == 4 && history.last?["remaining_read_calls"] as? Int == SmartInput.readCallLimit - 4 &&
+                   finalTools.count == 3 &&
                    result.selections.map(\.candidateID) == ["r3", "r5"] && result.unresolved.isEmpty &&
                    official?["title"] as? String == "Deep Residual Learning for Image Recognition",
                    "the agent can search, read, refine, read again and propose both requested files inside the complete budget")
@@ -1101,7 +1101,7 @@ extension CoreTests {
                        ["1512.03385v1", "1512.03385v2", "1512.03385"],
                    "abs/pdf/html aliases share one candidate while explicit revisions and an unpinned latest remain distinct")
 
-        // Four page reads can expose 80 links alongside the 10 supplied pages.
+        // Each allowed page read can expose 20 links alongside the supplied pages.
         // The last legitimate ID must remain selectable instead of being lost
         // to the previous 30-candidate ceiling.
         let supplied = (1...SmartInput.targetLimit).map { "https://example.com/page\($0)" }.joined(separator: " ")
@@ -1117,10 +1117,10 @@ extension CoreTests {
             metadata: ScriptedSmartTransport([])).resolve(supplied + " 找到最后一份附件", apiKey: key, progress: { _ in })
         let capacityRequests = await capacityAPI.requests
         let allObserved = try observations(capacityRequests.last!).flatMap { $0["resources"] as! [[String: Any]] }
-        try expect(allObserved.count == 80 && capacity.selections.map(\.candidateID) == ["r\(SmartInput.candidateLimit)"] &&
+        try expect(allObserved.count == SmartInput.readCallLimit * 20 && capacity.selections.map(\.candidateID) == ["r\(SmartInput.candidateLimit)"] &&
                    allObserved.last?["id"] as? String == "r\(SmartInput.candidateLimit)" &&
-                   capacity.candidates.last?.url.path == "/batch4/paper20.pdf",
-                   "the bounded registry can retain every link permitted by the four-read budget")
+                   capacity.candidates.last?.url.path == "/batch\(SmartInput.readCallLimit)/paper20.pdf",
+                   "the bounded registry can retain every link permitted by the configured read budget")
         print("PASS adaptive retrieval, stable IDs with fresh evidence, version-aware deduplication and candidate capacity")
     }
 

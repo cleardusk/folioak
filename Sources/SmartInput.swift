@@ -144,9 +144,10 @@ extension SmartResolving {
 
 enum SmartInput {
     static let targetLimit = 10
-    static let modelCallLimit = 5
-    static let readCallLimit = 4
-    static let candidateLimit = 90
+    static let readCallLimit = 10
+    // Allow one model turn per read and a final download proposal.
+    static let modelCallLimit = readCallLimit + 1
+    static let candidateLimit = targetLimit + readCallLimit * 20
     static let inputLimit = 8 * 1024
     static let deadline = SmartThinkingEffort.off.deadline
     private static let attachedCommand = try! NSRegularExpression(
