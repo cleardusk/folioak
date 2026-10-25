@@ -212,7 +212,8 @@ private struct WorkspaceUpdateButton: View {
     static let components = tools.map { AboutInformation.components(in: $0) } ?? []
     static let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap { NSImage(contentsOf: $0) }
         ?? NSImage(contentsOfFile: "Resources/AppIcon.icns")
-    static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    static let version = Bundle.main.object(forInfoDictionaryKey: "FolioakDisplayVersion") as? String
+        ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
 }
 
