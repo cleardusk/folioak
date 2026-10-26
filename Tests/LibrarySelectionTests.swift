@@ -163,7 +163,8 @@ extension CoreTests {
                 await settle()
                 window.makeKeyAndOrderFront(nil)
             }
-            try expect(NSApp.keyWindow === window, "library click targets the real key window")
+            try expect(NSApp.keyWindow === window,
+                "library click targets the real key window: page=\(page.rawValue), language=\(language.rawValue), scheme=\(scheme), active=\(NSApp.isActive), key=\(String(describing: NSApp.keyWindow)), sheet=\(String(describing: window.attachedSheet)), modal=\(String(describing: NSApp.modalWindow))")
             let location = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y), to: nil)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 NSApp.sendEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
