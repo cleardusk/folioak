@@ -155,6 +155,9 @@ struct BrandMark: View {
     let tapped: () -> Void
     let celebrate: (_ grand: Bool) -> Void
     static let threshold = 5
+    #if TESTING
+    static var tapTimeOverride: Date?
+    #endif
     @WorkspaceViewState private var taps = 0
     @WorkspaceViewState private var lastTap = Date.distantPast
     @WorkspaceViewState private var spin = 0.0
@@ -174,7 +177,11 @@ struct BrandMark: View {
 
     private func tap() {
         tapped()
+        #if TESTING
+        let now = Self.tapTimeOverride ?? Date()
+        #else
         let now = Date()
+        #endif
         taps = now.timeIntervalSince(lastTap) < 0.6 ? taps + 1 : 1
         lastTap = now
         // Every fifth tap of a streak is a full round; taps between rounds

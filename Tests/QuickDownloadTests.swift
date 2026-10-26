@@ -1292,6 +1292,9 @@ extension CoreTests {
     }
 
     @MainActor static func brandEasterEggTests() async throws {
+        let previousTapTime = BrandMark.tapTimeOverride
+        BrandMark.tapTimeOverride = Date()
+        defer { BrandMark.tapTimeOverride = previousTapTime }
         let suite = "folioak-brand-egg-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
@@ -1310,6 +1313,8 @@ extension CoreTests {
         let location = host.convert(NSPoint(x: 80, y: host.isFlipped ? 55 : host.bounds.height - 55), to: nil)
         func taps(_ count: Int, interval: UInt64) async throws {
             for _ in 0..<count {
+                // Keep the simulated cadence independent of CI render latency.
+                BrandMark.tapTimeOverride = BrandMark.tapTimeOverride!.addingTimeInterval(Double(interval) / 1_000_000_000)
                 for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                     try await window.dispatchQueuedMouseEvent(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!)
@@ -1322,6 +1327,7 @@ extension CoreTests {
         try await taps(4, interval: 120_000_000)
         try expect(LeafBurst.triggered == start, "four quick taps keep the leaf burst hidden")
         try await Task.sleep(nanoseconds: 700_000_000)
+        BrandMark.tapTimeOverride = BrandMark.tapTimeOverride!.addingTimeInterval(0.7)
         try await taps(4, interval: 120_000_000)
         try expect(LeafBurst.triggered == start, "a pause resets the tap count")
         try await taps(1, interval: 120_000_000)
@@ -1331,6 +1337,7 @@ extension CoreTests {
         try await taps(3, interval: 120_000_000)
         try expect(LeafBurst.grandTriggered == grandStart + 2, "the tenth tap of a streak starts another full round")
         try await Task.sleep(nanoseconds: 1_200_000_000)
+        BrandMark.tapTimeOverride = BrandMark.tapTimeOverride!.addingTimeInterval(1.2)
         try await taps(5, interval: 120_000_000)
         try expect(LeafBurst.grandTriggered == grandStart + 3, "five more taps after a pause start a new round over the first")
         try await taps(5, interval: 120_000_000)
