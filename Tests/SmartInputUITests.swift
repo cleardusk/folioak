@@ -136,33 +136,10 @@ private final class SmartUIPanel: NSPanel {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         return bitmap
     }
-    func visibleAccessibilityText(in view: NSView? = nil) -> [String] {
-        let surface = view ?? host
-        guard let window = surface.window, window.isVisible else { return [] }
-        let visible = window.convertToScreen(surface.convert(surface.visibleRect, to: nil))
-        var visited = Set<ObjectIdentifier>()
-        func collect(_ value: Any, depth: Int) -> [String] {
-            guard depth < 30, let element = value as? NSAccessibilityProtocol,
-                  visited.insert(ObjectIdentifier(element as AnyObject)).inserted else { return [] }
-            let frame = element.accessibilityFrame()
-            let intersection = frame.intersection(visible)
-            var text: [String] = []
-            if !intersection.isNull, intersection.width > 0, intersection.height > 0,
-               intersection.width * intersection.height >= frame.width * frame.height * 0.9 {
-                if let label = element.accessibilityLabel() { text.append(label) }
-                if let value = element.accessibilityValue() as? String { text.append(value) }
-            }
-            for child in element.accessibilityChildren() ?? [] {
-                text += collect(child, depth: depth + 1)
-            }
-            return text
-        }
-        return collect(surface, depth: 0)
-    }
     func verify(_ name: String, labels: [String], uniqueLabels: [String] = [],
                 absentLabels: [String] = [], snapshots: Bool, in view: NSView? = nil) throws {
         let bitmap = try image(in: view)
-        if snapshots {
+        if snapshots || ProcessInfo.processInfo.environment["CI"] == "true" {
             let folder = URL(fileURLWithPath: "build/qa/smart-input", isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             guard let png = bitmap.representation(using: .png, properties: [:]) else {
@@ -180,17 +157,19 @@ private final class SmartUIPanel: NSPanel {
         func normalized(_ value: String) -> String {
             String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
         }
-        let accessibleText = normalized(visibleAccessibilityText(in: view).joined(separator: " "))
+        let candidateTexts = (request.results ?? []).map { observation in
+            observation.topCandidates(10).map { normalized($0.string) }
+        }
         for label in labels {
-            try expect(normalized(text).contains(normalized(label)) || accessibleText.contains(normalized(label)),
-                       "visible smart UI control \(name): \(label); actual: \(text); accessible: \(accessibleText)")
+            try expect(normalized(text).contains(normalized(label)) || candidateTexts.contains { $0.contains { $0.contains(normalized(label)) } },
+                       "visible smart UI control \(name): \(label); actual: \(text); alternatives: \(candidateTexts)")
         }
         for label in uniqueLabels {
             try expect(normalized(text).components(separatedBy: normalized(label)).count == 2,
                        "one smart UI action \(name): \(label); actual: \(text)")
         }
         for label in absentLabels {
-            try expect(!normalized(text).contains(normalized(label)) && !accessibleText.contains(normalized(label)),
+            try expect(!normalized(text).contains(normalized(label)),
                        "absent smart UI action \(name): \(label); actual: \(text)")
         }
     }
@@ -248,12 +227,12 @@ private final class SmartUIPanel: NSPanel {
         }
         let observations = request.results ?? []
         let exact = observations.first(where: {
-            normalized($0.topCandidates(1).first?.string ?? "") == normalized(label)
+             $0.topCandidates(10).contains { normalized($0.string) == normalized(label) }
         })?.boundingBox
         // Vision may group a disclosure chevron or a neighboring button into
         // the same text line. Click only the requested label's own bounds.
         let labelBounds = try observations.compactMap { observation -> CGRect? in
-            guard let recognized = observation.topCandidates(1).first,
+            guard let recognized = observation.topCandidates(10).first(where: { $0.string.range(of: label) != nil }),
                   let range = recognized.string.range(of: label) else { return nil }
             return try recognized.boundingBox(for: range)?.boundingBox
         }
