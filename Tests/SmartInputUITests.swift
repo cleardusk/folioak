@@ -145,6 +145,7 @@ private final class SmartUIPanel: NSPanel {
         let request = VNRecognizeTextRequest()
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         request.recognitionLevel = .accurate
+        request.customWords = labels + uniqueLabels + absentLabels
         try VNImageRequestHandler(cgImage: image).perform([request])
         let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
         func normalized(_ value: String) -> String {
@@ -210,6 +211,7 @@ private final class SmartUIPanel: NSPanel {
         let request = VNRecognizeTextRequest()
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         request.recognitionLevel = .accurate
+        request.customWords = [label]
         try VNImageRequestHandler(cgImage: image).perform([request])
         func normalized(_ value: String) -> String {
             String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })

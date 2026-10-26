@@ -173,7 +173,9 @@ extension CoreTests {
             var found = false
             var titles: [String] = []
             var trackedMenu: NSMenu?
-            var actionIndex: Int?
+            var actionItem: NSMenuItem?
+            var actionTarget: AnyObject?
+            var actionSelector: Selector?
             var trackingEnded = false
             var dismissMenu: Timer?
             let point = NSPoint(x: view.bounds.width - 40, y: view.isFlipped ? 38 : view.bounds.height - 38)
@@ -182,7 +184,12 @@ extension CoreTests {
                 trackedMenu = menu
                 titles = menu.items.map(\.title)
                 let index = menu.items.firstIndex(where: { $0.title == title })
-                actionIndex = index
+                if let index {
+                    let item = menu.items[index]
+                    actionItem = item
+                    actionTarget = item.target
+                    actionSelector = item.action
+                }
                 found = index.map { menu.items[$0].isEnabled } ?? false
                 // Cancelling synchronously inside didBeginTracking leaves a
                 // SwiftUI Menu pressed. Dismiss after tracking starts; dispatch
@@ -219,13 +226,16 @@ extension CoreTests {
             try expect(found, "native \(page.rawValue) menu exposes enabled \(title): \(titles)")
             try expect(trackingEnded, "native library menu finishes tracking before the next UI action")
             if perform {
-                guard let menu = trackedMenu, let index = actionIndex else {
+                guard let item = actionItem, let selector = actionSelector else {
                     throw TestFailure.failed("native library menu retains its verified action")
                 }
                 // A native menu may end before a zero-delay tracking timer runs.
                 // Keep action delivery in the ordinary test flow so it cannot
                 // be lost when tracking closes or a resulting sheet takes focus.
-                menu.performActionForItem(at: index)
+                // SwiftUI can rebuild the menu after tracking ends. Retain the
+                // verified item's target/action instead of reusing its old index.
+                try expect(NSApp.sendAction(selector, to: actionTarget, from: item),
+                           "native library menu delivers its verified action: \(title)")
                 await settle()
             }
         }
