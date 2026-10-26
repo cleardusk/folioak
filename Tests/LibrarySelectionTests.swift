@@ -158,6 +158,11 @@ extension CoreTests {
             // Synthetic events bypass the WindowServer focus transfer that a
             // physical click performs, including after a native sheet closes.
             window.makeKeyAndOrderFront(nil)
+            for _ in 0..<20 {
+                if NSApp.keyWindow === window { break }
+                await settle()
+                window.makeKeyAndOrderFront(nil)
+            }
             try expect(NSApp.keyWindow === window, "library click targets the real key window")
             let location = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y), to: nil)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {

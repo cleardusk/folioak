@@ -124,9 +124,15 @@ private final class SmartUIPanel: NSPanel {
     static func descendants(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(descendants) }
     func image(in view: NSView? = nil) throws -> NSBitmapImageRep {
         let view = view ?? host
-        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        // CI's virtual display may use a 1x backing scale. Render small CJK
+        // labels at a fixed 2x resolution instead of relying on that display.
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
+            pixelsWide: Int(ceil(view.bounds.width * 2)), pixelsHigh: Int(ceil(view.bounds.height * 2)),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
             throw TestFailure.failed("smart UI bitmap allocation")
         }
+        bitmap.size = view.bounds.size
         view.cacheDisplay(in: view.bounds, to: bitmap)
         return bitmap
     }
