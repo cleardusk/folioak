@@ -106,9 +106,13 @@ private final class SmartUIPanel: NSPanel {
                    "the minimum window keeps a real download row visible below the input panel")
     }
     func scrollDetailsToEnd() async throws {
-        guard let scroll = Self.descendants(host).compactMap({ $0 as? NSScrollView }).first(where: {
-            !$0.isHiddenOrHasHiddenAncestor && $0.bounds.height <= 112 && $0.bounds.height >= 80 &&
-            ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height + 10
+        let scrollViews: [NSScrollView] = Self.descendants(host).compactMap { $0 as? NSScrollView }
+        guard let scroll = scrollViews.first(where: { scroll in
+            guard !scroll.isHiddenOrHasHiddenAncestor else { return false }
+            let height: CGFloat = scroll.bounds.height
+            guard height >= 80, height <= 112 else { return false }
+            let documentHeight: CGFloat = scroll.documentView?.bounds.height ?? 0
+            return documentHeight > scroll.contentView.bounds.height + 10
         }), let document = scroll.documentView else {
             throw TestFailure.failed("expanded details have a bounded native scroll region")
         }
