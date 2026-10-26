@@ -368,8 +368,13 @@ extension CoreTests {
                     NotificationCenter.default.removeObserver(observer)
                     NotificationCenter.default.removeObserver(rowEndObserver); cancel?.invalidate()
                 }
-                try await preserveSelection(after: NSPoint(x: action.maxX - 16, y: action.midY), tracksMouse: true, message: "native row menu preserves selection")
-                try expect(tracked && rowTrackingEnded && !rowForcedDismissal, "row action menu receives its native click and Escape dismissal")
+                try await click(NSPoint(x: action.maxX - 16, y: action.midY), tracksMouse: true)
+                for _ in 0..<80 where !rowTrackingEnded { try await Task.sleep(nanoseconds: 25_000_000) }
+                try expect(tracked && rowTrackingEnded && !rowForcedDismissal,
+                    "row action menu receives its native click and Escape dismissal: page=\(page.rawValue) mode=\(mode) style=\(scrollerStyle) began=\(tracked) ended=\(rowTrackingEnded) forced=\(rowForcedDismissal) titles=\(menuTitles)")
+                let beforeMenuOpen = opened
+                try key(36, "\r")
+                try expect(opened == beforeMenuOpen + 1, "native row menu preserves selection")
                 try expect(menuTitles.count == (page == .library ? 8 : 6), "healthy library row exposes its compact action count: \(menuTitles)")
                 for title in ["快速预览", "重命名…", "在 Finder 中显示", "详情…", "移到废纸篓…"] {
                     try expect(menuTitles.contains(L(title)), "native compact menu preserves reachable \(title)")
