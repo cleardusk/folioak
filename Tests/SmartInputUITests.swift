@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Vision
+import CoreImage
 
 private final class SmartUICredentials: SmartCredentialStorage {
     private var value: String?
@@ -136,6 +137,23 @@ private final class SmartUIPanel: NSPanel {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         return bitmap
     }
+    func alternateTextObservations(_ image: CGImage, words: [String]) throws -> [VNRecognizedTextObservation] {
+        let source = CIImage(cgImage: image)
+        let context = CIContext(options: [.useSoftwareRenderer: true])
+        let variants = [source.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0]),
+                        source.applyingFilter("CIColorInvert")]
+        return try variants.flatMap { variant in
+            guard let rendered = context.createCGImage(variant, from: variant.extent) else {
+                throw TestFailure.failed("smart UI OCR contrast rendering")
+            }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLanguages = ["zh-Hans", "en-US"]
+            request.recognitionLevel = .accurate
+            request.customWords = words
+            try VNImageRequestHandler(cgImage: rendered).perform([request])
+            return request.results ?? []
+        }
+    }
     func verify(_ name: String, labels: [String], uniqueLabels: [String] = [],
                 absentLabels: [String] = [], snapshots: Bool, in view: NSView? = nil) throws {
         let bitmap = try image(in: view)
@@ -157,8 +175,17 @@ private final class SmartUIPanel: NSPanel {
         func normalized(_ value: String) -> String {
             String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
         }
-        let candidateTexts = (request.results ?? []).map { observation in
+        var candidateTexts = (request.results ?? []).map { observation in
             observation.topCandidates(10).map { normalized($0.string) }
+        }
+        if labels.contains(where: { label in
+            !normalized(text).contains(normalized(label)) && !candidateTexts.contains { $0.contains { $0.contains(normalized(label)) } }
+        }) {
+            // Vision versions disagree on small colored CJK labels. Re-read
+            // the same pixels with neutral contrast, still requiring exact text.
+            candidateTexts += try alternateTextObservations(image, words: labels).map { observation in
+                observation.topCandidates(10).map { normalized($0.string) }
+            }
         }
         for label in labels {
             try expect(normalized(text).contains(normalized(label)) || candidateTexts.contains { $0.contains { $0.contains(normalized(label)) } },
@@ -225,7 +252,12 @@ private final class SmartUIPanel: NSPanel {
         func normalized(_ value: String) -> String {
             String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
         }
-        let observations = request.results ?? []
+        var observations = request.results ?? []
+        if !observations.contains(where: { observation in
+            observation.topCandidates(10).contains { normalized($0.string).contains(normalized(label)) }
+        }) {
+            observations += try alternateTextObservations(image, words: [label])
+        }
         let exact = observations.first(where: {
              $0.topCandidates(10).contains { normalized($0.string) == normalized(label) }
         })?.boundingBox
