@@ -105,7 +105,7 @@ extension CoreTests {
         try expect(model.acceptDrop([provider, proseProvider]), "accept native URL and text drag providers")
         let dropDeadline = ContinuousClock().now.advanced(by: .seconds(3))
         while !model.input.contains("1706.03762v1") && ContinuousClock().now < dropDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
-        try expect(model.input == "2003.07733\nhttps://github.com/openai/math/blob/main/overview.pdf\nhttps://arxiv.org/abs/1706.03762v1", "drop appends in provider order and extracts prose without replacing input")
+        try expect(model.input == "2003.07733\nhttps://github.com/openai/math/blob/main/overview.pdf\n推荐：[Paper](https://arxiv.org/abs/1706.03762v1)", "drop appends in provider order and preserves prose without replacing input")
         model.busy = true
         let beforeBusyDrop = model.input
         try expect(model.acceptDrop([provider]), "busy queue accepts a new draft drop")
@@ -113,7 +113,7 @@ extension CoreTests {
         while model.input == beforeBusyDrop && ContinuousClock().now < busyDropDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
         try expect(model.input == beforeBusyDrop + "\nhttps://github.com/openai/math/blob/main/overview.pdf", "busy drop appends to draft without submitting")
         model.busy = false; model.input = ""
-        model.appendInput("论文 [Example](https://arxiv.org/abs/2501.12345v2)")
+        model.appendInput("https://arxiv.org/abs/2501.12345v2")
         model.start(); try await waitForQueue(model)
         let item = model.items[0]
         try expect(item.diagnostics?.finishedAt != nil && item.state == .saved, "successful model finalizes diagnostics")
