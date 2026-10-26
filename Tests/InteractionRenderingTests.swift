@@ -1235,23 +1235,24 @@ extension CoreTests {
                 await settle()
             }
             await settle()
-            guard let editor = input(view), let scroll = editor.enclosingScrollView else { throw TestFailure.failed("full-size native input") }
-            try expect(abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1,
-                       "empty idle composer stays full-size with existing records at minimum window size")
+            guard let editor = input(view), let scroll = editor.enclosingScrollView else { throw TestFailure.failed("mounted native input") }
+            let inputHeight = scroll.bounds.height
+            try expect(inputHeight >= 44 && inputHeight <= WorkspaceMetrics.inputHeight + 1,
+                       "idle composer respects its adaptive height bounds at minimum window size: height=\(inputHeight)")
             model.focusInput(); await settle()
-            try expect(input(view) === editor && window.firstResponder === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1,
-                       "keyboard focus preserves the editor and its full height without moving the layout")
+            try expect(input(view) === editor && window.firstResponder === editor && abs(scroll.bounds.height - inputHeight) < 1,
+                       "keyboard focus preserves the editor and its adaptive height without moving the layout")
             editor.insertText("1706.03762", replacementRange: editor.selectedRange())
             editor.setSelectedRange(NSRange(location: 2, length: 4))
             model.objectWillChange.send(); await settle()
             try expect(input(view) === editor && editor.selectedRange() == NSRange(location: 2, length: 4), "ordinary redraw preserves the input selection")
             await clickFromTop(680, 470)
-            try expect(model.input == "1706.03762" && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1,
-                       "a nonempty draft stays expanded after focus leaves")
+            try expect(model.input == "1706.03762" && abs(scroll.bounds.height - inputHeight) < 1,
+                       "a nonempty draft preserves its height after focus leaves")
             model.input = ""; await settle()
-            try expect(input(view) === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1, "cleared idle draft stays full-size without replacing its native view")
+            try expect(input(view) === editor && abs(scroll.bounds.height - inputHeight) < 1, "cleared idle draft preserves its height without replacing its native view")
             model.input = "https://example.com/video.mp4"; await settle()
-            try expect(input(view) === editor && abs(scroll.bounds.height - WorkspaceMetrics.inputHeight) < 1, "pasted and dropped content preserves the full-size input")
+            try expect(input(view) === editor && abs(scroll.bounds.height - inputHeight) < 1, "pasted and dropped content preserves the input height")
             editor.setSelectedRange(NSRange(location: 8, length: 0))
             editor.setMarkedText("中文", selectedRange: NSRange(location: 2, length: 0),
                                  replacementRange: NSRange(location: NSNotFound, length: 0))
